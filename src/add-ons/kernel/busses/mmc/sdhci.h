@@ -21,7 +21,8 @@
 
 class SdhciBus {
 	public:
-								SdhciBus(struct registers* registers, uint8_t irq, bool poll);
+								SdhciBus(struct registers* registers, uint8_t irq,
+									bool poll, uint32 baseClockKHz = 0);
 								~SdhciBus();
 
 			void				EnableInterrupts(uint32_t mask);
@@ -37,12 +38,14 @@ class SdhciBus {
 			void				SetScanSemaphore(sem_id sem);
 			void				SetBusWidth(int width);
 			void				SetCardType(card_type type);
+			void				SetDmaWindow(phys_addr_t busOffset, bool coherent);
 			void				TerminateBus();
 
 	private:
 			bool				PowerOn();
 			void				PowerOff();
 			void				RecoverError();
+			void				_SyncForDevice(phys_addr_t address, size_t length);
 	static	status_t			_WorkerThread(void*);
 
 	private:
@@ -54,6 +57,10 @@ class SdhciBus {
 			status_t			fStatus;
 			thread_id			fWorkerThread;
 			card_type			fCardType;
+			uint32				fBaseClockKHz;
+				// 0: from the capabilities register
+			phys_addr_t			fDmaBusOffset;
+			bool				fDmaCoherent;
 };
 
 
@@ -63,10 +70,48 @@ class SdhciDevice {
 		uint8_t			fRicohOriginalMode;
 };
 
+/*!	A register narrower than 32 bits, accessed through the aligned 32-bit word
+	that contains it. Some controllers (the Raspberry Pi 4's "brcm,bcm2711-emmc2")
+	ignore 8 and 16-bit accesses, and every SDHCI register may be accessed as
+	part of a 32-bit word, so this is used for all of them. The object lives at
+	the register's address in the mapped register block; its storage only
+	reserves the register's bytes in struct registers.
+	Read-modify-write is harmless for all registers that share a word with
+	narrower ones, except the transfer mode, which shares one with the command
+	register (see Command).
+*/
+template<typename T>
+class NarrowRegister {
+	public:
+		operator T() const
+		{
+			return (T)(*_Word() >> _Shift());
+		}
+
+		NarrowRegister& operator=(T value)
+		{
+			const uint32_t mask = (uint32_t)(T)~0 << _Shift();
+			*_Word() = (*_Word() & ~mask) | ((uint32_t)value << _Shift());
+			return *this;
+		}
+
+		NarrowRegister& operator|=(T value) { return *this = (T)(*this | value); }
+		NarrowRegister& operator&=(T value) { return *this = (T)(*this & value); }
+
+	private:
+		volatile uint32_t* _Word() const
+			{ return (volatile uint32_t*)((addr_t)this & ~(addr_t)3); }
+		int _Shift() const
+			{ return ((addr_t)this & 3) * 8; }
+
+		T fStorage;
+} __attribute__((packed));
+
+
+// Bits of the transfer mode register, which is written together with the
+// command register (Command::SendCommand()).
 class TransferMode {
 	public:
-		uint16_t Bits() { return fBits; }
-
 		// TODO response interrupt
 		// TODO response check
 
@@ -89,19 +134,18 @@ class TransferMode {
 
 		static const uint8_t kDmaEnable = 1;
 		static const uint8_t kNoDmaOrNoData = 0;
-		
-	private:
-		volatile uint16_t fBits;
 } __attribute__((packed));
 
 
+// The transfer mode and command registers. They are written with a single
+// 32-bit store: writing the command register issues the command, so writing
+// the transfer mode on its own (or read-modify-writing it as part of the word)
+// would issue a command as well.
 class Command {
 	public:
-		uint16_t Bits() { return fBits; }
-
-		void SendCommand(uint8_t command, uint8_t type)
+		void SendCommand(uint8_t command, uint8_t type, uint16_t transferMode)
 		{
-			fBits = (command << 8) | type;
+			fBits = ((uint32_t)((command << 8) | type) << 16) | transferMode;
 		}
 
 		static const uint8_t kDataPresent = 0x20;
@@ -127,7 +171,7 @@ class Command {
 			| k32BitResponse;
 
 	private:
-		volatile uint16_t fBits;
+		volatile uint32_t fBits;
 } __attribute__((packed));
 
 
@@ -157,7 +201,7 @@ class PowerControl {
 		static const uint8_t k3v0 = 6 << 1;
 		static const uint8_t k1v8 = 5 << 1;
 	private:
-		volatile uint8_t fBits;
+		NarrowRegister<uint8_t> fBits;
 
 		static const uint8_t kBusPowerOn = 1;
 } __attribute__((packed));
@@ -169,10 +213,12 @@ class ClockControl
 		uint16_t Bits() { return fBits; }
 
 		uint16_t SetDivider(uint16_t divider) {
-			if (divider == 1)
+			// The register holds half the divider; round up, so that the
+			// card clock never exceeds the requested frequency.
+			if (divider <= 1)
 				divider = 0;
 			else
-				divider /= 2;
+				divider = (divider + 1) / 2;
 			uint16_t bits = fBits & ~0xffc0;
 			bits |= divider << 8;
 			bits |= (divider >> 8) & 0xc0;
@@ -187,7 +233,7 @@ class ClockControl
 		void DisableSD() { fBits &= ~(1 << 2); }
 		void EnablePLL() { fBits |= 1 << 3; }
 	private:
-		volatile  uint16_t fBits;
+		NarrowRegister<uint16_t> fBits;
 } __attribute__((packed));
 
 
@@ -220,7 +266,7 @@ class TimeoutControl {
 			fBits = i - 13;
 		}
 	private:
-		volatile  uint8_t fBits;
+		NarrowRegister<uint8_t> fBits;
 } __attribute__((packed));
 
 
@@ -253,11 +299,14 @@ class SoftwareReset {
 		}
 
 	private:
-		volatile uint8_t fBits;
+		NarrowRegister<uint8_t> fBits;
 } __attribute__((packed));
 
 
-// #pragma mark Interrupt registers 
+// #pragma mark Interrupt registers
+// The interrupt status register is "write 1 to clear": acknowledge interrupts
+// by writing exactly their bits, never with a read-modify-write (|=), which
+// would also clear the ones that arrived meanwhile.
 #define SDHCI_INT_CMD_CMP			0x00000001	// command complete enable
 #define SDHCI_INT_TRANS_CMP			0x00000002	// transfer complete enable
 #define SDHCI_INT_BLOCK_GAP			0x00000004
@@ -304,31 +353,31 @@ class SoftwareReset {
 class Capabilities
 {
 	public:
-		uint8_t ClockMultiplier() { return (fBits >> 48) & 0xFF; }
-		uint8_t RetuningModes() { return (fBits >> 46) & 3; }
-		bool UseTuningForSDR50() { return (fBits >> 45) & 1; }
-		uint8_t RetuningTimerCount() { return (fBits >> 40) & 7; }
-		bool TypeDSupport() { return (fBits >> 38) & 1; }
-		bool TypeCSupport() { return (fBits >> 37) & 1; }
-		bool TypeASupport() { return (fBits >> 36) & 1; }
-		bool DDR50Support() { return (fBits >> 34) & 1; }
-		bool SDR104Support() { return (fBits >> 33) & 1; }
-		bool SDR50Support() { return (fBits >> 32) & 1; }
-		uint8_t SlotType() { return (fBits >> 30) & 3; }
-		bool AsynchronousInterrupts() { return (fBits >> 29) & 1; }
-		bool SystemBus64Bits() { return (fBits >> 28) & 1; }
-		uint8_t SupportedVoltages() { return (fBits >> 24) & 7; }
-		bool SuspendResume() { return (fBits >> 23) & 1; }
-		bool SimpleDMA() { return (fBits >> 22) & 1; }
-		bool HighSpeed() { return (fBits >> 21) & 1; }
-		bool AdvancedDMA() { return (fBits >> 19) & 1; }
-		bool Embedded8Bit() { return (fBits >> 18) & 1; }
-		uint8_t MaxBlockLength() { return (fBits >> 16) & 3; }
-		uint8_t BaseClockFrequency() { return (fBits >> 8) & 0xFF; }
+		uint8_t ClockMultiplier() { return (Bits() >> 48) & 0xFF; }
+		uint8_t RetuningModes() { return (Bits() >> 46) & 3; }
+		bool UseTuningForSDR50() { return (Bits() >> 45) & 1; }
+		uint8_t RetuningTimerCount() { return (Bits() >> 40) & 7; }
+		bool TypeDSupport() { return (Bits() >> 38) & 1; }
+		bool TypeCSupport() { return (Bits() >> 37) & 1; }
+		bool TypeASupport() { return (Bits() >> 36) & 1; }
+		bool DDR50Support() { return (Bits() >> 34) & 1; }
+		bool SDR104Support() { return (Bits() >> 33) & 1; }
+		bool SDR50Support() { return (Bits() >> 32) & 1; }
+		uint8_t SlotType() { return (Bits() >> 30) & 3; }
+		bool AsynchronousInterrupts() { return (Bits() >> 29) & 1; }
+		bool SystemBus64Bits() { return (Bits() >> 28) & 1; }
+		uint8_t SupportedVoltages() { return (Bits() >> 24) & 7; }
+		bool SuspendResume() { return (Bits() >> 23) & 1; }
+		bool SimpleDMA() { return (Bits() >> 22) & 1; }
+		bool HighSpeed() { return (Bits() >> 21) & 1; }
+		bool AdvancedDMA() { return (Bits() >> 19) & 1; }
+		bool Embedded8Bit() { return (Bits() >> 18) & 1; }
+		uint8_t MaxBlockLength() { return (Bits() >> 16) & 3; }
+		uint8_t BaseClockFrequency() { return (Bits() >> 8) & 0xFF; }
 		uint32_t TimeoutClockFrequency()
 		{
-			bool megahertz = (fBits >> 7) & 1;
-			uint32_t frequency = (fBits >> 0) & 0x1F;
+			bool megahertz = (Bits() >> 7) & 1;
+			uint32_t frequency = (Bits() >> 0) & 0x3F;
 			if (megahertz)
 				frequency *= 1000;
 			return frequency;
@@ -339,14 +388,21 @@ class Capabilities
 		static const uint8_t k1v8 = 4;
 
 	private:
-		uint64_t fBits;
+		// Two 32-bit registers, read separately
+		uint64_t Bits() { return fLow | ((uint64_t)fHigh << 32); }
+
+		volatile uint32_t fLow;
+		volatile uint32_t fHigh;
 } __attribute__((packed));
 
 
 class HostControllerVersion {
 	public:
-		const uint8_t specVersion;
-		const uint8_t vendorVersion;
+		uint8_t SpecVersion() { return fBits & 0xff; }
+		uint8_t VendorVersion() { return fBits >> 8; }
+
+	private:
+		NarrowRegister<uint16_t> fBits;
 } __attribute__((packed));
 
 
@@ -381,7 +437,7 @@ class HostControl {
 		static const uint8_t kDataTransferWidthMask
 			= kDataTransfer4Bit | kDataTransfer8Bit;
 	private:
-		volatile uint8_t value;
+		NarrowRegister<uint8_t> value;
 } __attribute__((packed));
 
 
@@ -403,7 +459,7 @@ class BlockSize {
 		static const uint16_t kDmaBoundary512K = 7;
 
 	private:
-		volatile uint16_t value;
+		NarrowRegister<uint16_t> value;
 } __attribute__((packed));
 
 
@@ -412,10 +468,10 @@ struct registers {
 	// SD command generation
 	volatile uint32_t system_address;
 	BlockSize block_size;
-	volatile uint16_t block_count;
+	NarrowRegister<uint16_t> block_count;
 	volatile uint32_t argument;
-	volatile uint16_t transfer_mode;
 	Command command;
+		// transfer mode and command
 
 	// Response
 	volatile uint32_t response[4];
@@ -427,8 +483,8 @@ struct registers {
 	PresentState		present_state;
 	HostControl			host_control;
 	PowerControl		power_control;
-	volatile uint8_t	block_gap_control;
-	volatile uint8_t	wakeup_control;
+	NarrowRegister<uint8_t>	block_gap_control;
+	NarrowRegister<uint8_t>	wakeup_control;
 	ClockControl		clock_control;
 	TimeoutControl		timeout_control;
 	SoftwareReset		software_reset;
@@ -437,10 +493,10 @@ struct registers {
 	volatile uint32_t interrupt_status;
 	volatile uint32_t interrupt_status_enable;
 	volatile uint32_t interrupt_signal_enable;
-	volatile uint16_t auto_cmd12_error_status;
+	NarrowRegister<uint16_t> auto_cmd12_error_status;
 
 	// Host control 2
-	volatile uint16_t host_control_2;
+	NarrowRegister<uint16_t> host_control_2;
 
 	// Capabilities
 	Capabilities capabilities;
@@ -495,7 +551,7 @@ struct registers {
 	volatile uint8_t padding6[16];
 
 	// Common area
-	volatile uint16_t slot_interrupt_status;
+	NarrowRegister<uint16_t> slot_interrupt_status;
 	HostControllerVersion host_controller_version;
 } __attribute__((packed));
 
