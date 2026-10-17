@@ -152,6 +152,13 @@ ArchUARTPL011::ArchUARTPL011(addr_t base, int64 clock)
 {
 	Barrier();
 
+	// The loopback test reprograms the line settings, which InitPort() can
+	// only restore when the input clock is known (the Raspberry Pi's comes
+	// from a clock controller): keep those the firmware left.
+	uint32 ibrd = In32(PL011_IBRD);
+	uint32 fbrd = In32(PL011_FBRD);
+	uint32 lcrh = In32(PL011_LCRH);
+
 	// ** Loopback test
 	uint32 cr = PL01x_CR_UARTEN;
 		// Enable UART
@@ -170,6 +177,12 @@ ArchUARTPL011::ArchUARTPL011(addr_t base, int64 clock)
 
 	while (In32(PL01x_FR) & PL01x_FR_BUSY)
 		Barrier();
+
+	// Restore the line settings; a write to LCRH latches the divisor.
+	Out32(PL011_CR, 0);
+	Out32(PL011_IBRD, ibrd);
+	Out32(PL011_FBRD, fbrd);
+	Out32(PL011_LCRH, lcrh);
 
 	// ** Disable loopback, enable uart
 	cr = PL01x_CR_UARTEN | PL011_CR_RXE | PL011_CR_TXE;
