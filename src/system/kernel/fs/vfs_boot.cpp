@@ -358,24 +358,6 @@ get_boot_partitions(KMessage& bootVolume, PartitionStack& partitions)
 	KDiskDeviceManager::CreateDefault();
 	KDiskDeviceManager *manager = KDiskDeviceManager::Default();
 
-	status = manager->InitialDeviceScan();
-	if (status != B_OK) {
-		dprintf("KDiskDeviceManager::InitialDeviceScan() returned error: %s\n",
-			strerror(status));
-		// InitialDeviceScan returns error if one (or more) partitions are
-		// determined to be invalid. The partition we are trying to boot from
-		// may be usuable anyway, so don't fail here.
-	}
-
-#if KDEBUG
-	// dump devices and partitions
-	KDiskDevice *device;
-	int32 cookie = 0;
-	while ((device = manager->NextDevice(&cookie)) != NULL) {
-		device->Dump(true, 0);
-	}
-#endif
-
 	struct BootPartitionVisitor : KPartitionVisitor {
 		BootPartitionVisitor(BootMethod* bootMethod, PartitionStack &stack)
 			: fPartitions(stack),
@@ -401,25 +383,60 @@ get_boot_partitions(KMessage& bootVolume, PartitionStack& partitions)
 			BootMethod*		fBootMethod;
 	} visitor(bootMethod, partitions);
 
-	bool strict = true;
+	// Disks on buses that are probed asynchronously (SD/MMC, USB) may not be
+	// published yet when we get here. Until the boot device shows up, or for
+	// kBootDeviceTimeout at most, rescan and accept only partitions that
+	// strictly match the boot device; only then fall back to a less strict
+	// match, so that another disk cannot win just because it was found first.
+	const bigtime_t kBootDeviceTimeout = 10000000;
+	const bigtime_t deadline = system_time() + kBootDeviceTimeout;
+	bool waiting = false;
 
 	while (true) {
-		KDiskDevice *device;
-		int32 cookie = 0;
-		while ((device = manager->NextDevice(&cookie)) != NULL) {
-			if (!bootMethod->IsBootDevice(device, strict))
-				continue;
+		status = manager->InitialDeviceScan();
+		if (status != B_OK) {
+			dprintf("KDiskDeviceManager::InitialDeviceScan() returned error: %s\n",
+				strerror(status));
+			// InitialDeviceScan returns error if one (or more) partitions are
+			// determined to be invalid. The partition we are trying to boot from
+			// may be usuable anyway, so don't fail here.
+		}
 
-			if (device->VisitEachDescendant(&visitor) != NULL)
+		const bool timedOut = system_time() >= deadline;
+		for (int32 pass = 0; pass < (timedOut ? 2 : 1); pass++) {
+			const bool strict = pass == 0;
+			KDiskDevice *device;
+			int32 cookie = 0;
+			while ((device = manager->NextDevice(&cookie)) != NULL) {
+				if (!bootMethod->IsBootDevice(device, strict))
+					continue;
+
+				if (device->VisitEachDescendant(&visitor) != NULL)
+					break;
+			}
+
+			if (!partitions.IsEmpty())
 				break;
 		}
 
-		if (!partitions.IsEmpty() || !strict)
+		if (!partitions.IsEmpty() || timedOut)
 			break;
 
-		// we couldn't find any potential boot devices, try again less strict
-		strict = false;
+		if (!waiting) {
+			dprintf("get_boot_partitions(): waiting for the boot device\n");
+			waiting = true;
+		}
+		snooze(100000);
 	}
+
+#if KDEBUG
+	// dump devices and partitions
+	KDiskDevice *device;
+	int32 cookie = 0;
+	while ((device = manager->NextDevice(&cookie)) != NULL) {
+		device->Dump(true, 0);
+	}
+#endif
 
 	// sort partition list (e.g.. when booting from CD, CDs should come first in
 	// the list)
