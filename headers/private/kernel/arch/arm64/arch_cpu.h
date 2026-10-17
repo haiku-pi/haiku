@@ -88,6 +88,38 @@ ADDRESS_TRANSLATE_FUNC(s1e1r)
 ADDRESS_TRANSLATE_FUNC(s1e1w)
 
 
+/*	Data cache maintenance for DMA by devices that do not snoop the CPU caches
+	(on the Raspberry Pi 4: everything on the VideoCore bus, like the SD
+	controller and the mailbox). The ranges are virtual addresses; a physical
+	range can be reached through the physical map, KERNEL_PMAP_BASE + address.
+*/
+static inline size_t
+arm64_dcache_line_size(void)
+{
+	return 4 << ((READ_SPECIALREG(ctr_el0) >> 16) & 0xf);
+}
+
+
+#define DCACHE_RANGE_FUNC(name, op)										\
+static inline void														\
+name(addr_t start, size_t size)											\
+{																		\
+	const size_t lineSize = arm64_dcache_line_size();					\
+	for (addr_t address = start & ~(addr_t)(lineSize - 1);				\
+			address < start + size; address += lineSize) {				\
+		__asm __volatile("dc " #op ", %0" : : "r" (address) : "memory");	\
+	}																	\
+	__asm __volatile("dsb sy" : : : "memory");							\
+}
+
+// Write dirty lines back to memory: before a device reads the range.
+DCACHE_RANGE_FUNC(arm64_dcache_clean_range, cvac)
+// Write back and discard the lines: before a device writes the range (so no
+// dirty line is evicted over the new data), and again after it did (to drop
+// lines fetched speculatively in the meantime).
+DCACHE_RANGE_FUNC(arm64_dcache_flush_range, civac)
+
+
 #ifdef __cplusplus
 namespace BKernel {
 	struct Thread;
