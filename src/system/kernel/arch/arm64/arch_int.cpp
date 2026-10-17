@@ -259,14 +259,18 @@ do_sync_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
-	debug_exception_type exceptionType;
-	uint32 signalNumber;
-	int32 signalCode;
-	uint64 signalAddress = 0;
+	// What a user thread gets for an exception that is not handled below
+	debug_exception_type exceptionType = B_GENERAL_PROTECTION_FAULT;
+	uint32 signalNumber = SIGILL;
+	int32 signalCode = ILL_ILLOPC;
+	uint64 signalAddress = frame->elr;
 
 	bool isUser = (frame->spsr & PSR_M_MASK) == PSR_M_EL0t;
 	bool isExec = false;
 	switch (ESR_ELx_EXCEPTION(frame->esr)) {
+		case EXCP_UNKNOWN:
+			exceptionType = B_INVALID_OPCODE_EXCEPTION;
+			break;
 		case EXCP_PC_ALIGN:
 			exceptionType = B_ALIGNMENT_EXCEPTION;
 			signalNumber = SIGBUS;
@@ -316,8 +320,19 @@ do_sync_handler(iframe * frame)
 				break;
 			}
 
-			if (!known)
+			if (!known) {
+				if ((frame->esr & ISS_DATA_DFSC_MASK) == ISS_DATA_DFSC_ALIGN) {
+					exceptionType = B_ALIGNMENT_EXCEPTION;
+					signalNumber = SIGBUS;
+					signalCode = BUS_ADRALN;
+				} else {
+					exceptionType = B_SEGMENT_VIOLATION;
+					signalNumber = SIGSEGV;
+					signalCode = SEGV_ACCERR;
+				}
+				signalAddress = frame->far;
 				break;
+			}
 
 			if (debug_debugger_running()) {
 				Thread* thread = thread_get_current_thread();
@@ -391,6 +406,11 @@ do_sync_handler(iframe * frame)
 	if (isUser) {
 		struct sigaction action;
 		Thread* thread = thread_get_current_thread();
+
+		dprintf("arm64: thread %" B_PRId32 " (%s): exception ESR %#lx (EC %#lx) "
+			"FAR %#lx ELR %#lx -> signal %" B_PRIu32 "\n", thread->id, thread->name,
+			frame->esr, (frame->esr >> 26) & 0x3f, frame->far, frame->elr,
+			signalNumber);
 
 		enable_interrupts();
 
