@@ -29,6 +29,13 @@ typedef struct fdt_device_module_info {
 	struct fdt_interrupt_map* (*get_interrupt_map)(struct fdt_device* dev);
 	void (*print_interrupt_map)(struct fdt_interrupt_map* interruptMap);
 	uint32 (*lookup_interrupt_map)(struct fdt_interrupt_map* interruptMap, uint32 childAddr, uint32 childIrq);
+
+	/* How the device reaches memory: its DMA address for a physical address
+	   is the physical address plus *busOffset, for physical addresses below
+	   *physicalEnd. From the "dma-ranges" of the nearest bus that has one (its
+	   first range); false if none does (DMA addresses are physical addresses). */
+	bool (*get_dma_window)(struct fdt_device* dev, int64* busOffset,
+		phys_addr_t* physicalEnd);
 } fdt_device_module_info;
 
 

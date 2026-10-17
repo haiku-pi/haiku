@@ -781,6 +781,52 @@ fdt_device_lookup_interrupt_map(struct fdt_interrupt_map* interruptMap, uint32 c
 }
 
 
+static bool
+fdt_device_get_dma_window(fdt_device* dev, int64* busOffset,
+	phys_addr_t* physicalEnd)
+{
+	ASSERT(dev != NULL);
+
+	uint32 fdtNode;
+	ASSERT(gDeviceManager->get_attr_uint32(
+		dev->node, "fdt/node", &fdtNode, false) >= B_OK);
+
+	for (int bus = fdt_parent_offset(gFDT, fdtNode); bus >= 0;
+			bus = fdt_parent_offset(gFDT, bus)) {
+		int rangesLen;
+		const uint32* ranges = (const uint32*)fdt_getprop(gFDT, bus,
+			"dma-ranges", &rangesLen);
+		if (ranges == NULL)
+			continue;
+		if (rangesLen == 0)
+			return false;
+				// an empty "dma-ranges" is an identity mapping
+
+		// Like "ranges": child (device side) address, parent (CPU side)
+		// address, size.
+		const uint32* prop = (const uint32*)fdt_getprop(gFDT, bus,
+			"#address-cells", NULL);
+		uint32 childCells = prop != NULL ? fdt32_to_cpu(*prop) : 2;
+		prop = (const uint32*)fdt_getprop(gFDT, bus, "#size-cells", NULL);
+		uint32 sizeCells = prop != NULL ? fdt32_to_cpu(*prop) : 1;
+		uint32 parentCells = fdt_get_address_cells(gFDT, bus);
+		if ((childCells + parentCells + sizeCells) * 4 > (uint32)rangesLen)
+			return false;
+
+		uint64 childBase = fdt_read_cells(ranges, childCells);
+		uint64 parentBase = fdt_read_cells(ranges + childCells, parentCells);
+		uint64 size = fdt_read_cells(ranges + childCells + parentCells,
+			sizeCells);
+
+		*busOffset = (int64)(childBase - parentBase);
+		*physicalEnd = parentBase + size;
+		return true;
+	}
+
+	return false;
+}
+
+
 //#pragma mark devfs node
 
 
@@ -853,6 +899,7 @@ fdt_device_module_info gDeviceModule = {
 	fdt_device_get_interrupt_map,
 	fdt_device_print_interrupt_map,
 	fdt_device_lookup_interrupt_map,
+	fdt_device_get_dma_window,
 };
 
 
