@@ -878,6 +878,8 @@ register_child_devices(void* cookie)
 		status = register_child_devices_pci(cookie);
 	else if (strcmp(bus, "acpi") == 0)
 		status = register_child_devices_acpi(cookie);
+	else if (strcmp(bus, "fdt") == 0)
+		status = register_child_devices_fdt(cookie);
 	else
 		status = B_BAD_VALUE;
 
@@ -950,7 +952,7 @@ supports_device(device_node* parent)
 {
 	const char* bus;
 
-	// make sure parent is either an ACPI or PCI SDHCI device node
+	// make sure parent is an ACPI, FDT or PCI SDHCI device node
 	if (gDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false)
 		!= B_OK) {
 		TRACE("Could not find required attribute device/bus\n");
@@ -961,6 +963,8 @@ supports_device(device_node* parent)
 		return supports_device_pci(parent);
 	else if (strcmp(bus, "acpi") == 0)
 		return supports_device_acpi(parent);
+	else if (strcmp(bus, "fdt") == 0)
+		return supports_device_fdt(parent);
 
 	return 0.0f;
 }
@@ -1032,7 +1036,7 @@ terminate_bus(void* controller)
 }
 
 
-// Root device that binds to the ACPI or PCI bus. It will register an mmc_bus_interface
+// Root device that binds to the ACPI, FDT or PCI bus. It will register an mmc_bus_interface
 // node for each SD slot in the device.
 static driver_module_info sSDHCIDevice = {
 	{
@@ -1054,5 +1058,6 @@ module_info* modules[] = {
 	(module_info* )&sSDHCIDevice,
 	(module_info* )&gSDHCIPCIDeviceModule,
 	(module_info* )&gSDHCIACPIDeviceModule,
+	(module_info* )&gSDHCIFDTDeviceModule,
 	NULL
 };

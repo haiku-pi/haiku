@@ -568,15 +568,18 @@ struct sdhci_crs {
 };
 
 extern float supports_device_acpi(device_node* parent);
+extern float supports_device_fdt(device_node* parent);
 extern float supports_device_pci(device_node* parent);
 
 extern status_t register_child_devices_acpi(void* cookie);
+extern status_t register_child_devices_fdt(void* cookie);
 extern status_t register_child_devices_pci(void* cookie);
 
 extern status_t init_device_pci(device_node* node, SdhciDevice* context);
 extern void uninit_device_pci(SdhciDevice* context, device_node* pciParent);
 
 extern status_t init_bus_acpi(device_node* node, void** bus_cookie);
+extern status_t init_bus_fdt(device_node* node, void** bus_cookie);
 extern status_t init_bus_pci(device_node* node, void** bus_cookie);
 
 extern void uninit_bus(void* bus_cookie);
@@ -593,6 +596,7 @@ void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);
 
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
+extern mmc_bus_interface gSDHCIFDTDeviceModule;
 extern mmc_bus_interface gSDHCIPCIDeviceModule;
 
 extern device_manager_info* gDeviceManager;
