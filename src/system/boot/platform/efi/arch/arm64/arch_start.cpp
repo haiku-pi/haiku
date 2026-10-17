@@ -71,11 +71,14 @@ arm64_common_cpu_startup()
 	// that the TLB invalidation in arm64_mmu_setup() applies to EL1.
 	if (el == 1 || e2h) {
 		arm64_mmu_setup();
-		WRITE_SPECIALREG(CNTKCTL_EL1, 0b11);
 	} else {
 		_arch_transition_EL2_EL1();
 		arm64_mmu_setup();
 	}
+
+	// Let userland read the counters (CNTVCT_EL0, CNTPCT_EL0) on every path,
+	// including the drop from EL2: its reset value traps them to EL1.
+	WRITE_SPECIALREG(CNTKCTL_EL1, 0b11);
 
 	WRITE_SPECIALREG(SCTLR_EL1, SCTLR_LSMAOE | SCTLR_nTLSMD
 		| SCTLR_UCI | SCTLR_SPAN | SCTLR_IESB | SCTLR_nTWE | SCTLR_nTWI
