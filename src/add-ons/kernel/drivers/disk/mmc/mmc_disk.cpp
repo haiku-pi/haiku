@@ -28,11 +28,11 @@
 #include <AutoDeleter.h>
 
 
-#define TRACE_MMC_DISK
+//#define TRACE_MMC_DISK
 #ifdef TRACE_MMC_DISK
 #	define TRACE(x...) dprintf("\33[33mmmc_disk:\33[0m " x)
 #else
-#	define TRACE(x...) ;
+#	define TRACE(x...)
 #endif
 #define ERROR(x...)			dprintf("\33[33mmmc_disk:\33[0m " x)
 #define CALLED() 			TRACE("CALLED %s\n", __PRETTY_FUNCTION__)

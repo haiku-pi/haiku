@@ -18,7 +18,7 @@
 #include "mmc.h"
 
 
-#define MMCBUS_TRACE
+//#define MMCBUS_TRACE
 #ifdef MMCBUS_TRACE
 #	define TRACE(x...)		dprintf("\33[33mmmc_bus:\33[0m " x)
 #else
