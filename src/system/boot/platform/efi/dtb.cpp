@@ -569,7 +569,11 @@ dtb_handle_fdt(const void* fdt, int node)
 
 				gUART = kSupportedUarts[i].uart_driver_init(uart.regs.start,
 					uart.clock);
-				gUARTSkipInit = fdt_getprop(fdt, node, "skip-init", NULL) != NULL;
+				// Without the input clock the baud divisor cannot be computed:
+				// keep the configuration the firmware left (the Raspberry Pi's
+				// UART clock comes from a clock controller, not a frequency).
+				gUARTSkipInit = fdt_getprop(fdt, node, "skip-init", NULL) != NULL
+					|| uart.clock <= 0;
 			}
 		}
 	}
