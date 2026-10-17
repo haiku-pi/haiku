@@ -344,8 +344,12 @@ arch_mmu_generate_post_efi_page_tables(size_t memory_map_size,
 
 	if (gKernelArgs.arch_args.uart.kind[0] != 0) {
 		// Map uart because we want to use it during early boot.
-		uint64 regs_start = gKernelArgs.arch_args.uart.regs.start;
-		uint64 regs_size = ROUNDUP(gKernelArgs.arch_args.uart.regs.size, B_PAGE_SIZE);
+		// Its registers need not start on a page boundary (the BCM2835 mini UART's are at
+		// +0x40 in the AUX block), so map the pages around them and keep the offset.
+		uint64 regs_offset = gKernelArgs.arch_args.uart.regs.start & (B_PAGE_SIZE - 1);
+		uint64 regs_start = gKernelArgs.arch_args.uart.regs.start - regs_offset;
+		uint64 regs_size = ROUNDUP(gKernelArgs.arch_args.uart.regs.size + regs_offset,
+			B_PAGE_SIZE);
 		uint64 base = get_next_virtual_address(regs_size);
 
 		map_range(regs_start, regs_start, regs_size,
@@ -355,7 +359,7 @@ arch_mmu_generate_post_efi_page_tables(size_t memory_map_size,
 			ARMv8TranslationTableDescriptor::DefaultPeripheralAttribute |
 			currentMair.MaskOf(MAIR_DEVICE_nGnRnE));
 
-		gKernelArgs.arch_args.uart.regs.start = base;
+		gKernelArgs.arch_args.uart.regs.start = base + regs_offset;
 	}
 
 	sort_address_ranges(gKernelArgs.virtual_allocated_range,
