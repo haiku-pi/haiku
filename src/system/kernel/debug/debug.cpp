@@ -95,6 +95,12 @@ static bool sBlueScreenEnabled = false;
 static bool sDebugScreenEnabled = false;
 static bool sBlueScreenOutput = true;
 static bool sEmergencyKeysEnabled = true;
+#if defined(__aarch64__) || defined(__arm__) || defined(__riscv)
+	// the debug UART is not used by anything else on these platforms
+static bool sSerialEmergencyKeysEnabled = true;
+#else
+static bool sSerialEmergencyKeysEnabled = false;
+#endif
 static spinlock sSpinlock = B_SPINLOCK_INITIALIZER;
 static int32 sDebuggerOnCPU = -1;
 
@@ -1769,6 +1775,8 @@ debug_init_post_settings(struct kernel_args* args)
 	sBlueScreenOutput = get_safemode_boolean("bluescreen", true);
 	sEmergencyKeysEnabled = get_safemode_boolean("emergency_keys",
 		sEmergencyKeysEnabled);
+	sSerialEmergencyKeysEnabled = get_safemode_boolean("serial_emergency_keys",
+		sSerialEmergencyKeysEnabled);
 	sDebugScreenEnabled = get_safemode_boolean("debug_screen", false);
 
 	if ((sBlueScreenOutput || sDebugScreenEnabled)
@@ -1783,6 +1791,30 @@ debug_init_post_settings(struct kernel_args* args)
 }
 
 
+/*!	The serial console's equivalent of Alt-SysRq: three Ctrl-] (0x1d) followed
+	by a key is handled like that key pressed with Alt-SysRq ('d' enters the
+	kernel debugger). Polls the debug UART, whose input nothing else reads.
+*/
+static void
+check_serial_emergency_keys(void* /*cookie*/, int /*iteration*/)
+{
+	static const char kPrefix = 0x1d;
+	static const int kPrefixLength = 3;
+	static int sPrefixSeen = 0;
+
+	int c;
+	while ((c = arch_debug_serial_try_getchar()) >= 0) {
+		if (sPrefixSeen == kPrefixLength) {
+			sPrefixSeen = 0;
+			debug_emergency_key_pressed((char)c);
+		} else if (c == kPrefix)
+			sPrefixSeen++;
+		else
+			sPrefixSeen = 0;
+	}
+}
+
+
 void
 debug_init_post_modules(struct kernel_args* args)
 {
@@ -1790,6 +1822,9 @@ debug_init_post_modules(struct kernel_args* args)
 
 	// check for dupped lines every 10/10 second
 	register_kernel_daemon(check_pending_repeats, NULL, 10);
+
+	if (sSerialEmergencyKeysEnabled && sEmergencyKeysEnabled)
+		register_kernel_daemon(check_serial_emergency_keys, NULL, 1);
 
 	syslog_init_post_threads();
 
