@@ -38,19 +38,11 @@
 
 	.text
 
-.macro mreg origin, destination, temporal
-    mrs \temporal, \origin
-    msr \destination, \temporal
-.endm
-
 
 FUNCTION(_arch_transition_EL2_EL1):
-	// Translation Table Base Register
-	mreg TTBR0_EL2, TTBR0_EL1, x10
-	// Memory Attribute Indirection Register
-	mreg MAIR_EL2, MAIR_EL1, x10
-	// Vector Base Address Register
-	mreg vbar_el2, vbar_el1, x10
+	// The EL1 translation regime is set up by the caller after the drop
+	// (arm64_mmu_setup), not inherited from EL2: a secondary CPU released
+	// from a spin table has nothing valid in TTBR0_EL2 or MAIR_EL2.
 	// Migrate SP
 	mov x10, sp
 	msr sp_el1, x10

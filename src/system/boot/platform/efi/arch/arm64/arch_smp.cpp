@@ -184,9 +184,16 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
 			sPsciCallFn(PSCI_CPU_ON, cpu->mpidr, (uint64)arm64_secondary_startup, 0);
 			break;
 		case CpuEnableMethod::SpinTable:
-			*((uint64*)cpu->releaseAddr) = (uint64)arm64_secondary_startup;
-			asm("sev");
+		{
+			// The CPU polls its release address with its caches off, so the
+			// write must reach the point of coherency before the event.
+			uint64* releaseAddr = (uint64*)cpu->releaseAddr;
+			*releaseAddr = (uint64)arm64_secondary_startup;
+			asm volatile("dc civac, %0\n"
+				"dsb sy\n"
+				"sev" : : "r" (releaseAddr) : "memory");
 			break;
+		}
 		default:
 			// Unreachable, we set sCpuCount to 0 already
 			break;

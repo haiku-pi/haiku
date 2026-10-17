@@ -64,13 +64,17 @@ arm64_common_cpu_startup()
 
 	// EL2 with E2H enabled behaves as a superset of EL1
 	//
-	// EL2 without E2H enabled does not, so we need to drop to EL1
+	// EL2 without E2H enabled does not, so we need to drop to EL1. Drop before
+	// programming the EL1 translation regime, so that every CPU gets our page
+	// tables and MAIR (not whatever the firmware left in its EL2 registers --
+	// nothing at all on a secondary CPU released from a spin table), and so
+	// that the TLB invalidation in arm64_mmu_setup() applies to EL1.
 	if (el == 1 || e2h) {
 		arm64_mmu_setup();
 		WRITE_SPECIALREG(CNTKCTL_EL1, 0b11);
 	} else {
-		arm64_mmu_setup();
 		_arch_transition_EL2_EL1();
+		arm64_mmu_setup();
 	}
 
 	WRITE_SPECIALREG(SCTLR_EL1, SCTLR_LSMAOE | SCTLR_nTLSMD
