@@ -414,6 +414,76 @@ fdt_get_size_cells(const void* fdt, int node)
 }
 
 
+static uint64
+fdt_read_cells(const uint32* cells, uint32 count)
+{
+	// Addresses wider than 64 bits (PCI) keep their low 64 bits.
+	uint64 value = 0;
+	for (uint32 i = 0; i < count; i++)
+		value = (value << 32) | fdt32_to_cpu(cells[i]);
+	return value;
+}
+
+
+/*!	Translates \a address, a bus address in the address space of the parent
+	of \a node, into a CPU physical address by applying the "ranges" of every
+	bus node up to the root (on the Raspberry Pi 4, for example, "/soc" maps
+	0x7e000000 to 0xfe000000).
+	A bus without "ranges" is not memory mapped (an I2C bus, say): the address
+	is then left as it is, meaningful only on that bus. Returns false if a bus
+	has ranges but none of them covers the address.
+*/
+static bool
+fdt_translate_address(int node, uint64* address)
+{
+	int bus = fdt_parent_offset(gFDT, node);
+	while (bus >= 0) {
+		int parent = fdt_parent_offset(gFDT, bus);
+		if (parent < 0)
+			return true;
+				// the root's address space is the CPU's
+
+		int rangesLen;
+		const uint32* ranges = (const uint32*)fdt_getprop(gFDT, bus, "ranges",
+			&rangesLen);
+		if (ranges == NULL)
+			return true;
+
+		// An empty "ranges" is an identity mapping.
+		if (rangesLen > 0) {
+			// #address-cells and #size-cells of the bus itself describe the
+			// child side of its ranges, those of its parent the parent side.
+			const uint32* prop = (const uint32*)fdt_getprop(gFDT, bus,
+				"#address-cells", NULL);
+			uint32 childCells = prop != NULL ? fdt32_to_cpu(*prop) : 2;
+			prop = (const uint32*)fdt_getprop(gFDT, bus, "#size-cells", NULL);
+			uint32 sizeCells = prop != NULL ? fdt32_to_cpu(*prop) : 1;
+			uint32 parentCells = fdt_get_address_cells(gFDT, bus);
+			uint32 entryCells = childCells + parentCells + sizeCells;
+
+			bool found = false;
+			for (int32 i = 0; (i + 1) * entryCells * 4 <= (uint32)rangesLen; i++) {
+				const uint32* entry = ranges + i * entryCells;
+				uint64 childBase = fdt_read_cells(entry, childCells);
+				uint64 parentBase = fdt_read_cells(entry + childCells, parentCells);
+				uint64 size = fdt_read_cells(entry + childCells + parentCells,
+					sizeCells);
+				if (*address >= childBase && *address - childBase < size) {
+					*address = *address - childBase + parentBase;
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				return false;
+		}
+
+		bus = parent;
+	}
+	return true;
+}
+
+
 static bool
 fdt_device_get_reg(fdt_device* dev, uint32 ord, uint64* regs, uint64* len)
 {
@@ -457,6 +527,12 @@ fdt_device_get_reg(fdt_device* dev, uint32 ord, uint64* regs, uint64* len)
 			break;
 		default:
 			return false;
+	}
+
+	if (!fdt_translate_address(fdtNode, regs)) {
+		dprintf("fdt: no CPU address for reg %#" B_PRIx64 " of %s\n", *regs,
+			fdt_get_name(gFDT, fdtNode, NULL));
+		return false;
 	}
 
 	return true;
