@@ -173,6 +173,11 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
 	sKernelEntry = kernelEntry;
 	sKernelArgs = (struct kernel_args*)virtKernelArgs;
 
+	// Released CPUs run arm64_secondary_startup() with their caches off and
+	// read sCpus and sSecondaryStacks from memory: make sure everything
+	// written so far has reached it.
+	_arch_cache_clean_poc();
+
 	for (uint32 i = 0; i < sCpuCount; i++) {
 		platform_cpu_info* cpu = &sCpus[i];
 
