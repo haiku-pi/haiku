@@ -1,0 +1,19 @@
+SubDir HAIKU_TOP src add-ons kernel generic bcm2835_mailbox ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+UseLibraryHeaders [ FDirName libfdt ] ;
+
+local libFDTSources =
+	fdt.c
+	fdt_ro.c
+	fdt_strerror.c
+;
+
+KernelAddon bcm2835_mailbox :
+	bcm2835_mailbox.cpp
+	$(libFDTSources)
+;
+
+SEARCH on [ FGristFiles $(libFDTSources) ]
+	= [ FDirName $(HAIKU_TOP) src libs libfdt ] ;

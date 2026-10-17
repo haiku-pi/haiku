@@ -2,6 +2,9 @@ SubDir HAIKU_TOP src add-ons kernel generic ;
 
 SubInclude HAIKU_TOP src add-ons kernel generic ata_adapter ;
 SubInclude HAIKU_TOP src add-ons kernel generic bios ;
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel generic bcm2835_mailbox ;
+}
 SubInclude HAIKU_TOP src add-ons kernel generic dpc ;
 SubInclude HAIKU_TOP src add-ons kernel generic scsi_periph ;
 SubInclude HAIKU_TOP src add-ons kernel generic smbios ;

@@ -82,6 +82,7 @@ AddFilesToPackage add-ons kernel file_systems
 	: $(SYSTEM_ADD_ONS_FILE_SYSTEMS) ;
 AddFilesToPackage add-ons kernel generic :
 	ata_adapter
+	bcm2835_mailbox@arm64
 	bios@x86,x86_64
 	dpc
 	mpu401
@@ -321,6 +322,7 @@ AddBootModuleSymlinksToPackage
 	ahci
 	ata
 	ata_adapter
+	bcm2835_mailbox@arm64
 	bfs
 	dpc
 	efi_gpt
