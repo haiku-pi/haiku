@@ -2730,6 +2730,27 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 			&& completionCode != COMP_STOPPED && completionCode != COMP_STOPPED_LENGTH_INVALID) {
 		TRACE_ALWAYS("transfer error on slot %" B_PRId8 " endpoint %" B_PRId8
 			": %s\n", slot, endpointNumber, xhci_error_string(completionCode));
+
+	}
+	if (completionCode == COMP_TRB) {
+		// The controller rejected a TRB: show the ring, which identifies it.
+		const phys_addr_t errorTrb = B_LENDIAN_TO_HOST_INT64(trb->address);
+		const int64 ringIndex = (errorTrb - endpoint->trb_addr) / sizeof(xhci_trb);
+		TRACE_ALWAYS("  event TRB %#" B_PRIxPHYSADDR " (ring index %" B_PRId64
+			", ring %#" B_PRIxPHYSADDR "), used %" B_PRIu32 ", next %" B_PRIu32 "\n",
+			errorTrb, ringIndex, endpoint->trb_addr, endpoint->used,
+			endpoint->next);
+		if (ringIndex >= 0 && ringIndex < XHCI_ENDPOINT_RING_SIZE) {
+			for (int32 i = 0; i < XHCI_ENDPOINT_RING_SIZE; i++) {
+				TRACE_ALWAYS("  ring[%" B_PRId32 "] %#" B_PRIx64 " %#" B_PRIx32
+					" type %" B_PRIu32 "%s\n", i,
+					B_LENDIAN_TO_HOST_INT64(endpoint->trbs[i].address),
+					B_LENDIAN_TO_HOST_INT32(endpoint->trbs[i].status),
+					TRB_3_TYPE_GET(B_LENDIAN_TO_HOST_INT32(endpoint->trbs[i].flags)),
+					(B_LENDIAN_TO_HOST_INT32(endpoint->trbs[i].flags)
+						& TRB_3_CYCLE_BIT) != 0 ? " C" : "");
+			}
+		}
 	}
 
 	phys_addr_t source = B_LENDIAN_TO_HOST_INT64(trb->address);
