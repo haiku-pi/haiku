@@ -102,6 +102,20 @@ MMCBus::DoIO(uint16_t rca, uint8_t command, IOOperation* operation,
 }
 
 
+status_t
+MMCBus::ExecuteDataCommand(uint16_t rca, uint8_t command, uint32_t argument,
+	void* buffer, size_t length)
+{
+	if (fController->execute_data_command == NULL)
+		return B_NOT_SUPPORTED;
+	status_t status = _ActivateDevice(rca);
+	if (status != B_OK)
+		return status;
+	return fController->execute_data_command(fCookie, command, argument,
+		buffer, length);
+}
+
+
 void
 MMCBus::SetClock(int frequency)
 {

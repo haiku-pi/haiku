@@ -79,6 +79,7 @@ enum SD_COMMANDS {
 // Application commands are sent with a prefix CMD55 (SD_APP_CMD)
 enum SDHCI_APPLICATION_COMMANDS {
 	SD_SET_BUS_WIDTH = 6,
+	SD_SWITCH_FUNC = 6, // Not an ACMD, with a 64 byte data phase
 	SD_SEND_OP_COND = 41,
 };
 
@@ -105,6 +106,10 @@ typedef struct mmc_bus_interface {
 		// Set the data bus width to 1, 4 or 8 bit mode.
 	void (*terminate_bus)(void* controller);
 	void (*set_card_type)(void* controller, card_type type);
+	status_t (*execute_data_command)(void* controller, uint8_t command,
+		uint32_t argument, void* buffer, size_t length);
+		// Execute a command that reads a few bytes (at most one 512 byte
+		// block) into a kernel buffer, like SD SWITCH_FUNC or SEND_SCR.
 } mmc_bus_interface;
 
 
@@ -123,6 +128,12 @@ typedef struct mmc_device_interface {
 		// Execute a command that involves a data transfer.
 	void (*set_bus_width)(device_node* controller, void* cookie, int width);
 		// Set the data bus width to 1, 4 or 8 bit mode.
+	status_t (*execute_data_command)(device_node* node, void* cookie,
+		uint16_t rca, uint8_t command, uint32_t argument, void* buffer,
+		size_t length);
+		// Execute a command that reads a few bytes into a kernel buffer.
+	void (*set_clock)(device_node* node, void* cookie, uint32_t kilohertz);
+		// Change the bus clock, e.g. after switching the card to high speed.
 } mmc_device_interface;
 
 

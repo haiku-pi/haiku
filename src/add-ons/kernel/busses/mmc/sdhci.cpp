@@ -218,30 +218,6 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 {
 	TRACE("ExecuteCommand(%d, %x)\n", command, argument);
 
-	// First of all clear the result
-	fCommandResult = 0;
-
-	// Check if it's possible to send a command right now.
-	// It is not possible to send a command as long as the command line is busy.
-	// The spec says we should wait, but we can't do that on kernel side, since
-	// it leaves no chance for the upper layers to handle the problem. So we
-	// just say we're busy and the caller can retry later.
-	// Note that this should normally never happen: the command line is busy
-	// only during command execution, and we don't leave this function with a
-	// command running.
-	if (fRegisters->present_state.CommandInhibit()) {
-		TRACE_ALWAYS("Command execution impossible, command inhibit\n");
-		return B_BUSY;
-	}
-	if (fRegisters->present_state.DataInhibit()) {
-		TRACE_ALWAYS("Command execution unwise, data inhibit\n");
-		return B_BUSY;
-	}
-
-	// Get ready to accet interrupts that will occur during the command
-	ConditionVariableEntry waiter;
-	fInterruptNotifier.Add(&waiter);
-
 	uint32_t replyType;
 	uint16 transferMode = 0;
 
@@ -313,6 +289,39 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 			ERROR("Unknown command %x\n", command);
 			return B_BAD_DATA;
 	}
+
+	return _ExecuteCommand(command, argument, response, replyType,
+		transferMode);
+}
+
+
+status_t
+SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
+	uint32_t* response, uint32_t replyType, uint16 transferMode)
+{
+	// First of all clear the result
+	fCommandResult = 0;
+
+	// Check if it's possible to send a command right now.
+	// It is not possible to send a command as long as the command line is busy.
+	// The spec says we should wait, but we can't do that on kernel side, since
+	// it leaves no chance for the upper layers to handle the problem. So we
+	// just say we're busy and the caller can retry later.
+	// Note that this should normally never happen: the command line is busy
+	// only during command execution, and we don't leave this function with a
+	// command running.
+	if (fRegisters->present_state.CommandInhibit()) {
+		TRACE_ALWAYS("Command execution impossible, command inhibit\n");
+		return B_BUSY;
+	}
+	if (fRegisters->present_state.DataInhibit()) {
+		TRACE_ALWAYS("Command execution unwise, data inhibit\n");
+		return B_BUSY;
+	}
+
+	// Get ready to accet interrupts that will occur during the command
+	ConditionVariableEntry waiter;
+	fInterruptNotifier.Add(&waiter);
 
 	// Check if DATA line is available (if needed)
 	if ((replyType & Command::k32BitResponseCheckBusy) != 0
@@ -415,6 +424,51 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 
 	TRACE("Command execution %d complete\n", command);
 	return B_OK;
+}
+
+
+/*!	Executes a command whose data phase reads \a length bytes (at most a
+	block) into \a buffer, by PIO.
+*/
+status_t
+SdhciBus::ExecuteDataCommand(uint8_t command, uint32_t argument, void* buffer,
+	size_t length)
+{
+	if (length == 0 || length > 512 || (length % 4) != 0)
+		return B_BAD_VALUE;
+
+	fRegisters->block_size.ConfigureTransfer(length, BlockSize::kDmaBoundary512K);
+	fRegisters->block_count = 1;
+
+	uint32_t response;
+	status_t status = _ExecuteCommand(command, argument, &response,
+		Command::kR1Type | Command::kDataPresent, TransferMode::kRead);
+	if (status != B_OK)
+		return status;
+
+	const bigtime_t timeout = system_time() + 1000000;
+	uint32_t interrupts;
+	while (((interrupts = fRegisters->interrupt_status)
+			& SDHCI_INT_BUF_READ_READY) == 0) {
+		if ((interrupts & SDHCI_INT_ERROR) != 0 || system_time() > timeout) {
+			fRegisters->software_reset.ResetDataLine();
+			return B_IO_ERROR;
+		}
+		spin(1);
+	}
+	fRegisters->interrupt_status = SDHCI_INT_BUF_READ_READY;
+	for (size_t i = 0; i < length / 4; i++)
+		((uint32_t*)buffer)[i] = fRegisters->buffer_data_port;
+
+	// the transfer complete interrupt ends the command
+	while ((fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0) {
+		if (system_time() > timeout) {
+			fRegisters->software_reset.ResetDataLine();
+			return B_TIMED_OUT;
+		}
+		snooze(100);
+	}
+	return (fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0 ? B_IO_ERROR : B_OK;
 }
 
 
@@ -602,6 +656,8 @@ SdhciBus::SetClock(int kilohertz, bool allowAuto)
 	// are allowed).
 	TRACE("SDCLK frequency: requested %dkHz, effective %dkHz / %d = %dkHz\n", kilohertz,
 		base_clock, divider, base_clock / divider);
+
+	fRegisters->host_control.SetHighSpeed(kilohertz > 25000);
 
 	// We have set the divider, now we can enable the internal clock.
 	fRegisters->clock_control.EnableInternal();
@@ -1173,6 +1229,15 @@ terminate_bus(void* controller)
 {
 	SdhciBus* bus = (SdhciBus*)controller;
 	bus->TerminateBus();
+}
+
+
+status_t
+execute_data_command(void* controller, uint8_t command, uint32_t argument,
+	void* buffer, size_t length)
+{
+	SdhciBus* bus = (SdhciBus*)controller;
+	return bus->ExecuteDataCommand(command, argument, buffer, length);
 }
 
 

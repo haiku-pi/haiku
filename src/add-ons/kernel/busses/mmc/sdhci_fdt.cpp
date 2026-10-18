@@ -241,4 +241,5 @@ mmc_bus_interface gSDHCIFDTDeviceModule = {
 	.set_bus_width = set_bus_width,
 	.terminate_bus = terminate_bus,
 	.set_card_type = set_card_type,
+	.execute_data_command = execute_data_command,
 };

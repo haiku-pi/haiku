@@ -150,6 +150,44 @@ mmc_disk_execute_iorequest(void* data, IOOperation* operation)
 }
 
 
+
+/*!	Switches an SD card from default speed (25 MHz) to high speed (50 MHz),
+	if it supports it (SD physical layer spec 4.3.10, SWITCH_FUNC).
+*/
+static void
+switch_to_high_speed(mmc_disk_driver_info* info)
+{
+	// Function group 1 is the access mode; function 1 is high speed. The
+	// status is big endian: support bits 415:400 (bytes 12-13), the selected
+	// function bits 379:376 (low nibble of byte 16).
+	static const uint32 kCheckHighSpeed = 0x00fffff1;
+	static const uint32 kSwitchHighSpeed = 0x80fffff1;
+	uint8 switchStatus[64];
+
+	status_t status = info->mmc->execute_data_command(info->parent,
+		info->parentCookie, info->rca, SD_SWITCH_FUNC, kCheckHighSpeed,
+		switchStatus, sizeof(switchStatus));
+	if (status != B_OK || (switchStatus[13] & (1 << 1)) == 0) {
+		TRACE("No high speed: %s, support %02x\n", strerror(status),
+			switchStatus[13]);
+		return;
+	}
+
+	status = info->mmc->execute_data_command(info->parent, info->parentCookie,
+		info->rca, SD_SWITCH_FUNC, kSwitchHighSpeed, switchStatus,
+		sizeof(switchStatus));
+	if (status != B_OK || (switchStatus[16] & 0xf) != 1) {
+		ERROR("switching to high speed failed: %s, function %x\n",
+			strerror(status), switchStatus[16] & 0xf);
+		return;
+	}
+
+	// The card switches within 8 clocks after the status was sent.
+	info->mmc->set_clock(info->parent, info->parentCookie, 50000);
+	dprintf("mmc_disk: high speed, 50 MHz\n");
+}
+
+
 static status_t
 mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 {
@@ -218,6 +256,8 @@ mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 		// From now on we use 4 bit mode
 		TRACE("Switch to 4 bit mode for data transfers\n");
 		info->mmc->set_bus_width(info->parent, info->parentCookie, 4);
+		if (csd.structure_version() < 3)
+			switch_to_high_speed(info);
 	} else {
 		TRACE("Switching to 4 bit mode failed: %s\n", strerror(status));
 	}

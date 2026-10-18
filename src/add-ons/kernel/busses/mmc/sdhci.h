@@ -29,6 +29,9 @@ class SdhciBus {
 			void				DisableInterrupts();
 			status_t			ExecuteCommand(uint8_t command, uint32_t argument,
 									uint32_t* response);
+			status_t			ExecuteDataCommand(uint8_t command,
+									uint32_t argument, void* buffer,
+									size_t length);
 			int32				HandleInterrupt();
 			status_t			InitCheck();
 			void				Reset();
@@ -48,6 +51,9 @@ class SdhciBus {
 			void				RecoverError();
 			status_t			_TransferPio(phys_addr_t address, size_t length,
 									bool isWrite);
+			status_t			_ExecuteCommand(uint8_t command,
+									uint32_t argument, uint32_t* response,
+									uint32_t replyType, uint16 transferMode);
 			bool				_InitAdma();
 			void				_SetupAdma(phys_addr_t address, size_t length);
 			void				_SyncForDevice(phys_addr_t address, size_t length);
@@ -431,10 +437,17 @@ class HostControl {
 			value = (value & ~kDataTransferWidthMask) | width;
 		}
 
+		// Output timing for clocks above 25 MHz (SD high speed)
+		void SetHighSpeed(bool enable)
+		{
+			value = (value & ~kHighSpeed) | (enable ? kHighSpeed : 0);
+		}
+
 		// TODO add other bits for LED control, etc.
 
 		uint8 Bits() { return value; }
 
+		static const uint8_t kHighSpeed = 1 << 2;
 		static const uint8_t kDmaMask = 3 << 3;
 		static const uint8_t kSdma = 0 << 3;
 		static const uint8_t kAdma32 = 2 << 3;
@@ -620,6 +633,8 @@ void set_scan_semaphore(void* controller, sem_id sem);
 void set_bus_width(void* controller, int width);
 void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);
+status_t execute_data_command(void* controller, uint8_t command,
+	uint32_t argument, void* buffer, size_t length);
 
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
 extern mmc_bus_interface gSDHCIFDTDeviceModule;

@@ -143,6 +143,9 @@ public:
 									IOOperation* operation,
 									bool offsetAsSectors);
 
+				status_t		ExecuteDataCommand(uint16_t rca, uint8_t command,
+									uint32_t argument, void* buffer,
+									size_t length);
 				void			SetClock(int frequency);
 				void			SetBusWidth(int width);
 				void			SetCardType(card_type type);
