@@ -162,10 +162,11 @@ join_with_passphrase(const char* name, const wireless_network& network,
 	join->i_authentication_mode = network.authentication_mode;
 	join->i_ciphers = network.cipher;
 	join->i_group_ciphers = network.group_cipher;
-	// with a passphrase, it is a personal network whatever the settings say
-	join->i_key_mode
-		= (network.key_mode & (B_KEY_MODE_PSK | B_KEY_MODE_PSK_SHA256)) != 0
-			? network.key_mode : B_KEY_MODE_PSK;
+	// With a passphrase, it is a personal network whatever the settings say.
+	// Prefer plain PSK: the SHA-256 variant needs management frame protection.
+	join->i_key_mode = (network.key_mode & B_KEY_MODE_PSK_SHA256) != 0
+			&& (network.key_mode & B_KEY_MODE_PSK) == 0
+		? B_KEY_MODE_PSK_SHA256 : B_KEY_MODE_PSK;
 	join->i_key_len = passphraseLength;
 	memcpy(join->i_key, passphrase, passphraseLength);
 
