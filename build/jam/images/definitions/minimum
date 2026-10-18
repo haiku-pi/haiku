@@ -338,6 +338,9 @@ SYSTEM_ADD_ONS_DRIVERS_NET = [ FFilterByBuildFeatures
 		vmxnet
 		vt612x
 	}@ # x86,x86_64,riscv64,arm64
+	arm64 @{
+		broadcomfmac
+	}@ # arm64
 
 	etherpci
 	usb_davicom

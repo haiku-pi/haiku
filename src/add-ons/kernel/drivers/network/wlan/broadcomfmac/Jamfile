@@ -1,0 +1,26 @@
+SubDir HAIKU_TOP src add-ons kernel drivers network wlan broadcomfmac ;
+
+UseHeaders [ FDirName $(HAIKU_TOP) src libs compat openbsd_network compat ] : true ;
+UseHeaders [ FDirName $(HAIKU_TOP) src libs compat openbsd_wlan ] : true ;
+UseHeaders [ FDirName $(HAIKU_TOP) src libs compat freebsd_network compat ] : true ;
+UsePrivateHeaders net system ;
+UsePrivateKernelHeaders ;
+
+SubDirCcFlags [ FDefines _KERNEL=1 _XOPEN_SOURCE BWFM_DEBUG ]
+	-Wno-unused -Wno-sign-compare -Wno-pointer-sign ;
+
+UseHeaders [ FDirName $(SUBDIR) ] : true ;
+
+SEARCH_SOURCE += [ FDirName $(SUBDIR) dev ic ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) dev sdmmc ] ;
+
+KernelAddon broadcomfmac :
+	bwfm.c
+	if_bwfm_sdio.c
+	sdmmc_haiku.c
+	glue.c
+	:
+	openbsd_wlan.a
+	freebsd_sdio.a
+	libfreebsd_network.a
+	;
