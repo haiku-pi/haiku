@@ -10,6 +10,7 @@ SubInclude HAIKU_TOP src add-ons kernel drivers dvb ;
 SubInclude HAIKU_TOP src add-ons kernel drivers hyperv ;
 SubInclude HAIKU_TOP src add-ons kernel drivers input ;
 SubInclude HAIKU_TOP src add-ons kernel drivers joystick ;
+SubInclude HAIKU_TOP src add-ons kernel drivers gpio ;
 SubInclude HAIKU_TOP src add-ons kernel drivers graphics ;
 SubInclude HAIKU_TOP src add-ons kernel drivers midi ;
 SubInclude HAIKU_TOP src add-ons kernel drivers misc ;

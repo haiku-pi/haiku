@@ -1,0 +1,5 @@
+SubDir HAIKU_TOP src add-ons kernel drivers gpio ;
+
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel drivers gpio bcm2835_gpio ;
+}

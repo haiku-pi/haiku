@@ -1,0 +1,7 @@
+SubDir HAIKU_TOP src add-ons kernel drivers gpio bcm2835_gpio ;
+
+UsePrivateKernelHeaders ;
+
+KernelAddon bcm2835_gpio :
+	bcm2835_gpio.cpp
+	;
