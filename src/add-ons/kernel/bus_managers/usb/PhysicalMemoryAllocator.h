@@ -14,6 +14,9 @@
 #include <lock.h>
 
 
+area_id		create_dma_area(const char* name, void** address, size_t size);
+
+
 class PhysicalMemoryAllocator {
 public:
 									PhysicalMemoryAllocator(const char *name,

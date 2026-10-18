@@ -15,6 +15,11 @@
 
 #include "PhysicalMemoryAllocator.h"
 
+#ifdef __aarch64__
+#	include <arch/cpu.h>
+#	include <vm/vm.h>
+#endif
+
 
 //#define TRACE_PHYSICAL_MEMORY_ALLOCATOR
 #ifdef TRACE_PHYSICAL_MEMORY_ALLOCATOR
@@ -24,6 +29,46 @@
 #define TRACE(x)		/* nothing */
 #define TRACE_ERROR(x)	dprintf x
 #endif
+
+
+/*!	Creates a physically contiguous kernel area for memory that the host
+	controllers access by DMA.
+*/
+area_id
+create_dma_area(const char* name, void** address, size_t size)
+{
+#ifdef __aarch64__
+	// TODO: get the restrictions from the host controllers (their
+	// B_DMA_HIGH_ADDRESS, and whether they snoop the CPU caches). For now
+	// cover the Raspberry Pi 4, whose xHCI controller behind the PCIe root
+	// complex reaches only the first 3 GiB and does not snoop the caches:
+	// allocate below 3 GiB and map the memory non-cacheable.
+	physical_address_restrictions physicalRestrictions = {};
+	physicalRestrictions.high_address = 0xc0000000;
+	virtual_address_restrictions virtualRestrictions = {};
+	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+	area_id area = create_area_etc(B_SYSTEM_TEAM, name, size, B_CONTIGUOUS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0, &virtualRestrictions,
+		&physicalRestrictions, address);
+	if (area < 0)
+		return area;
+
+	physical_entry entry;
+	get_memory_map(*address, size, &entry, 1);
+	// no cached copy may be written back over what the device writes later
+	arm64_dcache_flush_range((addr_t)*address, size);
+	status_t status = vm_set_area_memory_type(area, entry.address,
+		B_WRITE_COMBINING_MEMORY);
+	if (status != B_OK) {
+		delete_area(area);
+		return status;
+	}
+	return area;
+#else
+	return create_area(name, address, B_ANY_KERNEL_ADDRESS, size,
+		B_32_BIT_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
+#endif
+}
 
 
 PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char* name, size_t minSize, size_t maxSize,
@@ -75,9 +120,7 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char* name, size_t minSiz
 	roundedSize += sizeof(fDebugUseMap) * 8 * fDebugChunkSize;
 	roundedSize = (roundedSize + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
 
-	fArea = create_area(fName, &fLogicalBase, B_ANY_KERNEL_ADDRESS,
-		roundedSize, B_32_BIT_CONTIGUOUS,
-		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
+	fArea = create_dma_area(fName, &fLogicalBase, roundedSize);
 	if (fArea < B_OK) {
 		TRACE_ERROR(("PMA: failed to create memory area\n"));
 		return;
