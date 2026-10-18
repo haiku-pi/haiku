@@ -810,16 +810,25 @@ fdt_device_get_dma_window(fdt_device* dev, int64* busOffset,
 		prop = (const uint32*)fdt_getprop(gFDT, bus, "#size-cells", NULL);
 		uint32 sizeCells = prop != NULL ? fdt32_to_cpu(*prop) : 1;
 		uint32 parentCells = fdt_get_address_cells(gFDT, bus);
-		if ((childCells + parentCells + sizeCells) * 4 > (uint32)rangesLen)
+		uint32 entryCells = childCells + parentCells + sizeCells;
+		if (entryCells * 4 > (uint32)rangesLen)
 			return false;
 
-		uint64 childBase = fdt_read_cells(ranges, childCells);
-		uint64 parentBase = fdt_read_cells(ranges + childCells, parentCells);
-		uint64 size = fdt_read_cells(ranges + childCells + parentCells,
-			sizeCells);
-
-		*busOffset = (int64)(childBase - parentBase);
-		*physicalEnd = parentBase + size;
+		// Buses often list peripheral windows besides the one for RAM (the
+		// Raspberry Pi 4's /scb and /soc do); RAM's is the largest.
+		uint64 bestSize = 0;
+		for (uint32 i = 0; (i + 1) * entryCells * 4 <= (uint32)rangesLen; i++) {
+			const uint32* entry = ranges + i * entryCells;
+			uint64 childBase = fdt_read_cells(entry, childCells);
+			uint64 parentBase = fdt_read_cells(entry + childCells, parentCells);
+			uint64 size = fdt_read_cells(entry + childCells + parentCells,
+				sizeCells);
+			if (size <= bestSize)
+				continue;
+			bestSize = size;
+			*busOffset = (int64)(childBase - parentBase);
+			*physicalEnd = parentBase + size;
+		}
 		return true;
 	}
 

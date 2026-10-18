@@ -33,7 +33,8 @@ typedef struct fdt_device_module_info {
 	/* How the device reaches memory: its DMA address for a physical address
 	   is the physical address plus *busOffset, for physical addresses below
 	   *physicalEnd. From the "dma-ranges" of the nearest bus that has one (its
-	   first range); false if none does (DMA addresses are physical addresses). */
+	   largest range, the one for RAM); false if none does (DMA addresses are
+	   physical addresses). */
 	bool (*get_dma_window)(struct fdt_device* dev, int64* busOffset,
 		phys_addr_t* physicalEnd);
 } fdt_device_module_info;
