@@ -366,7 +366,17 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 
 	// Wait for command response to be available ("command complete" interrupt)
 	TRACE("Wait for command complete...");
-	do {
+
+	// A command completes within microseconds, much less than it takes to
+	// wake a thread up: wait a moment for the interrupt handler before
+	// sleeping (it matters for SDIO, with several commands per packet).
+	const bigtime_t spinEnd = system_time() + 50;
+	while (*(volatile uint32_t*)&fCommandResult == 0
+		&& system_time() < spinEnd) {
+		cpu_pause();
+	}
+
+	while (*(volatile uint32_t*)&fCommandResult == 0) {
 		status_t result = waiter.Wait(B_RELATIVE_TIMEOUT, 1000000);
 		if (result == B_TIMED_OUT) {
 			ERROR("Command %d: no completion interrupt for a while, status %x, "
@@ -380,7 +390,7 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 		TRACE("real status = %x command line busy: %d\n",
 			fRegisters->interrupt_status,
 			fRegisters->present_state.CommandInhibit());
-	} while (fCommandResult == 0);
+	}
 
 	TRACE("Command response available\n");
 
@@ -410,6 +420,12 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 			? B_IO_ERROR : B_ERROR;
 	}
 
+	// The command inhibit bit may clear a moment after the interrupt
+	const bigtime_t inhibitEnd = system_time() + 1000;
+	while (fRegisters->present_state.CommandInhibit()
+		&& system_time() < inhibitEnd) {
+		cpu_pause();
+	}
 	if (fRegisters->present_state.CommandInhibit()) {
 		TRACE("Command execution failed, card stalled\n");
 		// Clear the stall
