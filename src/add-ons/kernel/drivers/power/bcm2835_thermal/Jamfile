@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src add-ons kernel drivers power bcm2835_thermal ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+
+KernelAddon bcm2835_thermal :
+	bcm2835_thermal.cpp
+	;

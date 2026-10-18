@@ -6,4 +6,7 @@ SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_button ;
 SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_lid ;
 SubInclude HAIKU_TOP src add-ons kernel drivers power acpi_thermal ;
 SubInclude HAIKU_TOP src add-ons kernel drivers power amd_thermal ;
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel drivers power bcm2835_thermal ;
+}
 SubInclude HAIKU_TOP src add-ons kernel drivers power pch_thermal ;
