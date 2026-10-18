@@ -113,6 +113,12 @@ typedef struct mmc_bus_interface {
 		uint32_t argument, void* buffer, size_t length);
 		// Execute a command that reads a few bytes (at most one 512 byte
 		// block) into a kernel buffer, like SD SWITCH_FUNC or SEND_SCR.
+	status_t (*execute_io_command)(void* controller, uint8_t command,
+		uint32_t argument, void* buffer, size_t blockSize,
+		uint32_t blockCount, bool isWrite, uint32_t* response);
+		// Execute a command (SDIO IO_RW_EXTENDED) whose data phase moves
+		// blockCount blocks of blockSize bytes between the card and a kernel
+		// buffer. blockSize need not be a multiple of 4.
 } mmc_bus_interface;
 
 
@@ -137,12 +143,30 @@ typedef struct mmc_device_interface {
 		// Execute a command that reads a few bytes into a kernel buffer.
 	void (*set_clock)(device_node* node, void* cookie, uint32_t kilohertz);
 		// Change the bus clock, e.g. after switching the card to high speed.
+
+	// SDIO cards
+	status_t (*sdio_read_direct)(device_node* node, void* cookie, uint16_t rca,
+		uint8_t function, uint32_t address, uint8_t* value);
+	status_t (*sdio_write_direct)(device_node* node, void* cookie,
+		uint16_t rca, uint8_t function, uint32_t address, uint8_t value);
+		// Read or write one register of a function (IO_RW_DIRECT)
+	status_t (*sdio_read_write_extended)(device_node* node, void* cookie,
+		uint16_t rca, uint8_t function, uint32_t address,
+		bool incrementAddress, bool isWrite, void* buffer, size_t length);
+		// Move length bytes from or to a function's registers or FIFO
+		// (IO_RW_EXTENDED): whole blocks in block mode, the rest in byte mode
+	status_t (*sdio_set_block_size)(device_node* node, void* cookie,
+		uint16_t rca, uint8_t function, uint16_t blockSize);
+	status_t (*sdio_enable_function)(device_node* node, void* cookie,
+		uint16_t rca, uint8_t function, bool enable);
+		// Enable a function and wait until it is ready, or disable it
 } mmc_device_interface;
 
 
 // Device attribute paths for the MMC device
 const char* const kMmcRcaAttribute = "mmc/rca";
 const char* const kMmcTypeAttribute = "mmc/type";
+const char* const kSdioFunctionsAttribute = "sdio/functions";
 
 
 #endif /* _MMC_H */

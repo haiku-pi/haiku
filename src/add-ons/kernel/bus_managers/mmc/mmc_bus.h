@@ -150,13 +150,29 @@ public:
 				void			SetBusWidth(int width);
 				void			SetCardType(card_type type);
 
+				status_t		SdioReadDirect(uint16_t rca, uint8_t function,
+									uint32_t address, uint8_t* value);
+				status_t		SdioWriteDirect(uint16_t rca, uint8_t function,
+									uint32_t address, uint8_t value);
+				status_t		SdioReadWriteExtended(uint16_t rca,
+									uint8_t function, uint32_t address,
+									bool incrementAddress, bool isWrite,
+									void* buffer, size_t length);
+				status_t		SdioSetBlockSize(uint16_t rca,
+									uint8_t function, uint16_t blockSize);
+				status_t		SdioEnableFunction(uint16_t rca,
+									uint8_t function, bool enable);
+
 				void			AcquireBus() { acquire_sem(fLockSemaphore); }
 				void			ReleaseBus() { release_sem(fLockSemaphore); }
 private:
 				status_t		_ActivateDevice(uint16_t rca);
-				status_t		_ReadDirect(uint16_t rca, uint8_t function,
-									uint32_t address, uint8_t* value);
+				status_t		_ExecuteDirect(uint16_t rca, uint32_t argument,
+									uint8_t* value);
 				bool			_ScanSdioCard(uint32_t ocr);
+				void			_ProbeBroadcomChip(uint16_t rca);
+				status_t		_SetBroadcomWindow(uint16_t rca,
+									uint32_t address);
 				void			_AcquireScanSemaphore();
 				void			_TerminateBus();
 		static	status_t		_WorkerThread(void*);
@@ -172,6 +188,9 @@ private:
 		sem_id					fLockSemaphore;
 		uint16					fActiveDevice;
 		card_type				fCardType;
+		uint16					fSdioBlockSize[8];
+			// per function, 0: not set (byte mode only)
+		bool					fSdioMultiBlock;
 		// FIXME card type shall be extended to map card type to RCA.
 		// In theory RCA is 16 bit allowing for 2^16 devices on signle bus
 		// Practically this is limited by bus max capacitance(ver low speed)

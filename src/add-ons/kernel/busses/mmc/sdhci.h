@@ -47,6 +47,10 @@ class SdhciBus {
 			status_t			ExecuteDataCommand(uint8_t command,
 									uint32_t argument, void* buffer,
 									size_t length);
+			status_t			ExecuteIoCommand(uint8_t command,
+									uint32_t argument, void* buffer,
+									size_t blockSize, uint32_t blockCount,
+									bool isWrite, uint32_t* response);
 			int32				HandleInterrupt();
 			status_t			InitCheck();
 			void				Reset();
@@ -217,6 +221,8 @@ class PresentState {
 		bool IsCardInserted() { return fBits & (1 << 16); }
 		bool CommandInhibit() { return fBits & (1 << 0); }
 		bool DataInhibit() { return fBits & (1 << 1); }
+		bool BufferWriteEnable() { return fBits & (1 << 10); }
+		bool BufferReadEnable() { return fBits & (1 << 11); }
 
 	private:
 		volatile uint32_t fBits;
@@ -485,12 +491,17 @@ class HostControl {
 } __attribute__((packed));
 
 
+// The block size and block count registers, written together: the Raspberry
+// Pi's Arasan controller can lose a register write that closely follows
+// another one, and a separate (read-modify-write) block count update would
+// then write back a stale block size.
 class BlockSize {
 	public:
 		void ConfigureTransfer(uint16_t transferBlockSize,
-			uint16_t dmaBoundary)
+			uint16_t dmaBoundary, uint16_t blockCount)
 		{
-			value = transferBlockSize | dmaBoundary << 12;
+			value = ((uint32_t)blockCount << 16) | transferBlockSize
+				| dmaBoundary << 12;
 		}
 
 		static const uint16_t kDmaBoundary4K = 0;
@@ -502,8 +513,10 @@ class BlockSize {
 		static const uint16_t kDmaBoundary256K = 6;
 		static const uint16_t kDmaBoundary512K = 7;
 
+		uint32_t Bits() { return value; }
+
 	private:
-		NarrowRegister<uint16_t> value;
+		volatile uint32_t value;
 } __attribute__((packed));
 
 
@@ -512,7 +525,7 @@ struct registers {
 	// SD command generation
 	volatile uint32_t system_address;
 	BlockSize block_size;
-	NarrowRegister<uint16_t> block_count;
+		// and block count
 	volatile uint32_t argument;
 	Command command;
 		// transfer mode and command
@@ -653,6 +666,9 @@ void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);
 status_t execute_data_command(void* controller, uint8_t command,
 	uint32_t argument, void* buffer, size_t length);
+status_t execute_io_command(void* controller, uint8_t command,
+	uint32_t argument, void* buffer, size_t blockSize, uint32_t blockCount,
+	bool isWrite, uint32_t* response);
 
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
 extern mmc_bus_interface gSDHCIFDTDeviceModule;

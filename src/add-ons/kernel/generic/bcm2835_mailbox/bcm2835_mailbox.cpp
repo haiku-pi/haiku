@@ -294,9 +294,10 @@ property_tag(uint32 tag, void* values, uint32 bufferSize, uint32 requestSize,
 
 	arm64_dcache_flush_range((addr_t)sBuffer, words * 4);
 
-	if (sBuffer[1] != PROPERTY_RESPONSE_SUCCESS
-		|| (sBuffer[4] & TAG_RESPONSE) == 0) {
-		TRACE("tag %#" B_PRIx32 " failed: %#" B_PRIx32 ", %#" B_PRIx32 "\n",
+	// Like Linux, only the buffer's status counts: the firmware does not mark
+	// the response of every tag (SET_GPIO_STATE, for one)
+	if (sBuffer[1] != PROPERTY_RESPONSE_SUCCESS) {
+		ERROR("tag %#" B_PRIx32 " failed: %#" B_PRIx32 ", %#" B_PRIx32 "\n",
 			tag, sBuffer[1], sBuffer[4]);
 		return B_ERROR;
 	}

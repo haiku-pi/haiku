@@ -242,4 +242,5 @@ mmc_bus_interface gSDHCIACPIDeviceModule = {
 	.terminate_bus = terminate_bus,
 	.set_card_type = set_card_type,
 	.execute_data_command = execute_data_command,
+	.execute_io_command = execute_io_command,
 };

@@ -44,6 +44,8 @@ struct controller_info {
 	bool		no_high_speed_bit;
 	bool		force_pio;
 	bool		assume_3v3;
+	int32		power_line;
+		// the firmware GPIO expander line that powers the card, or -1
 };
 
 static const controller_info kControllers[] = {
@@ -51,12 +53,13 @@ static const controller_info kControllers[] = {
 	// accesses (which struct registers always uses), its base clock comes
 	// from the VideoCore firmware (EMMC2), and it does not snoop the CPU
 	// caches.
-	{ "brcm,bcm2711-emmc2", 12, false, false, false },
+	{ "brcm,bcm2711-emmc2", 12, false, false, false, -1 },
 	// The Raspberry Pi's original controller (Arasan); on the Pi 4 it is
 	// wired to the WiFi chip's SDIO. Linux ignores its capabilities and does
 	// not use its DMA or the High Speed Enable bit, and runs it at 3.3 V; base
-	// clock: EMMC.
-	{ "brcm,bcm2835-mmc", 1, true, true, true },
+	// clock: EMMC. The WiFi chip's WL_REG_ON is line 1 ("WL_ON") of the
+	// firmware's GPIO expander.
+	{ "brcm,bcm2835-mmc", 1, true, true, true, 1 },
 };
 
 
@@ -108,6 +111,47 @@ firmware_base_clock_khz(uint32 clockID)
 	return values[1] / 1000;
 #else
 	return 0;
+#endif
+}
+
+
+/*!	Power-cycles a card whose power is switched by a line of the Raspberry Pi
+	firmware's GPIO expander, so that it starts from reset whatever the boot
+	loader or a previous system left it in.
+*/
+static void
+firmware_power_cycle(uint32 line)
+{
+#ifdef __aarch64__
+	bcm2835_mailbox_module_info* mailbox;
+	if (get_module(BCM2835_MAILBOX_MODULE_NAME, (module_info**)&mailbox) != B_OK)
+		return;
+
+	const uint32 gpio = BCM2835_FIRMWARE_GPIO_BASE + line;
+	uint32 values[2] = { gpio, 0 };
+	mailbox->property_tag(BCM2835_TAG_GET_GPIO_STATE, values, sizeof(values),
+		sizeof(uint32), NULL);
+	const uint32 before = values[1];
+
+	// The line state read back afterwards tells whether this worked
+	status_t status[2];
+	for (uint32 state = 0; state < 2; state++) {
+		values[0] = gpio;
+		values[1] = state;
+		status[state] = mailbox->property_tag(BCM2835_TAG_SET_GPIO_STATE,
+			values, sizeof(values), sizeof(values), NULL);
+		snooze(state == 0 ? 50000 : 150000);
+	}
+
+	values[0] = gpio;
+	values[1] = 0;
+	mailbox->property_tag(BCM2835_TAG_GET_GPIO_STATE, values, sizeof(values),
+		sizeof(uint32), NULL);
+	put_module(BCM2835_MAILBOX_MODULE_NAME);
+
+	TRACE_ALWAYS("power line %" B_PRIu32 " cycled (%s, %s): %" B_PRIu32 " -> %"
+		B_PRIu32 "\n", line, strerror(status[0]), strerror(status[1]), before,
+		values[1]);
 #endif
 }
 
@@ -168,6 +212,9 @@ init_bus_fdt(device_node* node, void** bus_cookie)
 	TRACE_ALWAYS("%s at %#" B_PRIx64 ", interrupt %" B_PRIu64 ", base clock %"
 		B_PRIu32 " kHz\n", fdt->get_name(device), registers, interrupt,
 		baseClockKHz);
+
+	if (info->power_line >= 0)
+		firmware_power_cycle(info->power_line);
 
 	quirks.base_clock_khz = baseClockKHz;
 	SdhciBus* bus = new(std::nothrow) SdhciBus(regs, interrupt, false, &quirks);
@@ -290,4 +337,5 @@ mmc_bus_interface gSDHCIFDTDeviceModule = {
 	.terminate_bus = terminate_bus,
 	.set_card_type = set_card_type,
 	.execute_data_command = execute_data_command,
+	.execute_io_command = execute_io_command,
 };

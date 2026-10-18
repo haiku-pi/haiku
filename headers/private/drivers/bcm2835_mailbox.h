@@ -46,6 +46,7 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_TAG_GET_MAX_TEMPERATURE		0x0003000a
 #define BCM2835_TAG_GET_THROTTLED			0x00030046
 #define BCM2835_TAG_SET_CLOCK_RATE			0x00038002
+#define BCM2835_TAG_GET_GPIO_STATE			0x00030041
 #define BCM2835_TAG_SET_GPIO_STATE			0x00038041
 #define BCM2835_TAG_NOTIFY_XHCI_RESET		0x00030058
 
@@ -56,6 +57,9 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_CLOCK_CORE		4
 #define BCM2835_CLOCK_V3D		5
 #define BCM2835_CLOCK_EMMC2		12
+
+// The GPIO tags number the firmware's GPIO expander lines from here
+#define BCM2835_FIRMWARE_GPIO_BASE	128
 
 
 #endif	// _BCM2835_MAILBOX_H

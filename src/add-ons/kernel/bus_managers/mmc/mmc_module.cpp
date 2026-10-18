@@ -146,6 +146,78 @@ mmc_bus_set_clock(device_node* node, void* cookie, uint32_t kilohertz)
 
 
 static status_t
+mmc_bus_sdio_read_direct(device_node* node, void* cookie, uint16_t rca,
+	uint8_t function, uint32_t address, uint8_t* value)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t error = bus->SdioReadDirect(rca, function, address, value);
+	bus->ReleaseBus();
+
+	return error;
+}
+
+
+static status_t
+mmc_bus_sdio_write_direct(device_node* node, void* cookie, uint16_t rca,
+	uint8_t function, uint32_t address, uint8_t value)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t error = bus->SdioWriteDirect(rca, function, address, value);
+	bus->ReleaseBus();
+
+	return error;
+}
+
+
+static status_t
+mmc_bus_sdio_read_write_extended(device_node* node, void* cookie,
+	uint16_t rca, uint8_t function, uint32_t address, bool incrementAddress,
+	bool isWrite, void* buffer, size_t length)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t error = bus->SdioReadWriteExtended(rca, function, address,
+		incrementAddress, isWrite, buffer, length);
+	bus->ReleaseBus();
+
+	return error;
+}
+
+
+static status_t
+mmc_bus_sdio_set_block_size(device_node* node, void* cookie, uint16_t rca,
+	uint8_t function, uint16_t blockSize)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t error = bus->SdioSetBlockSize(rca, function, blockSize);
+	bus->ReleaseBus();
+
+	return error;
+}
+
+
+static status_t
+mmc_bus_sdio_enable_function(device_node* node, void* cookie, uint16_t rca,
+	uint8_t function, bool enable)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t error = bus->SdioEnableFunction(rca, function, enable);
+	bus->ReleaseBus();
+
+	return error;
+}
+
+
+static status_t
 std_ops(int32 op, ...)
 {
 	switch (op) {
@@ -198,7 +270,12 @@ mmc_device_interface mmc_bus_controller_module = {
 	mmc_bus_do_io,
 	mmc_bus_set_width,
 	mmc_bus_execute_data_command,
-	mmc_bus_set_clock
+	mmc_bus_set_clock,
+	mmc_bus_sdio_read_direct,
+	mmc_bus_sdio_write_direct,
+	mmc_bus_sdio_read_write_extended,
+	mmc_bus_sdio_set_block_size,
+	mmc_bus_sdio_enable_function
 };
 
 

@@ -329,7 +329,7 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 		TRACE_ALWAYS("Command execution impossible, command inhibit\n");
 		return B_BUSY;
 	}
-	if (fRegisters->present_state.DataInhibit()) {
+	if (fRegisters->present_state.DataInhibit() && command != SD_IO_ABORT) {
 		TRACE_ALWAYS("Command execution unwise, data inhibit\n");
 		return B_BUSY;
 	}
@@ -347,8 +347,11 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 		}
 	}
 
-	if (fRegisters->present_state.CommandInhibit())
-		panic("Command line busy at start of execute command\n");
+	if (fRegisters->present_state.CommandInhibit()) {
+		ERROR("Command line busy at start of execute command\n");
+		fRegisters->software_reset.ResetCommandLine();
+		return B_BUSY;
+	}
 
 	fRegisters->argument = argument;
 
@@ -395,9 +398,11 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 			return B_BAD_VALUE;
 		}
 		ERROR("Command execution failed %x\n", fCommandResult);
+		fRegisters->software_reset.ResetCommandAndDataLines();
 		// TODO look at errors in interrupt_status register for more details
 		// and return a more appropriate error code
-		return B_ERROR;
+		return (fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0
+			? B_IO_ERROR : B_ERROR;
 	}
 
 	if (fRegisters->present_state.CommandInhibit()) {
@@ -453,8 +458,8 @@ SdhciBus::ExecuteDataCommand(uint8_t command, uint32_t argument, void* buffer,
 	if (length == 0 || length > 512 || (length % 4) != 0)
 		return B_BAD_VALUE;
 
-	fRegisters->block_size.ConfigureTransfer(length, BlockSize::kDmaBoundary512K);
-	fRegisters->block_count = 1;
+	fRegisters->block_size.ConfigureTransfer(length, BlockSize::kDmaBoundary512K,
+		1);
 
 	uint32_t response;
 	status_t status = _ExecuteCommand(command, argument, &response,
@@ -485,6 +490,90 @@ SdhciBus::ExecuteDataCommand(uint8_t command, uint32_t argument, void* buffer,
 		snooze(100);
 	}
 	return (fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0 ? B_IO_ERROR : B_OK;
+}
+
+
+/*!	Executes a command whose data phase moves \a blockCount blocks of
+	\a blockSize bytes (at most 2048, not necessarily a multiple of 4) between
+	the card and the kernel buffer \a buffer, through the buffer data port:
+	SDIO's IO_RW_EXTENDED. The buffer is ready when the Present State
+	register says so; its latched interrupt status bit can be missed.
+*/
+status_t
+SdhciBus::ExecuteIoCommand(uint8_t command, uint32_t argument, void* buffer,
+	size_t blockSize, uint32_t blockCount, bool isWrite, uint32_t* response)
+{
+	if (blockSize == 0 || blockSize > 2048 || blockCount == 0
+		|| blockCount > 0xffff) {
+		return B_BAD_VALUE;
+	}
+
+	fRegisters->block_size.ConfigureTransfer(blockSize,
+		BlockSize::kDmaBoundary512K, blockCount);
+
+	uint16 transferMode = isWrite ? TransferMode::kWrite : TransferMode::kRead;
+	if (blockCount > 1)
+		transferMode |= TransferMode::kMulti | TransferMode::kBlockCountEnable;
+
+	status_t status = _ExecuteCommand(command, argument, response,
+		Command::kR1Type | Command::kDataPresent, transferMode);
+	if (status != B_OK)
+		return status;
+
+	const uint32_t ready = isWrite
+		? SDHCI_INT_BUF_WRITE_READY : SDHCI_INT_BUF_READ_READY;
+	uint8_t* data = (uint8_t*)buffer;
+	for (uint32_t block = 0; block < blockCount; block++) {
+		const bigtime_t timeout = system_time() + 1000000;
+		while (!(isWrite ? fRegisters->present_state.BufferWriteEnable()
+				: fRegisters->present_state.BufferReadEnable())) {
+			if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0
+				|| system_time() > timeout) {
+				ERROR("CMD%d %#" B_PRIx32 ": block %" B_PRIu32 " not ready, "
+					"response %#" B_PRIx32 ", status %" B_PRIx32 ", present state %"
+					B_PRIx32 ", host control %x, block %#" B_PRIx32 "\n", command,
+					argument, block, *response,
+					fCommandResult | fRegisters->interrupt_status,
+					fRegisters->present_state.Bits(),
+					fRegisters->host_control.Bits(),
+					fRegisters->block_size.Bits());
+				fRegisters->software_reset.ResetCommandAndDataLines();
+				return B_IO_ERROR;
+			}
+			spin(1);
+		}
+		fRegisters->interrupt_status = ready;
+
+		for (size_t done = 0; done < blockSize; done += 4) {
+			const size_t chunk = min_c(blockSize - done, 4);
+			uint32_t word = 0;
+			if (isWrite) {
+				memcpy(&word, data + done, chunk);
+				fRegisters->buffer_data_port = word;
+			} else {
+				word = fRegisters->buffer_data_port;
+				memcpy(data + done, &word, chunk);
+			}
+		}
+		data += blockSize;
+	}
+
+	// the transfer complete interrupt ends the command
+	const bigtime_t timeout = system_time() + 1000000;
+	while ((fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0) {
+		if (system_time() > timeout) {
+			ERROR("CMD%d: no transfer complete\n", command);
+			fRegisters->software_reset.ResetCommandAndDataLines();
+			return B_TIMED_OUT;
+		}
+		spin(10);
+	}
+	if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0) {
+		ERROR("CMD%d: data error %" B_PRIx32 "\n", command, fCommandResult);
+		fRegisters->software_reset.ResetCommandAndDataLines();
+		return B_IO_ERROR;
+	}
+	return B_OK;
 }
 
 
@@ -757,11 +846,9 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 		// do a transfer that crosses this boundary, and we don't need to handle
 		// the DMA boundary interrupt (the transfer will be split in two at an
 		// upper layer).
+		// Step 3: set block count (with the block size)
 		fRegisters->block_size.ConfigureTransfer(kBlockSize,
-			BlockSize::kDmaBoundary512K);
-
-		// Step 3: set block count
-		fRegisters->block_count = toCopy / kBlockSize;
+			BlockSize::kDmaBoundary512K, toCopy / kBlockSize);
 
 		// Steps done in ExecuteCommand:
 		// Steps 4, 5 and 6: set argument register, transfer_mode and command register
@@ -1260,6 +1347,17 @@ execute_data_command(void* controller, uint8_t command, uint32_t argument,
 {
 	SdhciBus* bus = (SdhciBus*)controller;
 	return bus->ExecuteDataCommand(command, argument, buffer, length);
+}
+
+
+status_t
+execute_io_command(void* controller, uint8_t command, uint32_t argument,
+	void* buffer, size_t blockSize, uint32_t blockCount, bool isWrite,
+	uint32_t* response)
+{
+	SdhciBus* bus = (SdhciBus*)controller;
+	return bus->ExecuteIoCommand(command, argument, buffer, blockSize,
+		blockCount, isWrite, response);
 }
 
 

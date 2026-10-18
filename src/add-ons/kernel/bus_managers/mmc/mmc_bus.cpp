@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 
 MMCBus::MMCBus(device_node* node)
@@ -21,9 +22,12 @@ MMCBus::MMCBus(device_node* node)
 	fStatus(B_OK),
 	fWorkerThread(-1),
 	fActiveDevice(0),
-	fCardType(CARD_TYPE_UNKNOWN)
+	fCardType(CARD_TYPE_UNKNOWN),
+	fSdioMultiBlock(false)
 {
 	CALLED();
+
+	memset(fSdioBlockSize, 0, sizeof(fSdioBlockSize));
 
 	// Get the parent info, it includes the API to send commands to the hardware
 	device_node* parent = gDeviceManager->get_parent_node(node);
@@ -158,22 +162,180 @@ MMCBus::_ActivateDevice(uint16_t rca)
 }
 
 
-/*!	Reads one register of an SDIO function with CMD52 (IO_RW_DIRECT). */
+// SDIO register addresses (SDIO simplified specification 3.00, 6.9 and 6.10)
+enum {
+	kCccrRevision			= 0x00,
+	kCccrIoEnable			= 0x02,
+	kCccrIoReady			= 0x03,
+	kCccrBusInterface		= 0x07,
+	kCccrCardCapability		= 0x08,
+	kCccrCisPointer			= 0x09,
+	kCccrBlockSize			= 0x10,
+	kCccrBusSpeed			= 0x13,
+	kFbrBlockSize			= 0x10,
+		// in the FBR of function n, at n * 0x100
+
+	kBusWidth4Bit			= 0x02,
+	kBusWidthMask			= 0x03,
+	kCapabilityMultiBlock	= 0x02,
+	kCapabilityLowSpeed		= 0x40,
+	kCapabilityLowSpeed4Bit	= 0x80,
+	kBusSpeedSupportsHigh	= 0x01,
+	kBusSpeedEnableHigh		= 0x02,
+};
+
+
+/*!	Executes CMD52 (IO_RW_DIRECT) and returns the data byte of its R5
+	response.
+*/
 status_t
-MMCBus::_ReadDirect(uint16_t rca, uint8_t function, uint32_t address,
-	uint8_t* value)
+MMCBus::_ExecuteDirect(uint16_t rca, uint32_t argument, uint8_t* value)
 {
 	uint32_t response;
-	status_t status = ExecuteCommand(rca, SDIO_RW_DIRECT,
-		((uint32_t)function << 28) | ((address & 0x1ffff) << 9), &response);
+	status_t status = ExecuteCommand(rca, SDIO_RW_DIRECT, argument, &response);
 	if (status != B_OK)
 		return status;
 
 	// R5: response flags in bits 15:8 (error bits 7, 6, 3, 1, 0 of them)
-	if ((response & 0xcb00) != 0)
+	if ((response & 0xcb00) != 0) {
+		ERROR("CMD52 %#" B_PRIx32 ": response flags %#" B_PRIx32 "\n",
+			argument, (response >> 8) & 0xff);
 		return B_IO_ERROR;
-	*value = response & 0xff;
+	}
+	if (value != NULL)
+		*value = response & 0xff;
 	return B_OK;
+}
+
+
+/*!	Reads one register of an SDIO function. */
+status_t
+MMCBus::SdioReadDirect(uint16_t rca, uint8_t function, uint32_t address,
+	uint8_t* value)
+{
+	return _ExecuteDirect(rca,
+		((uint32_t)function << 28) | ((address & 0x1ffff) << 9), value);
+}
+
+
+/*!	Writes one register of an SDIO function. */
+status_t
+MMCBus::SdioWriteDirect(uint16_t rca, uint8_t function, uint32_t address,
+	uint8_t value)
+{
+	return _ExecuteDirect(rca, (1u << 31) | ((uint32_t)function << 28)
+		| ((address & 0x1ffff) << 9) | value, NULL);
+}
+
+
+/*!	Moves \a length bytes between \a buffer and a function's address space
+	with CMD53 (IO_RW_EXTENDED): as many whole blocks as possible in block
+	mode, the rest in byte mode, so that the card never transfers more than
+	asked for. With \a incrementAddress false, all bytes go to (or come from)
+	the same address, a FIFO.
+*/
+status_t
+MMCBus::SdioReadWriteExtended(uint16_t rca, uint8_t function,
+	uint32_t address, bool incrementAddress, bool isWrite, void* buffer,
+	size_t length)
+{
+	if (fController->execute_io_command == NULL)
+		return B_NOT_SUPPORTED;
+	if (function > 7)
+		return B_BAD_VALUE;
+
+	status_t status = _ActivateDevice(rca);
+	if (status != B_OK)
+		return status;
+
+	const uint32_t blockSize = fSdioBlockSize[function];
+	const uint32_t byteModeLimit = blockSize != 0 ? min_c(blockSize, 512) : 512;
+	uint8_t* data = (uint8_t*)buffer;
+	while (length > 0) {
+		uint32_t argument = (isWrite ? 1u << 31 : 0)
+			| ((uint32_t)function << 28) | (incrementAddress ? 1u << 26 : 0)
+			| ((address & 0x1ffff) << 9);
+		size_t chunk;
+		uint32_t response;
+		if (fSdioMultiBlock && blockSize != 0 && length >= blockSize) {
+			// the count is 9 bits, and 0 would mean "until aborted"
+			const uint32_t blocks = min_c(length / blockSize, 511);
+			chunk = blocks * blockSize;
+			status = fController->execute_io_command(fCookie, SDIO_RW_EXTENDED,
+				argument | (1u << 27) | blocks, data, blockSize, blocks,
+				isWrite, &response);
+		} else {
+			// in byte mode, a count of 0 means 512
+			chunk = min_c(length, byteModeLimit);
+			status = fController->execute_io_command(fCookie, SDIO_RW_EXTENDED,
+				argument | (chunk & 0x1ff), data, chunk, 1, isWrite, &response);
+		}
+		if (status != B_OK)
+			return status;
+		if ((response & 0xcb00) != 0) {
+			ERROR("CMD53 %#" B_PRIx32 ": response flags %#" B_PRIx32 "\n",
+				argument, (response >> 8) & 0xff);
+			return B_IO_ERROR;
+		}
+
+		data += chunk;
+		length -= chunk;
+		if (incrementAddress)
+			address += chunk;
+	}
+	return B_OK;
+}
+
+
+/*!	Sets the block size of a function's block mode transfers. */
+status_t
+MMCBus::SdioSetBlockSize(uint16_t rca, uint8_t function, uint16_t blockSize)
+{
+	if (function > 7 || blockSize == 0 || blockSize > 2048)
+		return B_BAD_VALUE;
+
+	const uint32_t address = function == 0
+		? kCccrBlockSize : function * 0x100 + kFbrBlockSize;
+	status_t status = SdioWriteDirect(rca, 0, address, blockSize & 0xff);
+	if (status == B_OK)
+		status = SdioWriteDirect(rca, 0, address + 1, blockSize >> 8);
+	if (status == B_OK)
+		fSdioBlockSize[function] = blockSize;
+	return status;
+}
+
+
+/*!	Enables an I/O function and waits (up to a second) until it is ready, or
+	disables it.
+*/
+status_t
+MMCBus::SdioEnableFunction(uint16_t rca, uint8_t function, bool enable)
+{
+	if (function == 0 || function > 7)
+		return B_BAD_VALUE;
+
+	uint8_t enabled;
+	status_t status = SdioReadDirect(rca, 0, kCccrIoEnable, &enabled);
+	if (status != B_OK)
+		return status;
+	if (enable)
+		enabled |= 1 << function;
+	else
+		enabled &= ~(1 << function);
+	status = SdioWriteDirect(rca, 0, kCccrIoEnable, enabled);
+	if (status != B_OK || !enable)
+		return status;
+
+	for (int32 i = 0; i < 1000; i++) {
+		uint8_t ready;
+		status = SdioReadDirect(rca, 0, kCccrIoReady, &ready);
+		if (status != B_OK)
+			return status;
+		if ((ready & (1 << function)) != 0)
+			return B_OK;
+		snooze(1000);
+	}
+	return B_TIMED_OUT;
 }
 
 
@@ -212,10 +374,10 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 	// CCCR revision, and the common CIS (CCCR 0x09-0x0b); CMD52 selects the
 	// card (CMD7) first
 	uint8_t cccrRevision, cisPointer[3];
-	if (_ReadDirect(rca, 0, 0x00, &cccrRevision) != B_OK
-		|| _ReadDirect(rca, 0, 0x09, &cisPointer[0]) != B_OK
-		|| _ReadDirect(rca, 0, 0x0a, &cisPointer[1]) != B_OK
-		|| _ReadDirect(rca, 0, 0x0b, &cisPointer[2]) != B_OK) {
+	if (SdioReadDirect(rca, 0, 0x00, &cccrRevision) != B_OK
+		|| SdioReadDirect(rca, 0, 0x09, &cisPointer[0]) != B_OK
+		|| SdioReadDirect(rca, 0, 0x0a, &cisPointer[1]) != B_OK
+		|| SdioReadDirect(rca, 0, 0x0b, &cisPointer[2]) != B_OK) {
 		ERROR("SDIO card: cannot read the CCCR\n");
 		return false;
 	}
@@ -225,14 +387,14 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 	uint16_t vendor = 0, device = 0;
 	for (int32 tuples = 0; tuples < 64; tuples++) {
 		uint8_t code, link;
-		if (_ReadDirect(rca, 0, cis, &code) != B_OK || code == 0xff)
+		if (SdioReadDirect(rca, 0, cis, &code) != B_OK || code == 0xff)
 			break;
-		if (_ReadDirect(rca, 0, cis + 1, &link) != B_OK)
+		if (SdioReadDirect(rca, 0, cis + 1, &link) != B_OK)
 			break;
 		if (code == 0x20 && link >= 4) {
 			uint8_t id[4];
 			for (int32 i = 0; i < 4; i++)
-				_ReadDirect(rca, 0, cis + 2 + i, &id[i]);
+				SdioReadDirect(rca, 0, cis + 2 + i, &id[i]);
 			vendor = id[0] | (id[1] << 8);
 			device = id[2] | (id[3] << 8);
 			break;
@@ -242,11 +404,44 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 		cis += 2 + link;
 	}
 
-	TRACE_ALWAYS("SDIO card %04x:%04x, %" B_PRIu32 " functions, CCCR revision "
-		"%#x, RCA %#x\n", vendor, device, functionCount, cccrRevision, rca);
+	// Full speed cards and low speed cards that say so do 4-bit transfers
+	uint8_t capability, busInterface;
+	if (SdioReadDirect(rca, 0, kCccrCardCapability, &capability) != B_OK
+		|| SdioReadDirect(rca, 0, kCccrBusInterface, &busInterface) != B_OK) {
+		ERROR("SDIO card: cannot read its capabilities\n");
+		return false;
+	}
+	fSdioMultiBlock = (capability & kCapabilityMultiBlock) != 0;
+	int busWidth = 1;
+	if ((capability & kCapabilityLowSpeed) == 0
+		|| (capability & kCapabilityLowSpeed4Bit) != 0) {
+		busInterface = (busInterface & ~kBusWidthMask) | kBusWidth4Bit;
+		if (SdioWriteDirect(rca, 0, kCccrBusInterface, busInterface) == B_OK) {
+			SetBusWidth(4);
+			busWidth = 4;
+		}
+	}
+	// High speed timing: the card outputs data on the rising clock edge,
+	// which leaves the host more margin (for now still at 25 MHz)
+	uint8_t busSpeed;
+	bool highSpeed = false;
+	if (SdioReadDirect(rca, 0, kCccrBusSpeed, &busSpeed) == B_OK
+		&& (busSpeed & kBusSpeedSupportsHigh) != 0) {
+		highSpeed = SdioWriteDirect(rca, 0, kCccrBusSpeed,
+			busSpeed | kBusSpeedEnableHigh) == B_OK;
+	}
+	SetClock(25000);
 
 	const uint8_t cardType = CARD_TYPE_SDIO;
 	SetCardType((card_type)cardType);
+
+	TRACE_ALWAYS("SDIO card %04x:%04x, %" B_PRIu32 " functions, CCCR revision "
+		"%#x, RCA %#x, %d-bit%s%s\n", vendor, device, functionCount,
+		cccrRevision, rca, busWidth, highSpeed ? ", high speed" : "",
+		fSdioMultiBlock ? ", multi-block" : "");
+
+	if (vendor == 0x02d0)
+		_ProbeBroadcomChip(rca);
 	char name[8];
 	snprintf(name, sizeof(name), "%04x", device);
 	device_attr attrs[] = {
@@ -262,6 +457,115 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 	gDeviceManager->register_node(fNode, MMC_BUS_MODULE_NAME, attrs, NULL,
 		NULL);
 	return true;
+}
+
+
+/*!	Bring-up check of the SDIO data path (TODO: remove once the WiFi driver
+	does this itself): read the chip ID of a Broadcom WLAN chip through its
+	backplane window, with byte mode and block mode transfers.
+*/
+void
+MMCBus::_ProbeBroadcomChip(uint16_t rca)
+{
+	enum {
+		kChipClockCsr			= 0x1000e,
+		kSleepCsr				= 0x1001f,
+		kKeepSdioOn				= 0x01,
+		kAlpAvailableRequest	= 0x08,
+		kForceAlp				= 0x01,
+		kForceHardwareClockOff	= 0x20,
+		kAlpAvailable			= 0x40,
+		kChipCommon				= 0x18000000,
+		kWindowAccess32Bit		= 0x8000,
+	};
+
+	status_t status = SdioEnableFunction(rca, 1, true);
+	if (status == B_OK)
+		status = SdioSetBlockSize(rca, 1, 64);
+	uint8_t sleep = 0;
+	if (status == B_OK)
+		status = SdioReadDirect(rca, 1, kSleepCsr, &sleep);
+	if (status == B_OK)
+		status = SdioWriteDirect(rca, 1, kSleepCsr, sleep | kKeepSdioOn);
+	if (status == B_OK) {
+		status = SdioWriteDirect(rca, 1, kChipClockCsr,
+			kForceHardwareClockOff | kAlpAvailableRequest);
+	}
+	uint8_t clock = 0;
+	for (int32 i = 0; status == B_OK && i < 100; i++) {
+		status = SdioReadDirect(rca, 1, kChipClockCsr, &clock);
+		if ((clock & kAlpAvailable) != 0)
+			break;
+		snooze(1000);
+	}
+	// with the hardware clock requests off, the backplane only gets the ALP
+	// clock when it is forced
+	if (status == B_OK) {
+		status = SdioWriteDirect(rca, 1, kChipClockCsr,
+			kForceHardwareClockOff | kForceAlp);
+		snooze(65);
+	}
+	if (status == B_OK)
+		status = _SetBroadcomWindow(rca, kChipCommon);
+
+	uint32_t id = 0;
+	if (status == B_OK) {
+		status = SdioReadWriteExtended(rca, 1,
+			(kChipCommon & 0x7fff) | kWindowAccess32Bit, true, false, &id, 4);
+	}
+
+	// Write a pattern to the chip's RAM and read it back, in block mode
+	static const uint32_t kRam = 0x198000;
+	static const size_t kWords = 1024;
+	uint32_t* pattern = (uint32_t*)malloc(2 * kWords * sizeof(uint32_t));
+	if (pattern == NULL)
+		return;
+	uint32_t* readBack = pattern + kWords;
+	for (size_t i = 0; i < kWords; i++)
+		pattern[i] = (uint32_t)i * 0x9e3779b9 ^ 0x5a5aa5a5;
+	memset(readBack, 0, kWords * sizeof(uint32_t));
+
+	status_t written = B_NO_INIT, read = B_NO_INIT;
+	if (status == B_OK)
+		status = _SetBroadcomWindow(rca, kRam);
+	if (status == B_OK) {
+		written = SdioReadWriteExtended(rca, 1,
+			(kRam & 0x7fff) | kWindowAccess32Bit, true, true, pattern,
+			kWords * sizeof(uint32_t));
+		read = SdioReadWriteExtended(rca, 1,
+			(kRam & 0x7fff) | kWindowAccess32Bit, true, false, readBack,
+			kWords * sizeof(uint32_t));
+	}
+	size_t firstDifference = kWords;
+	for (size_t i = 0; i < kWords; i++) {
+		if (pattern[i] != readBack[i]) {
+			firstDifference = i;
+			break;
+		}
+	}
+	TRACE_ALWAYS("SDIO Broadcom probe: %s, chip %#" B_PRIx32 " (BCM%04" B_PRIx32
+		" rev %" B_PRIu32 "), RAM write %s, read %s, %s (word %d)\n",
+		strerror(status), id, id & 0xffff, (id >> 16) & 0xf, strerror(written),
+		strerror(read), firstDifference == kWords ? "matches" : "DIFFERS",
+		(int)firstDifference);
+	free(pattern);
+}
+
+
+/*!	Points the 32 KB backplane window of a Broadcom chip's function 1 at
+	\a address (TODO: belongs to the WiFi driver).
+*/
+status_t
+MMCBus::_SetBroadcomWindow(uint16_t rca, uint32_t address)
+{
+	static const uint32_t kBackplaneWindow = 0x1000a;
+	status_t status = SdioWriteDirect(rca, 1, kBackplaneWindow,
+		(address >> 8) & 0x80);
+	if (status == B_OK)
+		status = SdioWriteDirect(rca, 1, kBackplaneWindow + 1, address >> 16);
+	if (status == B_OK)
+		status = SdioWriteDirect(rca, 1, kBackplaneWindow + 2, address >> 24);
+	return status;
 }
 
 
