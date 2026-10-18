@@ -374,6 +374,7 @@ AddBootModuleSymlinksToPackage
 
 # add-ons
 AddFilesToPackage add-ons accelerants :
+	bcm2711_display.accelerant@arm64
 	framebuffer.accelerant
 	virtio_gpu.accelerant
 	$(SYSTEM_ADD_ONS_ACCELERANTS) ;

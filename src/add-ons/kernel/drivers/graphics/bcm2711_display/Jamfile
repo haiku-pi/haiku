@@ -1,0 +1,21 @@
+SubDir HAIKU_TOP src add-ons kernel drivers graphics bcm2711_display ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+UsePrivateHeaders [ FDirName graphics bcm2711_display ] ;
+UsePrivateHeaders [ FDirName graphics common ] ;
+UseLibraryHeaders [ FDirName libfdt ] ;
+
+local libFDTSources =
+	fdt.c
+	fdt_ro.c
+	fdt_strerror.c
+;
+
+KernelAddon bcm2711_display :
+	bcm2711_display.cpp
+	$(libFDTSources)
+;
+
+SEARCH on [ FGristFiles $(libFDTSources) ]
+	= [ FDirName $(HAIKU_TOP) src libs libfdt ] ;

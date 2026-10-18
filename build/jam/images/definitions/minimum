@@ -298,6 +298,9 @@ SYSTEM_ADD_ONS_DRIVERS_AUDIO_OLD = ;
 
 SYSTEM_ADD_ONS_DRIVERS_GRAPHICS = [ FFilterByBuildFeatures
 	framebuffer
+	arm64 @{
+		bcm2711_display
+	}@ # arm64
 	x86,x86_64 @{
 		vesa
 	}@ # x86,x86_64

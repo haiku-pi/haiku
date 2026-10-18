@@ -53,6 +53,9 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_TAG_GET_GPIO_STATE			0x00030041
 #define BCM2835_TAG_SET_GPIO_STATE			0x00038041
 #define BCM2835_TAG_NOTIFY_XHCI_RESET		0x00030058
+#define BCM2835_TAG_GET_EDID_BLOCK			0x00030020
+#define BCM2835_TAG_SET_VSYNC				0x0004800e
+	// blocks until the next vertical sync
 
 // Clock IDs for the clock tags
 #define BCM2835_CLOCK_EMMC		1
