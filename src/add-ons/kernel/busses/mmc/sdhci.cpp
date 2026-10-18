@@ -18,6 +18,8 @@
 #include <ACPI.h>
 #include "acpi.h"
 
+#include <vm/vm.h>
+
 #if defined(__aarch64__)
 #	include <arch/cpu.h>
 #	include <arch_kernel.h>
@@ -64,7 +66,13 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 	fCardType(CARD_TYPE_UNKNOWN),
 	fBaseClockKHz(baseClockKHz),
 	fDmaBusOffset(0),
-	fDmaCoherent(true)
+	fDmaHighAddress(0x100000000LL),
+	fDmaCoherent(true),
+	fUseDma(true),
+	fUseAdma(false),
+	fAdmaArea(-1),
+	fAdmaTable(NULL),
+	fAdmaTablePhysical(0)
 {
 	if (irq == 0 || irq == 0xff) {
 		ERROR("IRQ not assigned\n");
@@ -123,6 +131,10 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 		fRegisters->capabilities.MaxBlockLength(),
 		fRegisters->capabilities.BaseClockFrequency(),
 		fRegisters->capabilities.TimeoutClockFrequency());
+	fUseDma = fRegisters->capabilities.SimpleDMA();
+	if (!fUseDma)
+		TRACE_ALWAYS("no Simple DMA, transferring data by PIO\n");
+
 	TRACE("Initial host control: %x\n", fRegisters->host_control.Bits());
 	TRACE("Initial host control 2: %x\n", (uint16)fRegisters->host_control_2);
 
@@ -144,7 +156,7 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 
 	// Finally, configure some useful interrupts
 	EnableInterrupts(SDHCI_INT_CMD_CMP | SDHCI_INT_CARD_REM
-		| SDHCI_INT_TRANS_CMP | SDHCI_INT_DATA_TIMEOUT | SDHCI_INT_COMMAND_TIMEOUT);
+		| SDHCI_INT_TRANSFER_MASK | SDHCI_INT_COMMAND_TIMEOUT);
 
 	// We want to see the other bits in the status register, but not have an
 	// interrupt trigger on them (we get a "command complete" interrupt on
@@ -169,6 +181,8 @@ SdhciBus::~SdhciBus()
 
 	area_id regs_area = area_for(fRegisters);
 	delete_area(regs_area);
+	if (fAdmaArea >= 0)
+		delete_area(fAdmaArea);
 
 	fStatus = B_SHUTTING_DOWN;
 
@@ -314,6 +328,8 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 
 	fRegisters->argument = argument;
 
+	if (!fUseDma)
+		transferMode &= ~TransferMode::kDmaEnable;
 	fRegisters->command.SendCommand(command, replyType, transferMode);
 
 	// Wait for command response to be available ("command complete" interrupt)
@@ -410,14 +426,119 @@ SdhciBus::InitCheck()
 
 
 /*!	Configures how the controller reaches memory: \a busOffset is added to
-	physical addresses to obtain the controller's DMA addresses, and \a coherent
-	tells whether it snoops the CPU caches.
+	physical addresses to obtain the controller's DMA addresses, it can reach
+	physical addresses below \a highAddress, and \a coherent tells whether it
+	snoops the CPU caches.
 */
 void
-SdhciBus::SetDmaWindow(phys_addr_t busOffset, bool coherent)
+SdhciBus::SetDmaWindow(phys_addr_t busOffset, phys_addr_t highAddress,
+	bool coherent)
 {
 	fDmaBusOffset = busOffset;
+	fDmaHighAddress = highAddress;
 	fDmaCoherent = coherent;
+
+	if (fUseDma)
+		fUseAdma = _InitAdma();
+}
+
+
+/*!	Uses ADMA2 with 32-bit descriptors if the controller supports it: one
+	descriptor table, within the controller's reach.
+*/
+bool
+SdhciBus::_InitAdma()
+{
+	if (!fRegisters->capabilities.AdvancedDMA())
+		return false;
+
+	physical_address_restrictions physicalRestrictions = {};
+	physicalRestrictions.high_address = min_c(fDmaHighAddress, 0x100000000LL);
+	virtual_address_restrictions virtualRestrictions = {};
+	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+	fAdmaArea = create_area_etc(B_SYSTEM_TEAM, "sdhci adma2 descriptors",
+		B_PAGE_SIZE, B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0,
+		&virtualRestrictions, &physicalRestrictions, (void**)&fAdmaTable);
+	if (fAdmaArea < 0) {
+		ERROR("no memory for the ADMA2 descriptors, using SDMA\n");
+		return false;
+	}
+
+	physical_entry entry;
+	get_memory_map(fAdmaTable, B_PAGE_SIZE, &entry, 1);
+	fAdmaTablePhysical = entry.address;
+
+	fRegisters->host_control.SetDMAMode(HostControl::kAdma32);
+	TRACE_ALWAYS("using ADMA2\n");
+	return true;
+}
+
+
+/*!	Describes [address, address + length) to the ADMA2 engine. Chunks stay
+	below 64 KiB, so that no length has to be encoded as 0.
+*/
+void
+SdhciBus::_SetupAdma(phys_addr_t address, size_t length)
+{
+	static const size_t kMaxChunk = 32 * 1024;
+	static const size_t kMaxDescriptors
+		= B_PAGE_SIZE / sizeof(struct adma2_descriptor);
+
+	size_t count = 0;
+	for (size_t done = 0; done < length; count++) {
+		ASSERT(count < kMaxDescriptors);
+		const size_t chunk = min_c(length - done, kMaxChunk);
+		fAdmaTable[count].attributes = ADMA2_VALID | ADMA2_TRANSFER;
+		fAdmaTable[count].length = chunk;
+		fAdmaTable[count].address = address + done + fDmaBusOffset;
+		done += chunk;
+	}
+	fAdmaTable[count - 1].attributes |= ADMA2_END;
+
+	_SyncForDevice(fAdmaTablePhysical,
+		count * sizeof(struct adma2_descriptor));
+
+	// The DMA mode is lost when the controller is reset.
+	fRegisters->host_control.SetDMAMode(HostControl::kAdma32);
+	fRegisters->adma_system_address = fAdmaTablePhysical + fDmaBusOffset;
+	fRegisters->adma_system_address_high = 0;
+}
+
+
+/*!	Moves the data of a transfer through the buffer data port, one block at
+	a time, for controllers that cannot do DMA.
+*/
+status_t
+SdhciBus::_TransferPio(phys_addr_t address, size_t length, bool isWrite)
+{
+	static const size_t kBlockSize = 512;
+	const uint32_t ready = isWrite
+		? SDHCI_INT_BUF_WRITE_READY : SDHCI_INT_BUF_READ_READY;
+	uint32_t block[kBlockSize / sizeof(uint32_t)];
+
+	for (size_t done = 0; done < length; done += kBlockSize) {
+		const bigtime_t timeout = system_time() + 1000000;
+		uint32_t status;
+		while (((status = fRegisters->interrupt_status) & ready) == 0) {
+			if ((status & SDHCI_INT_ERROR) != 0)
+				return B_IO_ERROR;
+			if (system_time() > timeout)
+				return B_TIMED_OUT;
+			spin(1);
+		}
+		fRegisters->interrupt_status = ready;
+
+		if (isWrite) {
+			vm_memcpy_from_physical(block, address + done, kBlockSize, false);
+			for (size_t i = 0; i < B_COUNT_OF(block); i++)
+				fRegisters->buffer_data_port = block[i];
+		} else {
+			for (size_t i = 0; i < B_COUNT_OF(block); i++)
+				block[i] = fRegisters->buffer_data_port;
+			vm_memcpy_to_physical(address + done, block, kBlockSize, false);
+		}
+	}
+	return B_OK;
 }
 
 
@@ -536,13 +657,15 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 		// With SDMA we can only transfer multiples of 1 sector
 		ASSERT(toCopy % kBlockSize == 0);
 
-		// Step 1: set system address
+		// Step 1: set system address (or the ADMA2 descriptor table)
 		const phys_addr_t address = vecs->base + vecOffset;
-		fRegisters->system_address = address + fDmaBusOffset;
-		_SyncForDevice(address, toCopy);
-		// TODO detect if the host controller supports "advanced DMA", in that case, use the ADMA
-		// registers:
-		// fRegisters->adma_system_address = fDmaMemory;
+		if (fUseAdma) {
+			_SetupAdma(address, toCopy);
+			_SyncForDevice(address, toCopy);
+		} else if (fUseDma) {
+			fRegisters->system_address = address + fDmaBusOffset;
+			_SyncForDevice(address, toCopy);
+		}
 
 		// Step 2: Set block size
 		// For simplicity we use a transfer size equal to the sector size. We could
@@ -580,6 +703,15 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 		if (result != B_OK)
 			break;
 
+		if (!fUseDma) {
+			result = _TransferPio(address, toCopy, isWrite);
+			if (result != B_OK) {
+				ERROR("PIO transfer failed: %s\n", strerror(result));
+				fRegisters->software_reset.ResetDataLine();
+				break;
+			}
+		}
+
 		// Step 10: Wait for DMA transfer to complete
 		// In theory we could go on and send other commands as long as they
 		// don't need the DAT lines, but it's overcomplicating things.
@@ -600,8 +732,14 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 			fRegisters->software_reset.ResetDataLine();
 			return B_TIMED_OUT;
 		}
+		if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0) {
+			ERROR("data transfer error %x (ADMA error status %x)\n",
+				fCommandResult, fRegisters->adma_error_status);
+			fRegisters->software_reset.ResetDataLine();
+			return B_IO_ERROR;
+		}
 
-		if (!isWrite)
+		if (fUseDma && !isWrite)
 			_SyncForDevice(address, toCopy);
 				// drop lines the CPU fetched while the device wrote memory
 
@@ -809,7 +947,9 @@ SdhciBus::HandleInterrupt()
 
 	// Check that all interrupts have been cleared (we check all the ones we
 	// enabled, so that should always be the case)
-	intmask = fRegisters->interrupt_status;
+	// (the buffer ready bits are only used, and cleared, by PIO transfers)
+	intmask = fRegisters->interrupt_status
+		& ~(SDHCI_INT_BUF_READ_READY | SDHCI_INT_BUF_WRITE_READY);
 	if (intmask != 0) {
 		ERROR("Remaining interrupts at end of handler: %x\n", intmask);
 	}

@@ -38,13 +38,18 @@ class SdhciBus {
 			void				SetScanSemaphore(sem_id sem);
 			void				SetBusWidth(int width);
 			void				SetCardType(card_type type);
-			void				SetDmaWindow(phys_addr_t busOffset, bool coherent);
+			void				SetDmaWindow(phys_addr_t busOffset,
+									phys_addr_t highAddress, bool coherent);
 			void				TerminateBus();
 
 	private:
 			bool				PowerOn();
 			void				PowerOff();
 			void				RecoverError();
+			status_t			_TransferPio(phys_addr_t address, size_t length,
+									bool isWrite);
+			bool				_InitAdma();
+			void				_SetupAdma(phys_addr_t address, size_t length);
 			void				_SyncForDevice(phys_addr_t address, size_t length);
 	static	status_t			_WorkerThread(void*);
 
@@ -60,7 +65,13 @@ class SdhciBus {
 			uint32				fBaseClockKHz;
 				// 0: from the capabilities register
 			phys_addr_t			fDmaBusOffset;
+			phys_addr_t			fDmaHighAddress;
 			bool				fDmaCoherent;
+			bool				fUseDma;
+			bool				fUseAdma;
+			area_id				fAdmaArea;
+			struct adma2_descriptor* fAdmaTable;
+			phys_addr_t			fAdmaTablePhysical;
 };
 
 
@@ -338,7 +349,9 @@ class SoftwareReset {
 		| SDHCI_INT_COMMAND_CRC | SDHCI_INT_COMMAND_END_BIT | SDHCI_INT_COMMAND_INDEX)
 
 #define SDHCI_INT_CMD_MASK 			(SDHCI_INT_CMD_CMP | SDHCI_INT_CMD_ERROR_MASK)
-#define SDHCI_INT_TRANSFER_MASK 	(SDHCI_INT_TRANS_CMP | SDHCI_INT_DATA_TIMEOUT)
+#define SDHCI_INT_DATA_ERROR_MASK	(SDHCI_INT_DATA_TIMEOUT | SDHCI_INT_DATA_CRC \
+	| SDHCI_INT_DATA_END | SDHCI_INT_ADMA_ERROR)
+#define SDHCI_INT_TRANSFER_MASK 	(SDHCI_INT_TRANS_CMP | SDHCI_INT_DATA_ERROR_MASK)
 
 #define SDHCI_INT_ERROR_MASK		(SDHCI_INT_VENDOR_ERRORS | SDHCI_INT_TUNING_ERROR \
 	| SDHCI_INT_ADMA_ERROR | SDHCI_INT_AUTO_CMD_ERROR | SDHCI_INT_BUS_POWER | SDHCI_INT_DATA_END \
@@ -509,7 +522,8 @@ struct registers {
 	// ADMA2
 	volatile uint8_t adma_error_status;
 	volatile uint8_t padding[3];
-	volatile uint64_t adma_system_address;
+	volatile uint32_t adma_system_address;
+	volatile uint32_t adma_system_address_high;
 
 	// Preset values
 	volatile uint64_t preset_value[2];
@@ -554,6 +568,18 @@ struct registers {
 	NarrowRegister<uint16_t> slot_interrupt_status;
 	HostControllerVersion host_controller_version;
 } __attribute__((packed));
+
+// An ADMA2 descriptor with a 32-bit address (SD Host Controller spec 1.13.3)
+struct adma2_descriptor {
+	uint16_t	attributes;
+	uint16_t	length;
+	uint32_t	address;
+} __attribute__((packed));
+
+#define ADMA2_VALID		(1 << 0)
+#define ADMA2_END		(1 << 1)
+#define ADMA2_INTERRUPT	(1 << 2)
+#define ADMA2_TRANSFER	(2 << 4)
 
 typedef void* sdhci_mmc_bus;
 

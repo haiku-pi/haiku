@@ -146,9 +146,11 @@ init_bus_fdt(device_node* node, void** bus_cookie)
 
 	int64 busOffset;
 	phys_addr_t physicalEnd;
-	if (!fdt->get_dma_window(device, &busOffset, &physicalEnd))
+	if (!fdt->get_dma_window(device, &busOffset, &physicalEnd)) {
 		busOffset = 0;
-	bus->SetDmaWindow(busOffset,
+		physicalEnd = 0x100000000LL;
+	}
+	bus->SetDmaWindow(busOffset, physicalEnd,
 		fdt->get_prop(device, "dma-coherent", NULL) != NULL);
 
 	*bus_cookie = bus;
