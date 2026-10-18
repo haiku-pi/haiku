@@ -146,6 +146,7 @@ AddNewDriversToPackage gpio :
 	bcm2835_gpio@arm64
 	;
 AddNewDriversToPackage network :
+	genet@arm64
 	usb_ecm
 	virtio_net
 	;

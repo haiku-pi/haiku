@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src add-ons kernel drivers network ether genet ;
+
+SubDirC++Flags -fno-rtti ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers net ;
+
+KernelAddon genet :
+	genet.cpp
+;

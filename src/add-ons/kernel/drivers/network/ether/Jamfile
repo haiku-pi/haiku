@@ -8,6 +8,10 @@ HaikuSubInclude usb_ecm ;
 HaikuSubInclude usb_rndis ;
 HaikuSubInclude wb840 ;
 
+if $(TARGET_ARCH) = arm64 {
+	HaikuSubInclude genet ;
+}
+
 # FreeBSD drivers
 HaikuSubInclude 3com ;
 HaikuSubInclude asix88xxx ;

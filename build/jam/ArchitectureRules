@@ -680,6 +680,7 @@ rule ArchitectureSetupWarnings architecture
 	EnableWerror src add-ons kernel drivers midi ;
 	EnableWerror src add-ons kernel drivers misc ;
 	EnableWerror src add-ons kernel drivers network ether 3com ;
+	EnableWerror src add-ons kernel drivers network ether genet ;
 #	EnableWerror src add-ons kernel drivers network ether atheros813x ;
 #	EnableWerror src add-ons kernel drivers network ether atheros81xx ;
 #	EnableWerror src add-ons kernel drivers network ether attansic_l1 ;
