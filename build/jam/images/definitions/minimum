@@ -234,6 +234,7 @@ SYSTEM_SERVERS = [ FFilterByBuildFeatures
 	power_daemon
 	registrar
 	syslog_daemon
+	nfs4_idmapper_server@arm64
 ] ;
 
 SYSTEM_NETWORK_DEVICES =
@@ -393,6 +394,10 @@ SYSTEM_ADD_ONS_FILE_SYSTEMS =
 	udf
 	write_overlay
 ;
+# NFSv4 on the Raspberry Pi 4 (Ethernet is its main storage besides the SD card)
+SYSTEM_ADD_ONS_FILE_SYSTEMS += [ FFilterByBuildFeatures
+	nfs4@arm64
+] ;
 
 # symlink to home on desktop
 AddSymlinkToHaikuImage home Desktop : /boot/home : Home ;
