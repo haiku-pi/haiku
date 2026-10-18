@@ -781,6 +781,8 @@ struct ieee80211req {
 	Haiku extension: initiate join of network, potentially encrypted.
 */
 #define IEEE80211_IOC_HAIKU_JOIN				0x6002
+	// i_val: the key is the raw PMK (0) or a WPA passphrase
+#define IEEE80211_HAIKU_JOIN_PASSPHRASE			1
 struct ieee80211_haiku_join_req {
 	uint8 i_nwid[IEEE80211_NWID_LEN];
 	uint8 i_nwid_len;
