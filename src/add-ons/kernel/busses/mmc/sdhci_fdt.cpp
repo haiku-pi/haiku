@@ -37,12 +37,38 @@
 #define SDHCI_FDT_MMC_BUS_MODULE_NAME "busses/mmc/sdhci/fdt/device/v1"
 
 
-static const char* const kCompatible[] = {
+struct controller_info {
+	const char*	compatible;
+	uint32		firmware_clock;
+		// the VideoCore's ID of the base clock, if "clock-frequency" is missing
+	bool		no_high_speed_bit;
+	bool		force_pio;
+	bool		assume_3v3;
+};
+
+static const controller_info kControllers[] = {
 	// The Raspberry Pi 4's SD card slot. Its registers only accept 32-bit
 	// accesses (which struct registers always uses), its base clock comes
-	// from the VideoCore firmware, and it does not snoop the CPU caches.
-	"brcm,bcm2711-emmc2",
+	// from the VideoCore firmware (EMMC2), and it does not snoop the CPU
+	// caches.
+	{ "brcm,bcm2711-emmc2", 12, false, false, false },
+	// The Raspberry Pi's original controller (Arasan); on the Pi 4 it is
+	// wired to the WiFi chip's SDIO. Linux ignores its capabilities and does
+	// not use its DMA or the High Speed Enable bit, and runs it at 3.3 V; base
+	// clock: EMMC.
+	{ "brcm,bcm2835-mmc", 1, true, true, true },
 };
+
+
+static const controller_info*
+find_controller(const char* compatible)
+{
+	for (size_t i = 0; i < B_COUNT_OF(kControllers); i++) {
+		if (strcmp(compatible, kControllers[i].compatible) == 0)
+			return &kControllers[i];
+	}
+	return NULL;
+}
 
 
 static fdt_device*
@@ -65,10 +91,9 @@ get_fdt_device(device_node* node, fdt_device_module_info** _module)
 	the Raspberry Pi, the VideoCore firmware knows it.
 */
 static uint32
-firmware_base_clock_khz()
+firmware_base_clock_khz(uint32 clockID)
 {
 #ifdef __aarch64__
-	const uint32 clockID = BCM2835_CLOCK_EMMC2;
 	bcm2835_mailbox_module_info* mailbox;
 	if (get_module(BCM2835_MAILBOX_MODULE_NAME, (module_info**)&mailbox) != B_OK)
 		return 0;
@@ -107,13 +132,24 @@ init_bus_fdt(device_node* node, void** bus_cookie)
 		return B_DEVICE_NOT_FOUND;
 	}
 
+	const controller_info* info = find_controller(
+		(const char*)fdt->get_prop(device, "compatible", NULL));
+	if (info == NULL)
+		return B_DEVICE_NOT_FOUND;
+
+	sdhci_quirks quirks = {};
+	quirks.non_removable = fdt->get_prop(device, "non-removable", NULL) != NULL;
+	quirks.no_high_speed_bit = info->no_high_speed_bit;
+	quirks.force_pio = info->force_pio;
+	quirks.assume_3v3 = info->assume_3v3;
+
 	uint32 baseClockKHz;
 	const uint32* clock = (const uint32*)fdt->get_prop(device, "clock-frequency",
 		NULL);
 	if (clock != NULL)
 		baseClockKHz = B_BENDIAN_TO_HOST_INT32(*clock) / 1000;
 	else {
-		baseClockKHz = firmware_base_clock_khz();
+		baseClockKHz = firmware_base_clock_khz(info->firmware_clock);
 		if (baseClockKHz == 0) {
 			ERROR("cannot get the base clock from the firmware\n");
 			return B_ERROR;
@@ -133,8 +169,8 @@ init_bus_fdt(device_node* node, void** bus_cookie)
 		B_PRIu32 " kHz\n", fdt->get_name(device), registers, interrupt,
 		baseClockKHz);
 
-	SdhciBus* bus = new(std::nothrow) SdhciBus(regs, interrupt, false,
-		baseClockKHz);
+	quirks.base_clock_khz = baseClockKHz;
+	SdhciBus* bus = new(std::nothrow) SdhciBus(regs, interrupt, false, &quirks);
 	status_t status = bus != NULL ? bus->InitCheck() : B_NO_MEMORY;
 	if (status != B_OK) {
 		if (bus != NULL)
@@ -211,13 +247,25 @@ supports_device_fdt(device_node* parent)
 		return 0.0f;
 	}
 
-	for (size_t i = 0; i < B_COUNT_OF(kCompatible); i++) {
-		if (strcmp(compatible, kCompatible[i]) == 0) {
-			TRACE("SDHCI device found: %s\n", compatible);
-			return 0.8f;
-		}
+	if (find_controller(compatible) == NULL)
+		return 0.0f;
+
+	// The Raspberry Pi's device tree describes its legacy controller twice,
+	// once disabled.
+	fdt_device_module_info* fdt;
+	fdt_device* device;
+	if (gDeviceManager->get_driver(parent, (driver_module_info**)&fdt,
+			(void**)&device) != B_OK) {
+		return 0.0f;
 	}
-	return 0.0f;
+	const char* status = (const char*)fdt->get_prop(device, "status", NULL);
+	if (status != NULL && strcmp(status, "okay") != 0
+		&& strcmp(status, "ok") != 0) {
+		return 0.0f;
+	}
+
+	TRACE("SDHCI device found: %s\n", compatible);
+	return 0.8f;
 }
 
 

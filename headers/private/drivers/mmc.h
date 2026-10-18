@@ -72,7 +72,10 @@ enum SD_COMMANDS {
 	SD_APP_CMD = 55,
 
 	// I/O mode commands, class 9
+	SDIO_SEND_OP_COND = 5,
+	SDIO_RW_DIRECT = 52,
 	SD_IO_ABORT = 52,
+	SDIO_RW_EXTENDED = 53,
 };
 
 

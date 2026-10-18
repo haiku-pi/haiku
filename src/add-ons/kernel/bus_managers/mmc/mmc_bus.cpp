@@ -10,6 +10,7 @@
 #include <Errors.h>
 
 #include <stdint.h>
+#include <stdio.h>
 
 
 MMCBus::MMCBus(device_node* node)
@@ -157,6 +158,113 @@ MMCBus::_ActivateDevice(uint16_t rca)
 }
 
 
+/*!	Reads one register of an SDIO function with CMD52 (IO_RW_DIRECT). */
+status_t
+MMCBus::_ReadDirect(uint16_t rca, uint8_t function, uint32_t address,
+	uint8_t* value)
+{
+	uint32_t response;
+	status_t status = ExecuteCommand(rca, SDIO_RW_DIRECT,
+		((uint32_t)function << 28) | ((address & 0x1ffff) << 9), &response);
+	if (status != B_OK)
+		return status;
+
+	// R5: response flags in bits 15:8 (error bits 7, 6, 3, 1, 0 of them)
+	if ((response & 0xcb00) != 0)
+		return B_IO_ERROR;
+	*value = response & 0xff;
+	return B_OK;
+}
+
+
+/*!	Brings an SDIO card that answered CMD5 out of its initialization state,
+	gives it an address, reads its identification from the CIS and publishes
+	it (SDIO physical layer spec 3.1, sections 3 and 6).
+*/
+bool
+MMCBus::_ScanSdioCard(uint32_t ocr)
+{
+	const uint32_t functionCount = (ocr >> 28) & 7;
+
+	// Ask for the card's voltage window until it is ready
+	uint32_t response = 0;
+	status_t status;
+	for (int32 i = 0; ; i++) {
+		status = ExecuteCommand(0, SDIO_SEND_OP_COND, ocr & 0x00ffff00,
+			&response);
+		if (status == B_OK && (response & (1u << 31)) != 0)
+			break;
+		if (i == 100) {
+			ERROR("SDIO card does not become ready: %s, OCR %#" B_PRIx32 "\n",
+				strerror(status), response);
+			return false;
+		}
+		snooze(10000);
+	}
+
+	status = ExecuteCommand(0, SD_SEND_RELATIVE_ADDR, 0, &response);
+	if (status != B_OK) {
+		ERROR("SDIO card gets no address: %s\n", strerror(status));
+		return false;
+	}
+	const uint16_t rca = response >> 16;
+
+	// CCCR revision, and the common CIS (CCCR 0x09-0x0b); CMD52 selects the
+	// card (CMD7) first
+	uint8_t cccrRevision, cisPointer[3];
+	if (_ReadDirect(rca, 0, 0x00, &cccrRevision) != B_OK
+		|| _ReadDirect(rca, 0, 0x09, &cisPointer[0]) != B_OK
+		|| _ReadDirect(rca, 0, 0x0a, &cisPointer[1]) != B_OK
+		|| _ReadDirect(rca, 0, 0x0b, &cisPointer[2]) != B_OK) {
+		ERROR("SDIO card: cannot read the CCCR\n");
+		return false;
+	}
+
+	// Walk the CIS for CISTPL_MANFID (0x20): manufacturer and card ID
+	uint32_t cis = cisPointer[0] | (cisPointer[1] << 8) | (cisPointer[2] << 16);
+	uint16_t vendor = 0, device = 0;
+	for (int32 tuples = 0; tuples < 64; tuples++) {
+		uint8_t code, link;
+		if (_ReadDirect(rca, 0, cis, &code) != B_OK || code == 0xff)
+			break;
+		if (_ReadDirect(rca, 0, cis + 1, &link) != B_OK)
+			break;
+		if (code == 0x20 && link >= 4) {
+			uint8_t id[4];
+			for (int32 i = 0; i < 4; i++)
+				_ReadDirect(rca, 0, cis + 2 + i, &id[i]);
+			vendor = id[0] | (id[1] << 8);
+			device = id[2] | (id[3] << 8);
+			break;
+		}
+		if (link == 0xff)
+			break;
+		cis += 2 + link;
+	}
+
+	TRACE_ALWAYS("SDIO card %04x:%04x, %" B_PRIu32 " functions, CCCR revision "
+		"%#x, RCA %#x\n", vendor, device, functionCount, cccrRevision, rca);
+
+	const uint8_t cardType = CARD_TYPE_SDIO;
+	SetCardType((card_type)cardType);
+	char name[8];
+	snprintf(name, sizeof(name), "%04x", device);
+	device_attr attrs[] = {
+		{ B_DEVICE_BUS, B_STRING_TYPE, {.string = "mmc" }},
+		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, {.string = "SDIO device" }},
+		{ B_DEVICE_VENDOR_ID, B_UINT32_TYPE, {.ui32 = vendor}},
+		{ B_DEVICE_ID, B_STRING_TYPE, {.string = name}},
+		{ "sdio/functions", B_UINT8_TYPE, {.ui8 = (uint8)functionCount}},
+		{ kMmcRcaAttribute, B_UINT16_TYPE, {.ui16 = rca}},
+		{ kMmcTypeAttribute, B_UINT8_TYPE, {.ui8 = cardType}},
+		{}
+	};
+	gDeviceManager->register_node(fNode, MMC_BUS_MODULE_NAME, attrs, NULL,
+		NULL);
+	return true;
+}
+
+
 void MMCBus::_AcquireScanSemaphore()
 {
 	ReleaseBus();
@@ -215,6 +323,20 @@ MMCBus::_WorkerThread(void* cookie)
 		// Use the low speed clock and 1bit bus width for scanning
 		bus->SetClock(400);
 		bus->SetBusWidth(1);
+
+		// SDIO cards answer CMD5, memory cards ignore it (as Linux, probe
+		// it first)
+		uint32_t ioOcr;
+		if (bus->ExecuteCommand(0, SDIO_SEND_OP_COND, 0, &ioOcr) == B_OK) {
+			bus->_ScanSdioCard(ioOcr);
+			bus->_AcquireScanSemaphore();
+			continue;
+		}
+
+		// A memory card flags the CMD5 it did not know in its next status;
+		// reset it again so that its first R1 response is clean
+		bus->ExecuteCommand(0, GO_IDLE_STATE, 0, NULL);
+		snooze(30000);
 
 		// Probe the voltage range
 		enum {

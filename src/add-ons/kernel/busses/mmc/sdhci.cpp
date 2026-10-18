@@ -59,12 +59,15 @@ sdhci_generic_interrupt(void* data)
 
 
 SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
-	uint32 baseClockKHz)
+	const sdhci_quirks* quirks)
 	:
 	fRegisters(registers),
 	fIrq(irq),
 	fCardType(CARD_TYPE_UNKNOWN),
-	fBaseClockKHz(baseClockKHz),
+	fBaseClockKHz(quirks != NULL ? quirks->base_clock_khz : 0),
+	fNonRemovable(quirks != NULL && quirks->non_removable),
+	fNoHighSpeedBit(quirks != NULL && quirks->no_high_speed_bit),
+	fAssume3v3(quirks != NULL && quirks->assume_3v3),
 	fDmaBusOffset(0),
 	fDmaHighAddress(0x100000000LL),
 	fDmaCoherent(true),
@@ -131,7 +134,8 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 		fRegisters->capabilities.MaxBlockLength(),
 		fRegisters->capabilities.BaseClockFrequency(),
 		fRegisters->capabilities.TimeoutClockFrequency());
-	fUseDma = fRegisters->capabilities.SimpleDMA();
+	fUseDma = fRegisters->capabilities.SimpleDMA()
+		&& (quirks == NULL || !quirks->force_pio);
 	if (!fUseDma)
 		TRACE_ALWAYS("no Simple DMA, transferring data by PIO\n");
 
@@ -152,11 +156,16 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 		SetClock(400, false);
 	}
 
-	fRegisters->timeout_control.SetDivider(fRegisters->capabilities.TimeoutClockFrequency(), 500);
+	// Without a timeout clock in the capabilities, assume it is the base clock
+	// (the longest timeout that may give)
+	uint32 timeoutClockKHz = fRegisters->capabilities.TimeoutClockFrequency();
+	if (timeoutClockKHz == 0)
+		timeoutClockKHz = fBaseClockKHz;
+	fRegisters->timeout_control.SetDivider(timeoutClockKHz, 500);
 
 	// Finally, configure some useful interrupts
-	EnableInterrupts(SDHCI_INT_CMD_CMP | SDHCI_INT_CARD_REM
-		| SDHCI_INT_TRANSFER_MASK | SDHCI_INT_COMMAND_TIMEOUT);
+	EnableInterrupts(SDHCI_INT_CMD_MASK | SDHCI_INT_CARD_REM
+		| SDHCI_INT_TRANSFER_MASK);
 
 	// We want to see the other bits in the status register, but not have an
 	// interrupt trigger on them (we get a "command complete" interrupt on
@@ -241,7 +250,13 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 			break;
 		case MMC_SEND_OP_COND:
 		case SD_SEND_OP_COND: // SD Application command
+		case SDIO_SEND_OP_COND:
+			// R4 for SDIO has the shape of R3: no CRC, no index
 			replyType = Command::kR3Type;
+			break;
+		case SDIO_RW_DIRECT:
+			// R5 has the shape of R1
+			replyType = Command::kR1Type;
 			break;
 
 		// Commands defined with different reply types in SD and MMC specifications
@@ -365,7 +380,8 @@ SdhciBus::_ExecuteCommand(uint8_t command, uint32_t argument,
 		// TODO is it a good idea to clear interrupts here from outside the interrupt handler?
 		fRegisters->interrupt_status = fCommandResult;
 		if (fCommandResult & SDHCI_INT_COMMAND_TIMEOUT) {
-			ERROR("Command execution timed out\n");
+			// a probe (CMD5, CMD8) times out on cards that do not know it
+			TRACE("Command execution timed out\n");
 			// At this point, the "command inhibit" bit is not set yet, it will be set only after
 			// another command is sent while the controller is in the timeout state.
 			// But resetting the controller state pre-emptively will allow to send another command.
@@ -657,7 +673,7 @@ SdhciBus::SetClock(int kilohertz, bool allowAuto)
 	TRACE("SDCLK frequency: requested %dkHz, effective %dkHz / %d = %dkHz\n", kilohertz,
 		base_clock, divider, base_clock / divider);
 
-	fRegisters->host_control.SetHighSpeed(kilohertz > 25000);
+	fRegisters->host_control.SetHighSpeed(kilohertz > 25000 && !fNoHighSpeedBit);
 
 	// We have set the divider, now we can enable the internal clock.
 	fRegisters->clock_control.EnableInternal();
@@ -816,7 +832,7 @@ SdhciBus::SetScanSemaphore(sem_id sem)
 	fScanSemaphore = sem;
 
 	// If there is already a card in, start a scan immediately
-	if (fRegisters->present_state.IsCardInserted())
+	if (fNonRemovable || fRegisters->present_state.IsCardInserted())
 		release_sem(fScanSemaphore);
 
 	// We can now enable the card insertion interrupt for next time a card
@@ -859,12 +875,14 @@ SdhciBus::SetCardType(card_type type)
 bool
 SdhciBus::PowerOn()
 {
-	if (!fRegisters->present_state.IsCardInserted()) {
+	if (!fNonRemovable && !fRegisters->present_state.IsCardInserted()) {
 		TRACE("Card not inserted, not powering on for now\n");
 		return false;
 	}
 
 	uint8_t supportedVoltages = fRegisters->capabilities.SupportedVoltages();
+	if (fAssume3v3)
+		supportedVoltages |= Capabilities::k3v3;
 	if ((supportedVoltages & Capabilities::k3v3) != 0)
 		fRegisters->power_control.SetVoltage(PowerControl::k3v3);
 	else if ((supportedVoltages & Capabilities::k3v0) != 0)
@@ -942,8 +960,12 @@ SdhciBus::HandleInterrupt()
 	uint32_t intmask = fRegisters->interrupt_status;
 
 	// Shortcut: exit early if there is no interrupt or if the register is
-	// clearly invalid.
-	if ((intmask == 0) || (intmask == 0xffffffff)) {
+	// clearly invalid. Only signalled bits are ours to claim: the line may be
+	// shared with another controller (the Raspberry Pi 4's two SDHCIs share
+	// one), and the first handler that claims a level-triggered interrupt
+	// ends its dispatch.
+	if ((intmask == 0) || (intmask == 0xffffffff)
+		|| (intmask & fRegisters->interrupt_signal_enable) == 0) {
 		return B_UNHANDLED_INTERRUPT;
 	}
 

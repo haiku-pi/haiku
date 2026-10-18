@@ -19,10 +19,25 @@
 #include "mmc.h"
 
 
+// Properties of a controller that it does not report itself
+struct sdhci_quirks {
+	uint32	base_clock_khz;
+		// 0: from the capabilities register
+	bool	non_removable;
+		// the card is soldered on (or card detect is not wired)
+	bool	no_high_speed_bit;
+		// the High Speed Enable bit must not be set
+	bool	force_pio;
+		// the DMA engines are unusable
+	bool	assume_3v3;
+		// the capabilities register reports no voltages; the slot runs at 3.3 V
+};
+
+
 class SdhciBus {
 	public:
 								SdhciBus(struct registers* registers, uint8_t irq,
-									bool poll, uint32 baseClockKHz = 0);
+									bool poll, const sdhci_quirks* quirks = NULL);
 								~SdhciBus();
 
 			void				EnableInterrupts(uint32_t mask);
@@ -70,6 +85,9 @@ class SdhciBus {
 			card_type			fCardType;
 			uint32				fBaseClockKHz;
 				// 0: from the capabilities register
+			bool				fNonRemovable;
+			bool				fNoHighSpeedBit;
+			bool				fAssume3v3;
 			phys_addr_t			fDmaBusOffset;
 			phys_addr_t			fDmaHighAddress;
 			bool				fDmaCoherent;

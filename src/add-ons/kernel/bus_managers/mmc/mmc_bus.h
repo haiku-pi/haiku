@@ -154,6 +154,9 @@ public:
 				void			ReleaseBus() { release_sem(fLockSemaphore); }
 private:
 				status_t		_ActivateDevice(uint16_t rca);
+				status_t		_ReadDirect(uint16_t rca, uint8_t function,
+									uint32_t address, uint8_t* value);
+				bool			_ScanSdioCard(uint32_t ocr);
 				void			_AcquireScanSemaphore();
 				void			_TerminateBus();
 		static	status_t		_WorkerThread(void*);
