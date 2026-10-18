@@ -450,6 +450,15 @@ dump_job(v3d_device* device, v3d_job* job)
 		core_read(device, kErrorFdbgb), core_read(device, kErrorFdbgr),
 		core_read(device, kErrorFdbgs), core_read(device, kErrorStatus),
 		job->qpu_acks);
+	ERROR("  qma %#" B_PRIx32 " qms %#" B_PRIx32 " qts %#" B_PRIx32
+		", flags %#" B_PRIx32 ", %" B_PRIu32 " buffers:\n", job->qma, job->qms,
+		job->qts, job->flags, job->bo_count);
+	for (uint32 i = 0; i < job->bo_count; i++) {
+		const v3d_bo* bo = job->bos[i];
+		ERROR("    [%#" B_PRIx32 "..%#" B_PRIx32 ") last job %" B_PRIu64
+			", %" B_PRId32 " references\n", bo->gpu_address,
+			bo->gpu_address + (uint32)bo->size, bo->last_seqno, bo->references);
+	}
 }
 
 
