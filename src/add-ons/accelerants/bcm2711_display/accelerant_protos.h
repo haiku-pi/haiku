@@ -35,6 +35,15 @@ status_t bcm2711_get_frame_buffer_config(frame_buffer_config *config);
 status_t bcm2711_get_pixel_clock_limits(display_mode *dm, uint32 *low,
 	uint32 *high);
 
+// cursor
+status_t bcm2711_set_cursor_shape(uint16 width, uint16 height, uint16 hotX,
+	uint16 hotY, const uint8* andMask, const uint8* xorMask);
+status_t bcm2711_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX,
+	uint16 hotY, color_space colorSpace, uint16 bytesPerRow,
+	const uint8* bitmapData);
+void bcm2711_move_cursor(uint16 x, uint16 y);
+void bcm2711_show_cursor(bool isVisible);
+
 #ifdef __cplusplus
 }
 #endif

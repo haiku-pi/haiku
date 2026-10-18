@@ -24,6 +24,7 @@
 #include <KernelExport.h>
 #include <lock.h>
 #include <util/AutoLock.h>
+#include <AutoDeleter.h>
 #include <team.h>
 #include <vm/vm.h>
 
@@ -65,8 +66,11 @@ static const bigtime_t kVblankProbeTime = 100000;
 // firmware framebuffer is under them, at layer -127
 static const uint8 kPrimaryPlane = 0;
 static const int8 kPrimaryLayer = 0;
-// VC_IMAGE_XRGB8888: B, G, R, X in memory, as B_RGB32
+static const uint8 kCursorPlane = 7;
+static const int8 kCursorLayer = 127;
+// VC_IMAGE_XRGB8888 / ARGB8888: B, G, R, X/A in memory, as B_RGB32 / B_RGBA32
 static const uint8 kImageXRGB8888 = 44;
+static const uint8 kImageARGB8888 = 43;
 // The firmware scans out from the low 1 GiB only (it keeps 30 address bits)
 static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
 
@@ -123,6 +127,18 @@ struct display_info {
 	addr_t			mode_frame_buffer;
 
 	uint32			display_id;
+
+	// the hardware cursor: a firmware plane over everything
+	area_id			cursor_area;
+	uint32*			cursor_bits;
+	phys_addr_t		cursor_physical;
+	uint16			cursor_width;
+	uint16			cursor_height;
+	uint16			cursor_hot_x;
+	uint16			cursor_hot_y;
+	uint16			cursor_x;
+	uint16			cursor_y;
+	bool			cursor_visible;
 
 	volatile uint32* smi;
 	area_id			smi_area;
@@ -456,6 +472,9 @@ display_init(display_info& info)
 	info.frame_buffer_area = info.boot_area;
 	info.frame_buffer = info.boot_frame_buffer;
 	info.mode_area = -1;
+	info.cursor_area = -1;
+	info.cursor_width = 0;
+	info.cursor_visible = false;
 
 	sharedInfo.bytes_per_row = bufferInfo->bytes_per_row;
 	sharedInfo.native_width = bufferInfo->width;
@@ -489,6 +508,9 @@ display_init(display_info& info)
 		sharedInfo.has_edid ? "yes" : "no");
 	return B_OK;
 }
+
+
+static status_t update_cursor(display_info& info);
 
 
 static status_t
@@ -616,9 +638,124 @@ set_mode(display_info& info, uint32 width, uint32 height)
 
 	sharedInfo.current_mode.virtual_width = width;
 	sharedInfo.current_mode.virtual_height = height;
+	if (info.cursor_visible)
+		update_cursor(info);
 	TRACE_ALWAYS("mode %" B_PRIu32 "x%" B_PRIu32 "%s\n", width, height,
 		native ? " (native)" : ", scaled by a firmware plane");
 	return B_OK;
+}
+
+
+/*!	Puts the cursor plane where the cursor is: the mode's coordinates scaled
+	to the native ones, clipped to the screen; hidden, the plane is unset.
+*/
+static status_t
+update_cursor(display_info& info)
+{
+	firmware_plane plane = {};
+	plane.display = info.display_id;
+	plane.plane_id = kCursorPlane;
+
+	const bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const int32 modeWidth = sharedInfo.current_mode.virtual_width;
+	const int32 modeHeight = sharedInfo.current_mode.virtual_height;
+	if (info.cursor_visible && info.cursor_width != 0 && modeWidth > 0) {
+		// the mode as the primary plane shows it (see set_plane())
+		int32 nativeWidth = sharedInfo.native_width;
+		int32 nativeHeight = sharedInfo.native_height;
+		int32 dstWidth = nativeWidth;
+		int32 dstHeight = (int64)modeHeight * nativeWidth / modeWidth;
+		if (dstHeight > nativeHeight) {
+			dstHeight = nativeHeight;
+			dstWidth = (int64)modeWidth * nativeHeight / modeHeight;
+		}
+		const int32 offsetX = (nativeWidth - dstWidth) / 2;
+		const int32 offsetY = (nativeHeight - dstHeight) / 2;
+
+		// the cursor's rectangle in mode coordinates, clipped to the mode
+		int32 left = (int32)info.cursor_x - info.cursor_hot_x;
+		int32 top = (int32)info.cursor_y - info.cursor_hot_y;
+		int32 srcX = 0, srcY = 0;
+		int32 width = info.cursor_width, height = info.cursor_height;
+		if (left < 0) {
+			srcX = -left;
+			width += left;
+			left = 0;
+		}
+		if (top < 0) {
+			srcY = -top;
+			height += top;
+			top = 0;
+		}
+		if (left + width > modeWidth)
+			width = modeWidth - left;
+		if (top + height > modeHeight)
+			height = modeHeight - top;
+
+		if (width > 0 && height > 0) {
+			plane.image_type = kImageARGB8888;
+			plane.layer = kCursorLayer;
+			plane.width = info.cursor_width;
+			plane.height = info.cursor_height;
+			plane.pitch = BCM2711_DISPLAY_CURSOR_SIZE * 4;
+			plane.vpitch = info.cursor_height;
+			plane.src_x = srcX << 16;
+			plane.src_y = srcY << 16;
+			plane.src_w = width << 16;
+			plane.src_h = height << 16;
+			plane.dst_x = offsetX + (int64)left * dstWidth / modeWidth;
+			plane.dst_y = offsetY + (int64)top * dstHeight / modeHeight;
+			plane.dst_w = max_c((int64)width * dstWidth / modeWidth, 1);
+			plane.dst_h = max_c((int64)height * dstHeight / modeHeight, 1);
+			plane.alpha = 0xff;
+			plane.num_planes = 1;
+			plane.planes[0] = info.cursor_physical;
+		}
+	}
+
+	return sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane, sizeof(plane),
+		sizeof(plane), NULL);
+}
+
+
+static status_t
+set_cursor(display_info& info, const bcm2711_display_cursor& cursor)
+{
+	if (cursor.width == 0 || cursor.height == 0
+		|| cursor.width > BCM2711_DISPLAY_CURSOR_SIZE
+		|| cursor.height > BCM2711_DISPLAY_CURSOR_SIZE) {
+		return B_BAD_VALUE;
+	}
+
+	if (info.cursor_area < 0) {
+		virtual_address_restrictions virtualRestrictions = {};
+		virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+		physical_address_restrictions physicalRestrictions = {};
+		physicalRestrictions.high_address = kScanOutLimit;
+		info.cursor_area = create_area_etc(B_SYSTEM_TEAM,
+			"bcm2711 display cursor", sizeof(cursor.bits), B_CONTIGUOUS,
+			B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
+			&physicalRestrictions, (void**)&info.cursor_bits);
+		if (info.cursor_area < 0)
+			return info.cursor_area;
+		physical_entry entry;
+		get_memory_map(info.cursor_bits, B_PAGE_SIZE, &entry, 1);
+		info.cursor_physical = entry.address;
+		vm_set_area_memory_type(info.cursor_area, entry.address,
+			B_WRITE_COMBINING_MEMORY);
+	}
+
+	// rows of the full cursor size: an aligned pitch for the plane
+	memset(info.cursor_bits, 0, sizeof(cursor.bits));
+	for (uint32 y = 0; y < cursor.height; y++) {
+		memcpy(info.cursor_bits + y * BCM2711_DISPLAY_CURSOR_SIZE,
+			cursor.bits + y * cursor.width, cursor.width * 4);
+	}
+	info.cursor_width = cursor.width;
+	info.cursor_height = cursor.height;
+	info.cursor_hot_x = cursor.hot_x;
+	info.cursor_hot_y = cursor.hot_y;
+	return update_cursor(info);
 }
 
 
@@ -627,6 +764,12 @@ display_uninit(display_info& info)
 {
 	set_mode(info, info.shared_info->native_width,
 		info.shared_info->native_height);
+	if (info.cursor_area >= 0) {
+		info.cursor_visible = false;
+		update_cursor(info);
+		delete_area(info.cursor_area);
+		info.cursor_area = -1;
+	}
 	stop_vertical_blank(info);
 	delete_sem(info.shared_info->vblank_semaphore);
 	vm_change_clones_to_null_areas(info.boot_area);
@@ -708,6 +851,43 @@ device_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				return B_BAD_ADDRESS;
 			MutexLocker locker(sLock);
 			return set_mode(info, mode.width, mode.height);
+		}
+
+		case BCM2711_DISPLAY_SET_CURSOR:
+		{
+			bcm2711_display_cursor* cursor
+				= (bcm2711_display_cursor*)malloc(sizeof(*cursor));
+			if (cursor == NULL)
+				return B_NO_MEMORY;
+			MemoryDeleter cursorDeleter(cursor);
+			if (user_memcpy(cursor, buffer, sizeof(*cursor)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			return set_cursor(info, *cursor);
+		}
+
+		case BCM2711_DISPLAY_MOVE_CURSOR:
+		{
+			bcm2711_display_cursor_position position;
+			if (user_memcpy(&position, buffer, sizeof(position)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			info.cursor_x = position.x;
+			info.cursor_y = position.y;
+			return info.cursor_visible ? update_cursor(info) : B_OK;
+		}
+
+		case BCM2711_DISPLAY_SHOW_CURSOR:
+		{
+			bool visible;
+			if (user_memcpy(&visible, buffer, sizeof(visible)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			if (visible == info.cursor_visible)
+				return B_OK;
+			info.cursor_visible = visible;
+			TRACE_ALWAYS("hardware cursor %s\n", visible ? "shown" : "hidden");
+			return update_cursor(info);
 		}
 
 		case BCM2711_DISPLAY_GET_DEVICE_NAME:

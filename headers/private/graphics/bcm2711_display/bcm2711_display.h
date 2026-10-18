@@ -49,6 +49,33 @@ enum {
 	BCM2711_DISPLAY_SET_MODE,
 		// struct bcm2711_display_mode; the frame buffer changes, so clone it
 		// again afterwards
+	BCM2711_DISPLAY_SET_CURSOR,
+		// struct bcm2711_display_cursor
+	BCM2711_DISPLAY_MOVE_CURSOR,
+		// struct bcm2711_display_cursor_position
+	BCM2711_DISPLAY_SHOW_CURSOR,
+		// a bool
+};
+
+
+#define BCM2711_DISPLAY_CURSOR_SIZE 64
+
+
+/*!	A cursor image: B, G, R, A bytes (B_RGBA32), not premultiplied. */
+struct bcm2711_display_cursor {
+	uint16			width;
+	uint16			height;
+	uint16			hot_x;
+	uint16			hot_y;
+	uint32			bits[BCM2711_DISPLAY_CURSOR_SIZE
+						* BCM2711_DISPLAY_CURSOR_SIZE];
+		// width x height, rows of width pixels
+};
+
+
+struct bcm2711_display_cursor_position {
+	uint16			x;
+	uint16			y;
 };
 
 

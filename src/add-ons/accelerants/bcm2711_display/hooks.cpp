@@ -47,6 +47,16 @@ get_accelerant_hook(uint32 feature, void* data)
 			return (void*)bcm2711_get_frame_buffer_config;
 		case B_GET_PIXEL_CLOCK_LIMITS:
 			return (void*)bcm2711_get_pixel_clock_limits;
+
+		/* cursor: a firmware plane */
+		case B_SET_CURSOR_SHAPE:
+			return (void*)bcm2711_set_cursor_shape;
+		case B_SET_CURSOR_BITMAP:
+			return (void*)bcm2711_set_cursor_bitmap;
+		case B_MOVE_CURSOR:
+			return (void*)bcm2711_move_cursor;
+		case B_SHOW_CURSOR:
+			return (void*)bcm2711_show_cursor;
 	}
 
 	return NULL;

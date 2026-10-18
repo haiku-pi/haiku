@@ -2,6 +2,7 @@ SubDir HAIKU_TOP src add-ons kernel drivers graphics bcm2711_display ;
 
 UsePrivateKernelHeaders ;
 UsePrivateHeaders drivers ;
+UsePrivateHeaders shared ;
 UsePrivateHeaders [ FDirName graphics bcm2711_display ] ;
 UsePrivateHeaders [ FDirName graphics common ] ;
 UseLibraryHeaders [ FDirName libfdt ] ;

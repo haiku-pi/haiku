@@ -7,6 +7,7 @@ UsePrivateHeaders shared ;
 
 Addon bcm2711_display.accelerant :
 	accelerant.cpp
+	cursor.cpp
 	hooks.cpp
 	mode.cpp
 	: libaccelerantscommon.a
