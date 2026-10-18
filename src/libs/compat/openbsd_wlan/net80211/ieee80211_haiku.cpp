@@ -25,6 +25,11 @@ extern "C" {
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 
+#include <crypto/md5.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
+#include <crypto/hmac.h>
+
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_node.h>
 #include <net80211/ieee80211_ioctl.h>
@@ -160,6 +165,40 @@ obsd_ciphers_from_haiku(uint32 ciphers)
 	if ((ciphers & B_NETWORK_CIPHER_CCMP) != 0)
 		obsd_ciphers |= IEEE80211_WPA_CIPHER_CCMP;
 	return obsd_ciphers;
+}
+
+
+/*!	Derives a WPA pre-shared key from a passphrase, as IEEE 802.11i H.4
+	does: PBKDF2 with HMAC-SHA1, the SSID as salt, 4096 iterations.
+*/
+static void
+derive_pmk_from_passphrase(const uint8* passphrase, size_t passphraseLength,
+	const uint8* ssid, size_t ssidLength, uint8 pmk[IEEE80211_PMK_LEN])
+{
+	for (uint32 block = 1; block * SHA1_DIGEST_LENGTH
+			< IEEE80211_PMK_LEN + SHA1_DIGEST_LENGTH; block++) {
+		const uint8 count[4] = { (uint8)(block >> 24), (uint8)(block >> 16),
+			(uint8)(block >> 8), (uint8)block };
+		uint8 u[SHA1_DIGEST_LENGTH], t[SHA1_DIGEST_LENGTH];
+
+		HMAC_SHA1_CTX context;
+		HMAC_SHA1_Init(&context, passphrase, passphraseLength);
+		HMAC_SHA1_Update(&context, ssid, ssidLength);
+		HMAC_SHA1_Update(&context, count, sizeof(count));
+		HMAC_SHA1_Final(u, &context);
+		memcpy(t, u, sizeof(t));
+
+		for (int iteration = 1; iteration < 4096; iteration++) {
+			HMAC_SHA1_Init(&context, passphrase, passphraseLength);
+			HMAC_SHA1_Update(&context, u, sizeof(u));
+			HMAC_SHA1_Final(u, &context);
+			for (size_t i = 0; i < sizeof(t); i++)
+				t[i] ^= u[i];
+		}
+
+		const size_t offset = (block - 1) * SHA1_DIGEST_LENGTH;
+		memcpy(pmk + offset, t, min_c(sizeof(t), IEEE80211_PMK_LEN - offset));
+	}
 }
 
 
@@ -367,6 +406,8 @@ wlan_control(void* cookie, uint32 op, void* arg, size_t length)
 		case IEEE80211_IOC_HAIKU_JOIN: {
 			if (op != SIOCS80211)
 				return B_BAD_VALUE;
+			if (ireq.i_len < sizeof(struct ieee80211_haiku_join_req))
+				return B_BAD_VALUE;
 
 			struct ieee80211_haiku_join_req* haiku_join =
 				(struct ieee80211_haiku_join_req*)calloc(1, ireq.i_len);
@@ -376,6 +417,11 @@ wlan_control(void* cookie, uint32 op, void* arg, size_t length)
 
 			if (user_memcpy(haiku_join, ireq.i_data, ireq.i_len) != B_OK)
 				return B_BAD_ADDRESS;
+			if (haiku_join->i_nwid_len > IEEE80211_NWID_LEN
+				|| haiku_join->i_key_len
+					> ireq.i_len - sizeof(struct ieee80211_haiku_join_req)) {
+				return B_BAD_VALUE;
+			}
 
 			struct ifreq ifr;
 			struct ieee80211_nwid nwid;
@@ -414,7 +460,18 @@ wlan_control(void* cookie, uint32 op, void* arg, size_t length)
 					if ((haiku_join->i_key_mode & B_KEY_MODE_PSK_SHA256) != 0)
 						wpaparams.i_akms |= IEEE80211_WPA_AKM_SHA256_PSK;
 
-					if (haiku_join->i_key_len != 0) {
+					if (haiku_join->i_key_len != 0
+						&& ireq.i_val == IEEE80211_HAIKU_JOIN_PASSPHRASE) {
+						// derive the key here, without a WPA supplicant
+						if (haiku_join->i_key_len < 8 || haiku_join->i_key_len > 63)
+							return B_BAD_VALUE;
+						wpapsk.i_enabled = 1;
+						derive_pmk_from_passphrase(haiku_join->i_key,
+							haiku_join->i_key_len, haiku_join->i_nwid,
+							haiku_join->i_nwid_len, wpapsk.i_psk);
+					} else if (haiku_join->i_key_len != 0) {
+						if (haiku_join->i_key_len > sizeof(wpapsk.i_psk))
+							return B_BAD_VALUE;
 						wpapsk.i_enabled = 1;
 						memcpy(wpapsk.i_psk, haiku_join->i_key, haiku_join->i_key_len);
 						memset(&wpapsk.i_psk[haiku_join->i_key_len], 0,

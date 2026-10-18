@@ -136,6 +136,44 @@ set_80211(const char* name, int32 type, void* data,
 }
 
 
+/*!	Joins a WPA or WPA2 personal network without the wpa_supplicant: the
+	driver's 802.11 stack derives the key from the passphrase and does the
+	key handshake itself (only drivers using the OpenBSD stack can).
+*/
+static status_t
+join_with_passphrase(const char* name, const wireless_network& network,
+	const char* passphrase)
+{
+	const size_t nameLength = strlen(network.name);
+	const size_t passphraseLength = strlen(passphrase);
+	if (nameLength > IEEE80211_NWID_LEN || passphraseLength < 8
+		|| passphraseLength > 63) {
+		return B_BAD_VALUE;
+	}
+
+	const size_t size = sizeof(ieee80211_haiku_join_req) + passphraseLength;
+	ieee80211_haiku_join_req* join = (ieee80211_haiku_join_req*)calloc(1, size);
+	if (join == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter joinDeleter(join);
+
+	memcpy(join->i_nwid, network.name, nameLength);
+	join->i_nwid_len = nameLength;
+	join->i_authentication_mode = network.authentication_mode;
+	join->i_ciphers = network.cipher;
+	join->i_group_ciphers = network.group_cipher;
+	// with a passphrase, it is a personal network whatever the settings say
+	join->i_key_mode
+		= (network.key_mode & (B_KEY_MODE_PSK | B_KEY_MODE_PSK_SHA256)) != 0
+			? network.key_mode : B_KEY_MODE_PSK;
+	join->i_key_len = passphraseLength;
+	memcpy(join->i_key, passphrase, passphraseLength);
+
+	return set_80211(name, IEEE80211_IOC_HAIKU_JOIN, join, size,
+		IEEE80211_HAIKU_JOIN_PASSPHRASE);
+}
+
+
 //	#pragma mark -
 
 
@@ -1095,8 +1133,21 @@ NetServer::_JoinNetwork(const BMessage& message, const BNetworkAddress* address,
 
 		// We need the supplicant, try to launch it.
 		status_t status = be_roster->Launch(kWPASupplicantSignature);
-		if (status != B_OK && status != B_ALREADY_RUNNING)
+		if (status != B_OK && status != B_ALREADY_RUNNING) {
+			// Without it, WPA personal networks can still be joined
+			if (!askForConfig && password != NULL
+				&& (network.authentication_mode
+						== B_NETWORK_AUTHENTICATION_WPA
+					|| network.authentication_mode
+						== B_NETWORK_AUTHENTICATION_WPA2)) {
+				status = join_with_passphrase(deviceName, network, password);
+				if (status != B_OK) {
+					fprintf(stderr, "%s: joining without the wpa_supplicant "
+						"failed: %s\n", name, strerror(status));
+				}
+			}
 			return status;
+		}
 
 		wpaSupplicant.SetTo(kWPASupplicantSignature);
 		if (!wpaSupplicant.IsValid())
