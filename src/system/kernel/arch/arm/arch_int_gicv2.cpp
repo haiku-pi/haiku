@@ -135,11 +135,16 @@ void GICv2InterruptController::HandleInterrupt()
 
 void GICv2InterruptController::SendMulticastIci(CPUSet& cpuSet)
 {
+	// The message for the target CPUs is in memory: make it visible before
+	// the interrupt can reach them (a store to the GIC's device memory is not
+	// ordered after stores to normal memory).
+	memory_write_barrier();
 	fGicdRegs[GICD_REG_SGIR] = ((cpuSet.Bits(0) & 0xff) << 16);
 }
 
 
 void GICv2InterruptController::SendBroadcastIci()
 {
+	memory_write_barrier();
 	fGicdRegs[GICD_REG_SGIR] = (0b01 << 24);
 }
