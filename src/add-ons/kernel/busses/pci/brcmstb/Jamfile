@@ -1,0 +1,11 @@
+SubDir HAIKU_TOP src add-ons kernel busses pci brcmstb ;
+
+SubDirC++Flags -fno-rtti ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+
+KernelAddon <pci>brcmstb :
+	BrcmPCIController.cpp
+	kernel_interface.cpp
+;

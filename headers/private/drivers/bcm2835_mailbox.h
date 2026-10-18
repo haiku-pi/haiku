@@ -47,6 +47,7 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_TAG_GET_THROTTLED			0x00030046
 #define BCM2835_TAG_SET_CLOCK_RATE			0x00038002
 #define BCM2835_TAG_SET_GPIO_STATE			0x00038041
+#define BCM2835_TAG_NOTIFY_XHCI_RESET		0x00030058
 
 // Clock IDs for the clock tags
 #define BCM2835_CLOCK_EMMC		1
