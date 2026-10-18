@@ -3,11 +3,14 @@
  * Distributed under the terms of the MIT License.
  */
 
+#include <debug.h>
 #include <interrupts.h>
 #include <interrupt_controller.h>
 #include <kernel.h>
 #include <vm/vm.h>
 #include <smp.h>
+#include <thread.h>
+#include <arch_cpu.h>
 #include <KernelExport.h>
 
 #include "arch_int_gicv2.h"
@@ -15,6 +18,74 @@
 
 
 #define ICI_IRQ 0
+
+#define GICC_REG_RPR	5
+#define GICC_REG_HPPIR	6
+
+
+static volatile uint32_t* sGicdRegs;
+static volatile uint32_t* sGiccRegs;
+
+
+// TODO: bring-up diagnostic for the Raspberry Pi 4's boot freeze (all CPUs
+// idle, no timer firing, until any interrupt arrives): CPUs whose bit is set
+// print their state at their next interrupt, before acknowledging it.
+int32 gGICv2FreezeProbe;
+extern bigtime_t timer_debug_next_event(int32 cpu);
+
+
+static void
+freeze_probe(int32 cpu)
+{
+	const uint32 rpr = sGiccRegs[GICC_REG_RPR];
+	const uint32 hppir = sGiccRegs[GICC_REG_HPPIR] & 0x3ff;
+	const uint32 pending = sGicdRegs[GICD_REG_ISPENDR];
+	const uint32 active = sGicdRegs[GICD_REG_ISACTIVER];
+	const bigtime_t now = system_time();
+	const bigtime_t next = timer_debug_next_event(cpu);
+#ifdef __aarch64__
+	const uint64 control = READ_SPECIALREG(CNTV_CTL_EL0);
+	const int64 ticksLeft = (int64)(READ_SPECIALREG(CNTV_CVAL_EL0)
+		- READ_SPECIALREG(CNTVCT_EL0));
+#else
+	const uint64 control = 0;
+	const int64 ticksLeft = 0;
+#endif
+	Thread* thread = thread_get_current_thread();
+	dprintf("freeze probe: CPU %" B_PRId32 " at %" B_PRId64 " us, thread %"
+		B_PRId32 " %s, CNTV_CTL %#" B_PRIx64 " fires in %" B_PRId64
+		" ticks, next timer event in %" B_PRId64 " us, GIC SGI/PPI pending %#"
+		B_PRIx32 " active %#" B_PRIx32 " running priority %#" B_PRIx32
+		" highest pending %" B_PRIu32 "\n", cpu, now,
+		thread != NULL ? thread->id : -1, thread != NULL ? thread->name : "-",
+		control, ticksLeft, next >= 0 ? next - now : -1, pending, active, rpr,
+		hppir);
+}
+
+
+/*!	The current CPU's view of the GIC: its banked SGI/PPI state, the
+	priority it runs at (0xff = none active) and its highest pending
+	interrupt.
+*/
+static int
+dump_gic(int argc, char** argv)
+{
+	kprintf("CPU %" B_PRId32 ": SGI/PPI enabled %#" B_PRIx32 " pending %#" B_PRIx32
+		" active %#" B_PRIx32 ", running priority %#" B_PRIx32
+		", highest pending %" B_PRIu32 ", CPU interface control %#" B_PRIx32 "\n",
+		smp_get_current_cpu(), sGicdRegs[GICD_REG_ISENABLER],
+		sGicdRegs[GICD_REG_ISPENDR], sGicdRegs[GICD_REG_ISACTIVER],
+		sGiccRegs[GICC_REG_RPR], sGiccRegs[GICC_REG_HPPIR] & 0x3ff,
+		sGiccRegs[GICC_REG_CTLR]);
+	kprintf("distributor control %#" B_PRIx32 ", SPI pending:", sGicdRegs[GICD_REG_CTLR]);
+	for (int32 i = 1; i < 8; i++)
+		kprintf(" %#" B_PRIx32, sGicdRegs[GICD_REG_ISPENDR + i]);
+	kprintf(", SPI active:");
+	for (int32 i = 1; i < 8; i++)
+		kprintf(" %#" B_PRIx32, sGicdRegs[GICD_REG_ISACTIVER + i]);
+	kprintf("\n");
+	return 0;
+}
 
 
 GICv2InterruptController::GICv2InterruptController(phys_addr_t gicd_addr, phys_addr_t gicc_addr)
@@ -41,6 +112,11 @@ GICv2InterruptController::GICv2InterruptController(phys_addr_t gicd_addr, phys_a
 	// Configure the GIC. Refer to chapter 4, Programmers' Model,
 	// in ARM GIC Architecture Spec v2.0
 	// https://support.arm.com/documentation/ihi0048/latest/
+
+	sGicdRegs = fGicdRegs;
+	sGiccRegs = fGiccRegs;
+	add_debugger_command("gic", &dump_gic,
+		"Dumps the current CPU's view of the GICv2 interrupt controller");
 
 	// disable GICC and GICD before configuring
 	fGiccRegs[GICC_REG_CTLR] = 0x00;
@@ -69,6 +145,10 @@ GICv2InterruptController::GICv2InterruptController(phys_addr_t gicd_addr, phys_a
 	// GICD configured, enable (GICC follows per-CPU)
 	fGicdRegs[GICD_REG_CTLR] = 0x03;
 
+	// until each CPU reads its own (PerCpuInit())
+	for (int32 i = 0; i < SMP_MAX_CPUS; i++)
+		fCpuInterfaceMask[i] = 1 << (i % 8);
+
 	// PerCpuInit is not called separately for the boot CPU
 	PerCpuInit();
 }
@@ -77,6 +157,14 @@ GICv2InterruptController::GICv2InterruptController(phys_addr_t gicd_addr, phys_a
 status_t
 GICv2InterruptController::PerCpuInit()
 {
+	// The banked target register of the SGIs reads as this CPU's own
+	// interface bit: SGIs must be addressed with it (as Linux's gic_cpu_map)
+	const int32 cpu = smp_get_current_cpu();
+	const uint8 mask = ((volatile uint8*)&fGicdRegs[GICD_REG_ITARGETSR])[0];
+	fCpuInterfaceMask[cpu] = mask;
+	if (mask != (1 << cpu))
+		dprintf("GICv2: CPU %" B_PRId32 " is GIC CPU interface mask %#x\n", cpu, mask);
+
 	// configure IRQs 0-31 (SGIs/PPIs) which are banked per CPU interface
 	fGicdRegs[GICD_REG_ICENABLER] = 0xffffffff;
 	fGicdRegs[GICD_REG_ICPENDR] = 0xffffffff;
@@ -116,14 +204,34 @@ GICv2InterruptController::DisableInterrupt(int32 irq)
 }
 
 
+void
+GICv2InterruptController::RouteInterrupt(int32 irq, uint32 cpuMask)
+{
+	// ITARGETSR: one byte per interrupt, only meaningful for SPIs
+	if (irq < 32)
+		return;
+	volatile uint8* targets = (volatile uint8*)&fGicdRegs[GICD_REG_ITARGETSR];
+	targets[irq] = cpuMask & 0xff;
+}
+
+
 void GICv2InterruptController::HandleInterrupt()
 {
+	const int32 cpu = smp_get_current_cpu();
+	if ((atomic_get(&gGICv2FreezeProbe) & (1 << cpu)) != 0) {
+		atomic_and(&gGICv2FreezeProbe, ~(1 << cpu));
+		freeze_probe(cpu);
+	}
+
 	uint32_t iar = fGiccRegs[GICC_REG_IAR];
 	uint32_t irqnr = iar & 0x3FF;
 
 	if ((irqnr == 1022) || (irqnr == 1023)) {
 		dprintf("spurious interrupt (%d)\n", irqnr);
 	} else if (irqnr == ICI_IRQ) {
+		// The sender's message must be read after the acknowledge (pairs with
+		// the write barrier in SendMulticastIci(); as Linux's gic_handle_irq())
+		memory_read_barrier();
 		smp_intercpu_interrupt_handler(smp_get_current_cpu());
 	} else {
 		io_interrupt_handler(irqnr, B_LEVEL_TRIGGERED);
@@ -139,7 +247,12 @@ void GICv2InterruptController::SendMulticastIci(CPUSet& cpuSet)
 	// the interrupt can reach them (a store to the GIC's device memory is not
 	// ordered after stores to normal memory).
 	memory_write_barrier();
-	fGicdRegs[GICD_REG_SGIR] = ((cpuSet.Bits(0) & 0xff) << 16);
+	uint32 targets = 0;
+	for (int32 cpu = 0; cpu < smp_get_num_cpus(); cpu++) {
+		if (cpuSet.GetBit(cpu))
+			targets |= fCpuInterfaceMask[cpu];
+	}
+	fGicdRegs[GICD_REG_SGIR] = (targets & 0xff) << 16;
 }
 
 

@@ -18,9 +18,12 @@ public:
 	void SendMulticastIci(CPUSet& cpuSet);
 	void SendBroadcastIci();
 	status_t PerCpuInit();
+	void RouteInterrupt(int32 irq, uint32 cpuMask);
 private:
 	volatile uint32_t *fGicdRegs;
 	volatile uint32_t *fGiccRegs;
+	uint8 fCpuInterfaceMask[SMP_MAX_CPUS];
+		// the GIC's target bit of each CPU (not necessarily 1 << cpu)
 };
 
 #endif /* ARCH_ARM_GICV2_H */

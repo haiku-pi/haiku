@@ -34,6 +34,9 @@ public:
 		return B_OK;
 	}
 
+	// Lets any of the CPUs in \a cpuMask (bit n = CPU n) take the interrupt
+	virtual void RouteInterrupt(int32 irq, uint32 cpuMask) {}
+
 	static InterruptController* Get() {
 		return sInstance;
 	}

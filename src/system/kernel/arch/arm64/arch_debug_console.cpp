@@ -12,11 +12,15 @@
 #include <boot/kernel_args.h>
 #include <debug.h>
 #include <kernel.h>
+#include "soc.h"
 #include <vm/vm.h>
 #include <string.h>
 
 
 static DebugUART *sArchDebugUART = NULL;
+
+
+extern int32 gGICv2FreezeProbe;
 
 
 static int32
@@ -25,6 +29,10 @@ debug_uart_interrupt(void* /*data*/)
 	int c;
 	bool any = false;
 	while ((c = sArchDebugUART->GetChar(false)) >= 0) {
+		// TODO: bring-up diagnostic, Ctrl-T: every CPU reports its state at
+		// its next interrupt (see arch_int_gicv2.cpp)
+		if (c == 0x14)
+			atomic_set(&gGICv2FreezeProbe, 0xff);
 		debug_serial_emergency_input((char)c);
 		any = true;
 	}
@@ -45,6 +53,9 @@ arm64_debug_console_init_interrupt(kernel_args* args)
 			!= B_OK) {
 		return;
 	}
+	// Any CPU may serve it: the keys must work while one CPU is stuck
+	if (InterruptController::Get() != NULL)
+		InterruptController::Get()->RouteInterrupt(irq, 0xff);
 	if (!sArchDebugUART->EnableReceiveInterrupt())
 		remove_io_interrupt_handler(irq, &debug_uart_interrupt, NULL);
 }

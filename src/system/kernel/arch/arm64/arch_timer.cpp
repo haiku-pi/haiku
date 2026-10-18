@@ -3,6 +3,7 @@
  * Distributed under the terms of the MIT License.
  */
 #include <boot/stage2.h>
+#include <debug.h>
 #include <interrupts.h>
 
 #include <timer.h>
@@ -10,6 +11,8 @@
 
 #include "arch_timer.h"
 #include "soc.h"
+
+#include <smp.h>
 
 
 static uint64 sTimerTicksUS;
@@ -49,9 +52,24 @@ arch_timer_interrupt(void *data)
 }
 
 
+static int
+dump_arch_timer(int argc, char** argv)
+{
+	kprintf("CPU %" B_PRId32 ": CNTV_CTL %#" B_PRIx64 " CVAL %#" B_PRIx64 " TVAL %"
+		B_PRId32 " CNTVCT %#" B_PRIx64 " (%" B_PRIu64 " ticks/us)\n",
+		smp_get_current_cpu(), READ_SPECIALREG(CNTV_CTL_EL0),
+		READ_SPECIALREG(CNTV_CVAL_EL0), (int32)READ_SPECIALREG(CNTV_TVAL_EL0),
+		READ_SPECIALREG(CNTVCT_EL0), sTimerTicksUS);
+	return 0;
+}
+
+
 int
 arch_init_timer(kernel_args *args)
 {
+	add_debugger_command("arm64_timer", &dump_arch_timer,
+		"Dumps the current CPU's virtual timer registers");
+
 	sTimerTicksUS = READ_SPECIALREG(CNTFRQ_EL0) / 1000000;
 	sTimerMaxInterval = INT32_MAX / sTimerTicksUS;
 
