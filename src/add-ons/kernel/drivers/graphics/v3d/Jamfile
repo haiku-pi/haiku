@@ -1,8 +1,13 @@
 SubDir HAIKU_TOP src add-ons kernel drivers graphics v3d ;
 
+# drm.h takes the ioctl number encoding from <sys/ioccom.h>
+UseHeaders [ FDirName $(HAIKU_TOP) headers compatibility bsd ] : true ;
 UsePrivateKernelHeaders ;
 UsePrivateHeaders drivers ;
 
 KernelAddon v3d :
+	bo.cpp
+	jobs.cpp
+	mmu.cpp
 	v3d.cpp
 	;

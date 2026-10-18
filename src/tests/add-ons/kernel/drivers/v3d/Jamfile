@@ -1,0 +1,7 @@
+SubDir HAIKU_TOP src tests add-ons kernel drivers v3d ;
+
+# drm.h takes the ioctl number encoding from <sys/ioccom.h>
+UseHeaders [ FDirName $(HAIKU_TOP) headers compatibility bsd ] : true ;
+UsePrivateHeaders drivers ;
+
+SimpleTest v3dtest : v3dtest.cpp ;

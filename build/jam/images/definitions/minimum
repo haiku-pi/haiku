@@ -117,6 +117,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
 	urlwrapper
 	useradd
 	userdel
+	v3dtest@arm64
 	version
 	vmstat
 	waitfor
