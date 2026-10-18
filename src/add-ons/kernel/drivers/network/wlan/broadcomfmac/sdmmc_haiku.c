@@ -250,10 +250,14 @@ sdmmc_intr_thread(void* arg)
 			mtx_lock(&Giant);
 			ih->ih_fun(ih->ih_arg);
 			mtx_unlock(&Giant);
+
+			/* The handler serviced the card: unmask its interrupt again.
+			   Not before: nothing would clear the card's interrupt, which
+			   would come back at once, and this thread would spin. */
+			if (interrupts)
+				haiku_sdio_acknowledge_interrupt(sc->sc_sdio);
 		}
 		if (interrupts) {
-			/* The handler serviced the card: unmask its interrupt again */
-			haiku_sdio_acknowledge_interrupt(sc->sc_sdio);
 			acquire_sem_etc(ih->ih_sem, 1, B_RELATIVE_TIMEOUT,
 				SDMMC_INTR_POLL_INTERVAL);
 		} else
