@@ -72,9 +72,6 @@ static const char* const kCompatible = "brcm,bcm2711-genet-v5";
 static const size_t kBufferSize = 2048;
 static const uint32 kRxBufferCount = DMA_DESC_COUNT;
 static const uint32 kTxBufferCount = DMA_DESC_COUNT;
-static const size_t kBuffersSize
-	= (kRxBufferCount + kTxBufferCount) * kBufferSize;
-
 // Ethernet frame sizes without the FCS, which the MAC strips on receive and
 // appends on transmit.
 static const size_t kMaxFrameSize = 1514;
@@ -211,6 +208,8 @@ private:
 			bool				fInterruptsInstalled[2];
 
 			area_id				fBuffersArea;
+				// the transmit buffers
+			area_id				fRxBuffersArea;
 			uint8*				fRxBuffers;
 			uint8*				fTxBuffers;
 			phys_addr_t			fRxBuffersPhysical;
@@ -276,6 +275,7 @@ GenetDevice::GenetDevice(device_node* node)
 	fRegisters(NULL),
 	fRegistersPhysical(0),
 	fBuffersArea(-1),
+	fRxBuffersArea(-1),
 	fRxBuffers(NULL),
 	fTxBuffers(NULL),
 	fRxBuffersPhysical(0),
@@ -421,15 +421,16 @@ GenetDevice::InitDriver()
 }
 
 
-/*!	Allocates the buffers of both rings in one physically contiguous area,
-	mapped non-cacheable.
+/*!	Allocates the buffers of the two rings, each ring's in one physically
+	contiguous area.
 
-	The GENET does not snoop the CPU caches. Non-cacheable buffers need no
-	cache maintenance at all, which keeps the data path simple and leaves no
-	room for the classic streaming-DMA mistakes (a dirty line written back
-	over a received frame, a stale line read after the device wrote). The
-	price is that the copies into and out of the buffers run uncached; at the
-	frame rates of a gigabit link that is acceptable for now.
+	The GENET does not snoop the CPU caches. The transmit buffers are mapped
+	non-cacheable (write-combining): the CPU only writes them, and nothing
+	cached can then hide a frame from the device. The receive buffers stay
+	cacheable, because reading frames out of non-cacheable memory limited
+	receiving to about a quarter of the link: the CPU never writes them, so
+	they never hold a dirty line, and Receive() invalidates a frame's lines
+	after the device wrote it, before copying it out.
 */
 status_t
 GenetDevice::AllocateBuffers()
@@ -442,35 +443,48 @@ GenetDevice::AllocateBuffers()
 	virtual_address_restrictions virtualRestrictions = {};
 	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
 
-	void* address;
-	fBuffersArea = create_area_etc(B_SYSTEM_TEAM, "genet buffers",
-		kBuffersSize, B_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
-		0, 0, &virtualRestrictions, &physicalRestrictions, &address);
-	if (fBuffersArea < 0) {
+	void* rxAddress;
+	fRxBuffersArea = create_area_etc(B_SYSTEM_TEAM, "genet receive buffers",
+		kRxBufferCount * kBufferSize, B_CONTIGUOUS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0, &virtualRestrictions,
+		&physicalRestrictions, &rxAddress);
+	void* txAddress;
+	fBuffersArea = create_area_etc(B_SYSTEM_TEAM, "genet transmit buffers",
+		kTxBufferCount * kBufferSize, B_CONTIGUOUS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0, &virtualRestrictions,
+		&physicalRestrictions, &txAddress);
+	if (fRxBuffersArea < 0 || fBuffersArea < 0) {
 		ERROR("cannot allocate the buffers\n");
-		return fBuffersArea;
+		FreeBuffers();
+		return B_NO_MEMORY;
 	}
 
-	physical_entry entry;
-	status_t status = get_memory_map(address, kBuffersSize, &entry, 1);
+	physical_entry rxEntry, txEntry;
+	status_t status = get_memory_map(rxAddress, kRxBufferCount * kBufferSize,
+		&rxEntry, 1);
+	if (status == B_OK) {
+		status = get_memory_map(txAddress, kTxBufferCount * kBufferSize,
+			&txEntry, 1);
+	}
 	if (status == B_OK) {
 		// No cached copy may be written back over what the device writes
-		// once the mapping is non-cacheable.
-		arm64_dcache_flush_range((addr_t)address, kBuffersSize);
-		status = vm_set_area_memory_type(fBuffersArea, entry.address,
+		arm64_dcache_flush_range((addr_t)rxAddress,
+			kRxBufferCount * kBufferSize);
+		arm64_dcache_flush_range((addr_t)txAddress,
+			kTxBufferCount * kBufferSize);
+		status = vm_set_area_memory_type(fBuffersArea, txEntry.address,
 			B_WRITE_COMBINING_MEMORY);
 	}
 	if (status != B_OK) {
-		ERROR("cannot make the buffers non-cacheable\n");
-		delete_area(fBuffersArea);
-		fBuffersArea = -1;
+		ERROR("cannot set up the buffers\n");
+		FreeBuffers();
 		return status;
 	}
 
-	fRxBuffers = (uint8*)address;
-	fTxBuffers = fRxBuffers + kRxBufferCount * kBufferSize;
-	fRxBuffersPhysical = entry.address;
-	fTxBuffersPhysical = entry.address + kRxBufferCount * kBufferSize;
+	fRxBuffers = (uint8*)rxAddress;
+	fTxBuffers = (uint8*)txAddress;
+	fRxBuffersPhysical = rxEntry.address;
+	fTxBuffersPhysical = txEntry.address;
 	return B_OK;
 }
 
@@ -478,11 +492,11 @@ GenetDevice::AllocateBuffers()
 void
 GenetDevice::FreeBuffers()
 {
-	if (fBuffersArea < 0)
-		return;
-
-	delete_area(fBuffersArea);
-	fBuffersArea = -1;
+	if (fRxBuffersArea >= 0)
+		delete_area(fRxBuffersArea);
+	if (fBuffersArea >= 0)
+		delete_area(fBuffersArea);
+	fRxBuffersArea = fBuffersArea = -1;
 	fRxBuffers = fTxBuffers = NULL;
 }
 
@@ -550,8 +564,12 @@ GenetDevice::Receive(void* buffer, size_t* _length, bool nonBlocking)
 				if (frameLength > *_length)
 					status = B_BUFFER_OVERFLOW;
 				else {
-					status = user_memcpy(buffer,
-						fRxBuffers + index * kBufferSize + RX_ALIGN_PAD,
+					// Drop whatever the CPU cached of this buffer before the
+					// device wrote it (lines are never dirty: see
+					// AllocateBuffers())
+					uint8* frame = fRxBuffers + index * kBufferSize;
+					arm64_dcache_flush_range((addr_t)frame, length);
+					status = user_memcpy(buffer, frame + RX_ALIGN_PAD,
 						frameLength);
 				}
 			}
