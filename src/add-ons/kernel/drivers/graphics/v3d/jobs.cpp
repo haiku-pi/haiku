@@ -464,6 +464,8 @@ reset_gpu(v3d_device* device, const char* reason)
 	v3d_job* job = device->active;
 	if (job != NULL)
 		dump_job(device, job);
+	const uint64 droppedJob = job != NULL ? job->seqno : 0;
+		// (finish_job() releases the job)
 
 	{
 		InterruptsSpinLocker locker(device->irq_lock);
@@ -524,8 +526,7 @@ reset_gpu(v3d_device* device, const char* reason)
 	locker.Unlock();
 
 	ERROR("GPU reset after %s (job %" B_PRIu64 " dropped), %" B_PRIu32
-		" resets so far\n", reason, job != NULL ? job->seqno : 0,
-		device->resets);
+		" resets so far\n", reason, droppedJob, device->resets);
 }
 
 
