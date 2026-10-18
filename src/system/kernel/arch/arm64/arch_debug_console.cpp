@@ -20,19 +20,12 @@
 static DebugUART *sArchDebugUART = NULL;
 
 
-extern int32 gGICv2FreezeProbe;
-
-
 static int32
 debug_uart_interrupt(void* /*data*/)
 {
 	int c;
 	bool any = false;
 	while ((c = sArchDebugUART->GetChar(false)) >= 0) {
-		// TODO: bring-up diagnostic, Ctrl-T: every CPU reports its state at
-		// its next interrupt (see arch_int_gicv2.cpp)
-		if (c == 0x14)
-			atomic_set(&gGICv2FreezeProbe, 0xff);
 		debug_serial_emergency_input((char)c);
 		any = true;
 	}

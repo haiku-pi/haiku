@@ -147,6 +147,10 @@ static inline void arch_cpu_pause(void)
 
 static inline void arch_cpu_idle(void)
 {
+	// Complete the outstanding writes first (as Linux's cpu_do_idle): the
+	// end-of-interrupt write to the GIC can otherwise wait in a buffer while
+	// the CPU sleeps, and the GIC delivers it nothing else until then
+	arm64_dsb(sy);
 	arm64_wfi();
 }
 

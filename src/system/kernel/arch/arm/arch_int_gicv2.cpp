@@ -27,39 +27,66 @@ static volatile uint32_t* sGicdRegs;
 static volatile uint32_t* sGiccRegs;
 
 
-// TODO: bring-up diagnostic for the Raspberry Pi 4's boot freeze (all CPUs
-// idle, no timer firing, until any interrupt arrives): CPUs whose bit is set
-// print their state at their next interrupt, before acknowledging it.
-int32 gGICv2FreezeProbe;
+// TODO: work-around for a Raspberry Pi 4 boot freeze, root cause open: an SPI
+// (seen: 158, the SD controllers') stays active on CPU 0 after its end of
+// interrupt, so that CPU takes nothing of that priority anymore, its timer
+// included, while it sleeps; any other CPU's access to the GIC releases it
+// (unaided, the boot stopped for over a minute in about half of all boots).
+// Every CPU runs a periodic check of the others: one whose next timer event is
+// overdue and that took no interrupt since is reported and sent an SGI, which
+// gets it going again within microseconds.
 extern bigtime_t timer_debug_next_event(int32 cpu);
 
+static const bigtime_t kWatchdogPeriod = 250000;
+static bigtime_t sLastInterrupt[SMP_MAX_CPUS];
+static uint32 sLastIrq[SMP_MAX_CPUS];
+static bigtime_t sNudged[SMP_MAX_CPUS];
+static int32 sReports[SMP_MAX_CPUS];
+static timer sWatchdog[SMP_MAX_CPUS];
+static int32 sWatchdogStarted[SMP_MAX_CPUS];
 
-static void
-freeze_probe(int32 cpu)
+
+static int32
+gic_watchdog(timer* /*unused*/)
 {
-	const uint32 rpr = sGiccRegs[GICC_REG_RPR];
-	const uint32 hppir = sGiccRegs[GICC_REG_HPPIR] & 0x3ff;
-	const uint32 pending = sGicdRegs[GICD_REG_ISPENDR];
-	const uint32 active = sGicdRegs[GICD_REG_ISACTIVER];
+	const int32 self = smp_get_current_cpu();
 	const bigtime_t now = system_time();
-	const bigtime_t next = timer_debug_next_event(cpu);
-#ifdef __aarch64__
-	const uint64 control = READ_SPECIALREG(CNTV_CTL_EL0);
-	const int64 ticksLeft = (int64)(READ_SPECIALREG(CNTV_CVAL_EL0)
-		- READ_SPECIALREG(CNTVCT_EL0));
-#else
-	const uint64 control = 0;
-	const int64 ticksLeft = 0;
-#endif
-	Thread* thread = thread_get_current_thread();
-	dprintf("freeze probe: CPU %" B_PRId32 " at %" B_PRId64 " us, thread %"
-		B_PRId32 " %s, CNTV_CTL %#" B_PRIx64 " fires in %" B_PRId64
-		" ticks, next timer event in %" B_PRId64 " us, GIC SGI/PPI pending %#"
-		B_PRIx32 " active %#" B_PRIx32 " running priority %#" B_PRIx32
-		" highest pending %" B_PRIu32 "\n", cpu, now,
-		thread != NULL ? thread->id : -1, thread != NULL ? thread->name : "-",
-		control, ticksLeft, next >= 0 ? next - now : -1, pending, active, rpr,
-		hppir);
+	for (int32 cpu = 0; cpu < smp_get_num_cpus(); cpu++) {
+		if (cpu == self)
+			continue;
+
+		const bigtime_t nudged = atomic_get64(&sNudged[cpu]);
+		if (nudged != 0 && sLastInterrupt[cpu] > nudged
+			&& atomic_test_and_set64(&sNudged[cpu], 0, nudged) == nudged) {
+			dprintf("gic watchdog: CPU %" B_PRId32 " took interrupt %" B_PRIu32
+				" %" B_PRId64 " us after the SGI\n", cpu, sLastIrq[cpu],
+				sLastInterrupt[cpu] - nudged);
+			sReports[cpu] = 0;
+		}
+
+		const bigtime_t due = timer_debug_next_event(cpu);
+		if (due < 0 || now - due < kWatchdogPeriod
+			|| sLastInterrupt[cpu] > due) {
+			continue;
+		}
+
+		if (atomic_add(&sReports[cpu], 1) < 4) {
+			dprintf("gic watchdog (CPU %" B_PRId32 "): CPU %" B_PRId32 " has a "
+				"timer event %" B_PRId64 " us overdue, last interrupt %" B_PRIu32
+				" %" B_PRId64 " us ago; SPI pending %#" B_PRIx32 " %#" B_PRIx32
+				" %#" B_PRIx32 " %#" B_PRIx32 ", active %#" B_PRIx32 " %#"
+				B_PRIx32 " %#" B_PRIx32 " %#" B_PRIx32 "; sending it an SGI\n",
+				self, cpu, now - due, sLastIrq[cpu], now - sLastInterrupt[cpu],
+				sGicdRegs[GICD_REG_ISPENDR + 1], sGicdRegs[GICD_REG_ISPENDR + 2],
+				sGicdRegs[GICD_REG_ISPENDR + 3], sGicdRegs[GICD_REG_ISPENDR + 4],
+				sGicdRegs[GICD_REG_ISACTIVER + 1], sGicdRegs[GICD_REG_ISACTIVER + 2],
+				sGicdRegs[GICD_REG_ISACTIVER + 3], sGicdRegs[GICD_REG_ISACTIVER + 4]);
+		}
+		atomic_test_and_set64(&sNudged[cpu], now, 0);
+		// SGI 0 (an empty ICI) to that CPU's interface (identity on the Pi)
+		sGicdRegs[GICD_REG_SGIR] = (1 << cpu) << 16;
+	}
+	return B_HANDLED_INTERRUPT;
 }
 
 
@@ -217,14 +244,19 @@ GICv2InterruptController::RouteInterrupt(int32 irq, uint32 cpuMask)
 
 void GICv2InterruptController::HandleInterrupt()
 {
-	const int32 cpu = smp_get_current_cpu();
-	if ((atomic_get(&gGICv2FreezeProbe) & (1 << cpu)) != 0) {
-		atomic_and(&gGICv2FreezeProbe, ~(1 << cpu));
-		freeze_probe(cpu);
-	}
-
 	uint32_t iar = fGiccRegs[GICC_REG_IAR];
 	uint32_t irqnr = iar & 0x3FF;
+
+	const int32 cpu = smp_get_current_cpu();
+	if (irqnr < 1020) {
+		sLastInterrupt[cpu] = system_time();
+		sLastIrq[cpu] = irqnr;
+		if (sWatchdogStarted[cpu] == 0 && sLastInterrupt[cpu] > 10000000) {
+			sWatchdogStarted[cpu] = 1;
+			add_timer(&sWatchdog[cpu], &gic_watchdog, kWatchdogPeriod,
+				B_PERIODIC_TIMER);
+		}
+	}
 
 	if ((irqnr == 1022) || (irqnr == 1023)) {
 		dprintf("spurious interrupt (%d)\n", irqnr);
