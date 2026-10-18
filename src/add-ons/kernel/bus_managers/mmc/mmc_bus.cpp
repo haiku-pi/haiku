@@ -421,8 +421,8 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 			busWidth = 4;
 		}
 	}
-	// High speed timing: the card outputs data on the rising clock edge,
-	// which leaves the host more margin (for now still at 25 MHz)
+	// High speed timing (up to 50 MHz): the card outputs data on the rising
+	// clock edge
 	uint8_t busSpeed;
 	bool highSpeed = false;
 	if (SdioReadDirect(rca, 0, kCccrBusSpeed, &busSpeed) == B_OK
@@ -430,7 +430,7 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 		highSpeed = SdioWriteDirect(rca, 0, kCccrBusSpeed,
 			busSpeed | kBusSpeedEnableHigh) == B_OK;
 	}
-	SetClock(25000);
+	SetClock(highSpeed ? 50000 : 25000);
 
 	const uint8_t cardType = CARD_TYPE_SDIO;
 	SetCardType((card_type)cardType);
