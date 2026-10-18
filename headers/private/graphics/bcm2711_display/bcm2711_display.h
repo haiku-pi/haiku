@@ -23,6 +23,11 @@ struct bcm2711_display_shared_info {
 	display_mode	current_mode;
 	uint32			bytes_per_row;
 
+	// the mode the firmware drives the monitor with; smaller ones are scaled
+	// up to it by a firmware plane
+	uint32			native_width;
+	uint32			native_height;
+
 	edid1_raw		edid_raw;
 		// as the firmware read it from the monitor (decoded by the accelerant)
 	bool			has_edid;
@@ -41,6 +46,15 @@ enum {
 	BCM2711_DISPLAY_GET_PRIVATE_DATA = B_DEVICE_OP_CODES_END + 1,
 	BCM2711_DISPLAY_CLONE_FRAME_BUFFER,
 	BCM2711_DISPLAY_GET_DEVICE_NAME,
+	BCM2711_DISPLAY_SET_MODE,
+		// struct bcm2711_display_mode; the frame buffer changes, so clone it
+		// again afterwards
+};
+
+
+struct bcm2711_display_mode {
+	uint32			width;
+	uint32			height;
 };
 
 

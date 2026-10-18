@@ -6,8 +6,10 @@
  */
 
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <compute_display_timing.h>
 #include <create_display_modes.h>
@@ -37,33 +39,62 @@ operator==(const display_mode &lhs, const display_mode &rhs)
 }
 
 
-/*!	Checks if the specified \a mode is the one the firmware shows. */
+/*!	Any mode up to the native one can be shown: a firmware plane scales it. */
 static bool
 is_mode_supported(display_mode* mode)
 {
-	return (mode != NULL) && (*mode == gInfo->shared_info->current_mode);
+	return mode != NULL
+		&& mode->space == gInfo->shared_info->current_mode.space
+		&& mode->virtual_width >= 320 && mode->virtual_height >= 200
+		&& mode->virtual_width <= gInfo->shared_info->native_width
+		&& mode->virtual_height <= gInfo->shared_info->native_height;
 }
 
 
-/*!	Creates the initial mode list of the primary accelerant.
+/*!	Creates the initial mode list of the primary accelerant: the native mode
+	and the common smaller ones (a firmware plane scales them up).
 	It's called from bcm2711_init_accelerant().
 */
 status_t
 create_mode_list(void)
 {
+	static const struct {
+		uint16 width;
+		uint16 height;
+	} kModes[] = {
+		{ 2560, 1440 }, { 1920, 1200 }, { 1920, 1080 }, { 1680, 1050 },
+		{ 1600, 1200 }, { 1600, 900 }, { 1440, 900 }, { 1366, 768 },
+		{ 1280, 1024 }, { 1280, 800 }, { 1280, 720 }, { 1024, 768 },
+		{ 800, 600 }, { 640, 480 }
+	};
+
 	const color_space colorspace[] = {
 		(color_space)gInfo->shared_info->current_mode.space
 	};
-	display_mode mode = gInfo->shared_info->current_mode;
+	const uint32 nativeWidth = gInfo->shared_info->native_width;
+	const uint32 nativeHeight = gInfo->shared_info->native_height;
 
-	compute_display_timing(mode.virtual_width, mode.virtual_height, 60, false,
-		&mode.timing);
-	fill_display_mode(mode.virtual_width, mode.virtual_height, &mode);
+	display_mode modes[B_COUNT_OF(kModes) + 1];
+	uint32 count = 0;
+	display_mode mode = gInfo->shared_info->current_mode;
+	compute_display_timing(nativeWidth, nativeHeight, 60, false, &mode.timing);
+	fill_display_mode(nativeWidth, nativeHeight, &mode);
+	modes[count++] = mode;
+	for (size_t i = 0; i < B_COUNT_OF(kModes); i++) {
+		if (kModes[i].width > nativeWidth || kModes[i].height > nativeHeight
+			|| (kModes[i].width == nativeWidth
+				&& kModes[i].height == nativeHeight)) {
+			continue;
+		}
+		compute_display_timing(kModes[i].width, kModes[i].height, 60, false,
+			&mode.timing);
+		fill_display_mode(kModes[i].width, kModes[i].height, &mode);
+		modes[count++] = mode;
+	}
 
 	gInfo->mode_list_area = create_display_modes("bcm2711 display modes",
-		NULL, &mode, 1, colorspace, 1, is_mode_supported, &gInfo->mode_list,
-		&gInfo->shared_info->mode_count);
-
+		NULL, modes, count, colorspace, 1, is_mode_supported,
+		&gInfo->mode_list, &gInfo->shared_info->mode_count);
 	if (gInfo->mode_list_area < 0)
 		return gInfo->mode_list_area;
 
@@ -98,10 +129,29 @@ status_t
 bcm2711_set_display_mode(display_mode* _mode)
 {
 	TRACE(("bcm2711_set_display_mode()\n"));
-	if (_mode != NULL && *_mode == gInfo->shared_info->current_mode)
-		return B_OK;
+	if (_mode == NULL || !is_mode_supported(_mode))
+		return B_BAD_VALUE;
 
-	return B_UNSUPPORTED;
+	bcm2711_display_mode mode;
+	mode.width = _mode->virtual_width;
+	mode.height = _mode->virtual_height;
+	if (ioctl(gInfo->device, BCM2711_DISPLAY_SET_MODE, &mode, sizeof(mode))
+			!= 0) {
+		return errno;
+	}
+
+	// the driver replaced the frame buffer (our clone of it is a null area)
+	area_info info;
+	if (ioctl(gInfo->device, BCM2711_DISPLAY_CLONE_FRAME_BUFFER, &info,
+			sizeof(info)) != 0) {
+		return errno;
+	}
+	delete_area(gInfo->frame_buffer_area);
+	gInfo->frame_buffer_area = info.area;
+	gInfo->frame_buffer = info.address;
+
+	gInfo->shared_info->current_mode = *_mode;
+	return B_OK;
 }
 
 

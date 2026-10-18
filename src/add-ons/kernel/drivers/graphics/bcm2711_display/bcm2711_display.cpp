@@ -61,6 +61,46 @@ static const uint32 kSmiDisplayTag = 0xabcd0000;
 // takes over
 static const bigtime_t kVblankProbeTime = 100000;
 
+// The firmware's planes: 8 per display, 0 = primary, 7 = the cursor; the
+// firmware framebuffer is under them, at layer -127
+static const uint8 kPrimaryPlane = 0;
+static const int8 kPrimaryLayer = 0;
+// VC_IMAGE_XRGB8888: B, G, R, X in memory, as B_RGB32
+static const uint8 kImageXRGB8888 = 44;
+// The firmware scans out from the low 1 GiB only (it keeps 30 address bits)
+static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
+
+
+/*!	The value buffer of the firmware's SET_PLANE property (as Linux's
+	vc4_firmware_kms): source rectangle in 16.16 fixed point.
+*/
+struct firmware_plane {
+	uint8	display;
+	uint8	plane_id;
+	uint8	image_type;
+	int8	layer;
+	uint16	width;
+	uint16	height;
+	uint16	pitch;
+	uint16	vpitch;
+	uint32	src_x;
+	uint32	src_y;
+	uint32	src_w;
+	uint32	src_h;
+	int16	dst_x;
+	int16	dst_y;
+	uint16	dst_w;
+	uint16	dst_h;
+	uint8	alpha;
+	uint8	num_planes;
+	uint8	is_vu;
+	uint8	color_encoding;
+	uint32	planes[4];
+	uint32	transform;
+} _PACKED;
+
+static_assert(sizeof(firmware_plane) == 60, "SET_PLANE takes 60 bytes");
+
 
 struct display_info {
 	int32			open_count;
@@ -68,7 +108,21 @@ struct display_info {
 	area_id			shared_area;
 
 	area_id			frame_buffer_area;
+		// the one the accelerant clones: boot_area or mode_area
 	addr_t			frame_buffer;
+
+	// the boot loader's frame buffer, scanned out by the firmware itself, in
+	// the native mode
+	area_id			boot_area;
+	addr_t			boot_frame_buffer;
+	uint32			boot_bytes_per_row;
+	uint32			depth;
+
+	// a smaller mode's frame buffer, scaled up by a firmware plane
+	area_id			mode_area;
+	addr_t			mode_frame_buffer;
+
+	uint32			display_id;
 
 	volatile uint32* smi;
 	area_id			smi_area;
@@ -386,22 +440,36 @@ display_init(display_info& info)
 
 	// The boot loader's mapping stays (the kernel debugger's console uses
 	// it); this one is write-combining
-	info.frame_buffer_area = map_physical_memory("bcm2711 display frame buffer",
+	info.boot_area = map_physical_memory("bcm2711 display frame buffer",
 		bufferInfo->physical_frame_buffer,
 		bufferInfo->bytes_per_row * bufferInfo->height, B_ANY_KERNEL_ADDRESS,
-		B_READ_AREA | B_WRITE_AREA, (void**)&info.frame_buffer);
-	if (info.frame_buffer_area < 0) {
+		B_READ_AREA | B_WRITE_AREA, (void**)&info.boot_frame_buffer);
+	if (info.boot_area < 0) {
 		delete_area(info.shared_area);
 		put_module(BCM2835_MAILBOX_MODULE_NAME);
-		return info.frame_buffer_area;
+		return info.boot_area;
 	}
-	vm_set_area_memory_type(info.frame_buffer_area,
-		bufferInfo->physical_frame_buffer, B_WRITE_COMBINING_MEMORY);
+	vm_set_area_memory_type(info.boot_area, bufferInfo->physical_frame_buffer,
+		B_WRITE_COMBINING_MEMORY);
+	info.boot_bytes_per_row = bufferInfo->bytes_per_row;
+	info.depth = bufferInfo->depth;
+	info.frame_buffer_area = info.boot_area;
+	info.frame_buffer = info.boot_frame_buffer;
+	info.mode_area = -1;
 
 	sharedInfo.bytes_per_row = bufferInfo->bytes_per_row;
+	sharedInfo.native_width = bufferInfo->width;
+	sharedInfo.native_height = bufferInfo->height;
 	sharedInfo.current_mode.virtual_width = bufferInfo->width;
 	sharedInfo.current_mode.virtual_height = bufferInfo->height;
 	sharedInfo.current_mode.space = color_space_for_depth(bufferInfo->depth);
+
+	// the firmware's id of the first display (HDMI 0)
+	uint32 display = 0;
+	if (sMailbox->property_tag(BCM2835_TAG_GET_DISPLAY_ID, &display,
+			sizeof(display), sizeof(display), NULL) == B_OK) {
+		info.display_id = display;
+	}
 
 	read_edid(info);
 
@@ -423,13 +491,146 @@ display_init(display_info& info)
 }
 
 
+static status_t
+set_plane(display_info& info, uint32 width, uint32 height, phys_addr_t buffer)
+{
+	firmware_plane plane = {};
+	plane.display = info.display_id;
+	plane.plane_id = kPrimaryPlane;
+	if (width != 0) {
+		const uint32 nativeWidth = info.shared_info->native_width;
+		const uint32 nativeHeight = info.shared_info->native_height;
+
+		// scaled up as far as it fits, centered (black borders)
+		uint32 dstWidth = nativeWidth;
+		uint32 dstHeight = (uint64)height * nativeWidth / width;
+		if (dstHeight > nativeHeight) {
+			dstHeight = nativeHeight;
+			dstWidth = (uint64)width * nativeHeight / height;
+		}
+
+		plane.image_type = kImageXRGB8888;
+		plane.layer = kPrimaryLayer;
+		plane.width = width;
+		plane.height = height;
+		plane.pitch = width * 4;
+		plane.vpitch = height;
+		plane.src_w = width << 16;
+		plane.src_h = height << 16;
+		plane.dst_x = (nativeWidth - dstWidth) / 2;
+		plane.dst_y = (nativeHeight - dstHeight) / 2;
+		plane.dst_w = dstWidth;
+		plane.dst_h = dstHeight;
+		plane.alpha = 0xff;
+		plane.num_planes = 1;
+		plane.planes[0] = buffer;
+	}
+		// else: only display and plane: unsets the plane
+
+	return sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane, sizeof(plane),
+		sizeof(plane), NULL);
+}
+
+
+static void
+blank_firmware_frame_buffer(bool blank)
+{
+	uint32 value = blank ? 1 : 0;
+	sMailbox->property_tag(BCM2835_TAG_FRAMEBUFFER_BLANK, &value,
+		sizeof(value), sizeof(value), NULL);
+}
+
+
+/*!	Switches to \a width x \a height: the native mode is the firmware's own
+	frame buffer, a smaller one gets a new buffer that a firmware plane scales
+	up. The accelerant's clone of the old buffer becomes a null area.
+*/
+static status_t
+set_mode(display_info& info, uint32 width, uint32 height)
+{
+	bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	if (width == sharedInfo.current_mode.virtual_width
+		&& height == sharedInfo.current_mode.virtual_height) {
+		return B_OK;
+	}
+	if (info.depth != 32 || width < 320 || height < 200
+		|| width > sharedInfo.native_width
+		|| height > sharedInfo.native_height) {
+		return B_BAD_VALUE;
+	}
+
+	const bool native = width == sharedInfo.native_width
+		&& height == sharedInfo.native_height;
+	area_id oldModeArea = info.mode_area;
+
+	if (native) {
+		set_plane(info, 0, 0, 0);
+		blank_firmware_frame_buffer(false);
+		info.mode_area = -1;
+		info.frame_buffer_area = info.boot_area;
+		info.frame_buffer = info.boot_frame_buffer;
+		sharedInfo.bytes_per_row = info.boot_bytes_per_row;
+	} else {
+		const uint32 bytesPerRow = width * 4;
+		const size_t size = (bytesPerRow * height + B_PAGE_SIZE - 1)
+			& ~(B_PAGE_SIZE - 1);
+		virtual_address_restrictions virtualRestrictions = {};
+		virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+		physical_address_restrictions physicalRestrictions = {};
+		physicalRestrictions.high_address = kScanOutLimit;
+		void* address;
+		area_id area = create_area_etc(B_SYSTEM_TEAM,
+			"bcm2711 display mode frame buffer", size, B_CONTIGUOUS,
+			B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
+			&physicalRestrictions, &address);
+		if (area < 0)
+			return area;
+		physical_entry entry;
+		get_memory_map(address, B_PAGE_SIZE, &entry, 1);
+		vm_set_area_memory_type(area, entry.address, B_WRITE_COMBINING_MEMORY);
+		memset(address, 0, size);
+
+		status_t status = set_plane(info, width, height, entry.address);
+		if (status != B_OK) {
+			delete_area(area);
+			return status;
+		}
+		blank_firmware_frame_buffer(true);
+
+		info.mode_area = area;
+		info.mode_frame_buffer = (addr_t)address;
+		info.frame_buffer_area = area;
+		info.frame_buffer = (addr_t)address;
+		sharedInfo.bytes_per_row = bytesPerRow;
+	}
+
+	// the kernel debugger's console follows
+	frame_buffer_update(info.frame_buffer, width, height, info.depth,
+		sharedInfo.bytes_per_row);
+
+	if (oldModeArea >= 0) {
+		vm_change_clones_to_null_areas(oldModeArea);
+		delete_area(oldModeArea);
+	} else
+		vm_change_clones_to_null_areas(info.boot_area);
+
+	sharedInfo.current_mode.virtual_width = width;
+	sharedInfo.current_mode.virtual_height = height;
+	TRACE_ALWAYS("mode %" B_PRIu32 "x%" B_PRIu32 "%s\n", width, height,
+		native ? " (native)" : ", scaled by a firmware plane");
+	return B_OK;
+}
+
+
 static void
 display_uninit(display_info& info)
 {
+	set_mode(info, info.shared_info->native_width,
+		info.shared_info->native_height);
 	stop_vertical_blank(info);
 	delete_sem(info.shared_info->vblank_semaphore);
-	vm_change_clones_to_null_areas(info.frame_buffer_area);
-	delete_area(info.frame_buffer_area);
+	vm_change_clones_to_null_areas(info.boot_area);
+	delete_area(info.boot_area);
 	delete_area(info.shared_area);
 	put_module(BCM2835_MAILBOX_MODULE_NAME);
 }
@@ -498,6 +699,15 @@ device_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			if (area < 0)
 				return area;
 			return _user_get_area_info(area, (area_info*)buffer);
+		}
+
+		case BCM2711_DISPLAY_SET_MODE:
+		{
+			bcm2711_display_mode mode;
+			if (user_memcpy(&mode, buffer, sizeof(mode)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			return set_mode(info, mode.width, mode.height);
 		}
 
 		case BCM2711_DISPLAY_GET_DEVICE_NAME:
