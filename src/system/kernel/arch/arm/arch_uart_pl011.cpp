@@ -327,6 +327,15 @@ ArchUARTPL011::FlushTx()
 }
 
 
+bool
+ArchUARTPL011::EnableReceiveInterrupt()
+{
+	// receive and receive timeout (fewer characters than the FIFO level)
+	Out32(PL011_IMSC, In32(PL011_IMSC) | PL011_RXIM | PL011_RTIM);
+	return true;
+}
+
+
 void
 ArchUARTPL011::FlushRx()
 {

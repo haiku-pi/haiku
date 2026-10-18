@@ -32,8 +32,12 @@ arch_platform_init_post_vm(struct kernel_args *kernelArgs)
 }
 
 
+void arm64_debug_console_init_interrupt(kernel_args* args);
+
+
 status_t
 arch_platform_init_post_thread(struct kernel_args *kernelArgs)
 {
+	arm64_debug_console_init_interrupt(kernelArgs);
 	return B_OK;
 }

@@ -10,12 +10,44 @@
 #include <arch/arm64/arch_uart_linflex.h>
 #include <arch/arm64/arch_uart_samsung.h>
 #include <boot/kernel_args.h>
+#include <debug.h>
 #include <kernel.h>
 #include <vm/vm.h>
 #include <string.h>
 
 
 static DebugUART *sArchDebugUART = NULL;
+
+
+static int32
+debug_uart_interrupt(void* /*data*/)
+{
+	int c;
+	bool any = false;
+	while ((c = sArchDebugUART->GetChar(false)) >= 0) {
+		debug_serial_emergency_input((char)c);
+		any = true;
+	}
+	return any ? B_HANDLED_INTERRUPT : B_UNHANDLED_INTERRUPT;
+}
+
+
+/*!	Watches the debug UART's input from its interrupt, so that the serial
+	emergency keys work even when no thread can run anymore.
+*/
+void
+arm64_debug_console_init_interrupt(kernel_args* args)
+{
+	uint32 irq = args->arch_args.uart.irq;
+	if (sArchDebugUART == NULL || irq == 0)
+		return;
+	if (install_io_interrupt_handler(irq, &debug_uart_interrupt, NULL, 0)
+			!= B_OK) {
+		return;
+	}
+	if (!sArchDebugUART->EnableReceiveInterrupt())
+		remove_io_interrupt_handler(irq, &debug_uart_interrupt, NULL);
+}
 
 
 void

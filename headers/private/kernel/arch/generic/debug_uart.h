@@ -35,6 +35,10 @@ public:
 	virtual	void			FlushTx() = 0;
 	virtual	void			FlushRx() = 0;
 
+	// Raise the UART's interrupt when input arrives (reading all of it
+	// clears the interrupt). Returns false if not supported.
+	virtual	bool			EnableReceiveInterrupt() { return false; }
+
 			void			SetBase(addr_t base) { fBase = base; }
 			addr_t			Base() const { return fBase; }
 			int64			Clock() const { return fClock; }

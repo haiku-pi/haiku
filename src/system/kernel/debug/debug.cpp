@@ -1793,25 +1793,42 @@ debug_init_post_settings(struct kernel_args* args)
 
 /*!	The serial console's equivalent of Alt-SysRq: three Ctrl-] (0x1d) followed
 	by a key is handled like that key pressed with Alt-SysRq ('d' enters the
-	kernel debugger). Polls the debug UART, whose input nothing else reads.
+	kernel debugger). Fed with the debug UART's input, from its interrupt
+	where the platform provides one, and by the polling thread below.
 */
-static void
-check_serial_emergency_keys(void* /*cookie*/, int /*iteration*/)
+void
+debug_serial_emergency_input(char c)
 {
 	static const char kPrefix = 0x1d;
-	static const int kPrefixLength = 3;
-	static int sPrefixSeen = 0;
+	static const int32 kPrefixLength = 3;
+	static int32 sPrefixSeen = 0;
 
-	int c;
-	while ((c = arch_debug_serial_try_getchar()) >= 0) {
-		if (sPrefixSeen == kPrefixLength) {
-			sPrefixSeen = 0;
-			debug_emergency_key_pressed((char)c);
-		} else if (c == kPrefix)
-			sPrefixSeen++;
-		else
-			sPrefixSeen = 0;
+	if (!sSerialEmergencyKeysEnabled || !sEmergencyKeysEnabled)
+		return;
+
+	if (sPrefixSeen == kPrefixLength) {
+		sPrefixSeen = 0;
+		debug_emergency_key_pressed(c);
+	} else if (c == kPrefix)
+		sPrefixSeen++;
+	else
+		sPrefixSeen = 0;
+}
+
+
+/*!	Polls the debug UART, whose input nothing else reads, from a thread of
+	its own, so that it still works when other threads are stuck.
+*/
+static status_t
+serial_emergency_keys_thread(void* /*cookie*/)
+{
+	while (true) {
+		int c;
+		while ((c = arch_debug_serial_try_getchar()) >= 0)
+			debug_serial_emergency_input((char)c);
+		snooze(100000);
 	}
+	return B_OK;
 }
 
 
@@ -1823,8 +1840,12 @@ debug_init_post_modules(struct kernel_args* args)
 	// check for dupped lines every 10/10 second
 	register_kernel_daemon(check_pending_repeats, NULL, 10);
 
-	if (sSerialEmergencyKeysEnabled && sEmergencyKeysEnabled)
-		register_kernel_daemon(check_serial_emergency_keys, NULL, 1);
+	if (sSerialEmergencyKeysEnabled && sEmergencyKeysEnabled) {
+		thread_id thread = spawn_kernel_thread(serial_emergency_keys_thread,
+			"serial emergency keys", B_REAL_TIME_PRIORITY, NULL);
+		if (thread >= 0)
+			resume_thread(thread);
+	}
 
 	syslog_init_post_threads();
 

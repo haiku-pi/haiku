@@ -180,6 +180,7 @@ extern debug_page_fault_info* debug_get_page_fault_info();
 extern void		debug_trap_cpu_in_kdl(int32 cpu, bool returnIfHandedOver);
 extern void		debug_double_fault(int32 cpu);
 extern bool		debug_emergency_key_pressed(char key);
+extern void		debug_serial_emergency_input(char c);
 extern bool		debug_is_kernel_memory_accessible(addr_t address, size_t size,
 					uint32 protection);
 extern int		debug_call_with_fault_handler(jmp_buf jumpBuffer,
