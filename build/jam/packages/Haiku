@@ -136,6 +136,7 @@ AddNewDriversToPackage disk virtual :
 	virtio_block@arm,arm64,riscv64
 	;
 AddNewDriversToPackage graphics :
+	v3d@arm64
 	virtio_gpu
 	;
 AddNewDriversToPackage power
