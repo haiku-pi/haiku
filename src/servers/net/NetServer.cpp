@@ -1135,7 +1135,15 @@ NetServer::_JoinNetwork(const BMessage& message, const BNetworkAddress* address,
 		// We need the supplicant, try to launch it.
 		status_t status = be_roster->Launch(kWPASupplicantSignature);
 		if (status != B_OK && status != B_ALREADY_RUNNING) {
-			// Without it, WPA personal networks can still be joined
+			// Without it, WPA personal networks can still be joined. A
+			// network not seen in a scan yet, with a passphrase, is taken
+			// to be one (WPA2, CCMP), as nothing else could use it.
+			if (askForConfig && password != NULL) {
+				network.authentication_mode = B_NETWORK_AUTHENTICATION_WPA2;
+				network.cipher = network.group_cipher = B_NETWORK_CIPHER_CCMP;
+				network.key_mode = B_KEY_MODE_PSK;
+				askForConfig = false;
+			}
 			if (!askForConfig && password != NULL
 				&& (network.authentication_mode
 						== B_NETWORK_AUTHENTICATION_WPA
