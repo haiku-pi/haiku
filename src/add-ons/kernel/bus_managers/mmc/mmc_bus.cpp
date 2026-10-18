@@ -567,6 +567,27 @@ MMCBus::_SetBroadcomWindow(uint16_t rca, uint32_t address)
 }
 
 
+/*!	Releases \a sem when the SDIO card raises its interrupt; the interrupt
+	stays masked until SdioAcknowledgeInterrupt().
+*/
+status_t
+MMCBus::SdioSetInterrupt(sem_id sem)
+{
+	if (fController->set_card_interrupt == NULL)
+		return B_NOT_SUPPORTED;
+	fController->set_card_interrupt(fCookie, sem);
+	return B_OK;
+}
+
+
+void
+MMCBus::SdioAcknowledgeInterrupt()
+{
+	if (fController->acknowledge_card_interrupt != NULL)
+		fController->acknowledge_card_interrupt(fCookie);
+}
+
+
 void MMCBus::_AcquireScanSemaphore()
 {
 	ReleaseBus();

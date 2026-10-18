@@ -18,6 +18,7 @@
 #include <ACPI.h>
 #include "acpi.h"
 
+#include <util/AutoLock.h>
 #include <vm/vm.h>
 
 #if defined(__aarch64__)
@@ -84,6 +85,8 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 	}
 
 	fInterruptNotifier.Init(this, "SDHCI interrupts");
+	fCardInterruptSemaphore = -1;
+	B_INITIALIZE_SPINLOCK(&fCardInterruptLock);
 
 	DisableInterrupts();
 
@@ -995,6 +998,36 @@ SdhciBus::PowerOff()
 }
 
 
+/*!	Releases \a sem whenever the SDIO card raises its interrupt (a negative
+	\a sem stops that).
+*/
+void
+SdhciBus::SetCardInterrupt(sem_id sem)
+{
+	InterruptsSpinLocker locker(fCardInterruptLock);
+	fCardInterruptSemaphore = sem;
+	if (sem >= 0) {
+		fRegisters->interrupt_status_enable |= SDHCI_INT_CARD_STATUS;
+		fRegisters->interrupt_signal_enable |= SDHCI_INT_CARD_STATUS;
+	} else {
+		fRegisters->interrupt_signal_enable &= ~SDHCI_INT_CARD_STATUS;
+		fRegisters->interrupt_status_enable &= ~SDHCI_INT_CARD_STATUS;
+	}
+}
+
+
+/*!	Unmasks the card interrupt again, once its driver serviced the card. */
+void
+SdhciBus::AcknowledgeCardInterrupt()
+{
+	InterruptsSpinLocker locker(fCardInterruptLock);
+	if (fCardInterruptSemaphore < 0)
+		return;
+	fRegisters->interrupt_status_enable |= SDHCI_INT_CARD_STATUS;
+	fRegisters->interrupt_signal_enable |= SDHCI_INT_CARD_STATUS;
+}
+
+
 void
 SdhciBus::TerminateBus()
 {
@@ -1106,6 +1139,18 @@ SdhciBus::HandleInterrupt()
 		TRACE("Transfer complete interrupt handled\n");
 	}
 
+	// SDIO card interrupt: a level that only the function driver can clear
+	// by servicing the card, so it stays masked until it acknowledges it
+	if ((intmask & SDHCI_INT_CARD_STATUS) != 0) {
+		SpinLocker locker(fCardInterruptLock);
+		fRegisters->interrupt_signal_enable &= ~SDHCI_INT_CARD_STATUS;
+		fRegisters->interrupt_status_enable &= ~SDHCI_INT_CARD_STATUS;
+		if (fCardInterruptSemaphore >= 0) {
+			release_sem_etc(fCardInterruptSemaphore, 1,
+				B_DO_NOT_RESCHEDULE);
+		}
+	}
+
 	// handling bus power interrupt
 	if (intmask & SDHCI_INT_BUS_POWER) {
 		fRegisters->interrupt_status = SDHCI_INT_BUS_POWER;
@@ -1118,7 +1163,9 @@ SdhciBus::HandleInterrupt()
 	intmask = fRegisters->interrupt_status
 		& ~(SDHCI_INT_BUF_READ_READY | SDHCI_INT_BUF_WRITE_READY);
 	if (intmask != 0) {
-		ERROR("Remaining interrupts at end of handler: %x\n", intmask);
+		// (a command completing meanwhile shows up here, and is handled by
+		// the interrupt it raises)
+		TRACE("Remaining interrupts at end of handler: %x\n", intmask);
 	}
 
 	return B_HANDLED_INTERRUPT;
@@ -1349,6 +1396,22 @@ execute_data_command(void* controller, uint8_t command, uint32_t argument,
 {
 	SdhciBus* bus = (SdhciBus*)controller;
 	return bus->ExecuteDataCommand(command, argument, buffer, length);
+}
+
+
+void
+set_card_interrupt(void* controller, sem_id sem)
+{
+	SdhciBus* bus = (SdhciBus*)controller;
+	bus->SetCardInterrupt(sem);
+}
+
+
+void
+acknowledge_card_interrupt(void* controller)
+{
+	SdhciBus* bus = (SdhciBus*)controller;
+	bus->AcknowledgeCardInterrupt();
 }
 
 

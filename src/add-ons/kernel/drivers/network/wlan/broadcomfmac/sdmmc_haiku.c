@@ -7,8 +7,8 @@
 /*!	OpenBSD's sdmmc(4) I/O interface (dev/sdmmc/sdmmcvar.h), as far as bwfm(4)
 	needs it, on top of Haiku's MMC bus manager.
 
-	The bus manager does not deliver SDIO card interrupts yet, so an
-	established interrupt handler is polled from a kernel thread instead.
+	An established interrupt handler runs in a kernel thread, woken by the
+	card interrupt (and, as a safety net, every SDMMC_INTR_POLL_INTERVAL).
 */
 
 
@@ -28,7 +28,8 @@
 #define SD_IO_CCCR_INT_ENABLE	0x04
 	/* bit 0 is the master enable, bit n enables function n */
 
-#define SDMMC_INTR_POLL_INTERVAL	10000	/* us */
+#define SDMMC_INTR_POLL_INTERVAL	100000	/* us, with card interrupts */
+#define SDMMC_INTR_POLL_ONLY_INTERVAL	10000	/* us, without them */
 
 
 struct sdmmc_intr_handler {
@@ -36,6 +37,7 @@ struct sdmmc_intr_handler {
 	int					(*ih_fun)(void*);
 	void*				ih_arg;
 	thread_id			ih_thread;
+	sem_id				ih_sem;
 	volatile int32		ih_quit;
 };
 
@@ -235,26 +237,39 @@ sdmmc_io_function_disable(struct sdmmc_function* sf)
 
 
 static int32
-sdmmc_intr_poll_thread(void* arg)
+sdmmc_intr_thread(void* arg)
 {
 	struct sdmmc_intr_handler* ih = arg;
 
+	struct sdmmc_softc* sc = ih->ih_softc;
+	int interrupts = haiku_sdio_set_interrupt(sc->sc_sdio, ih->ih_sem) == 0;
+
 	while (!ih->ih_quit) {
-		if (ih->ih_softc->sc_intr_enabled != 0) {
+		if (sc->sc_intr_enabled != 0) {
 			/* Like the compat layer's interrupt threads (not MP safe) */
 			mtx_lock(&Giant);
 			ih->ih_fun(ih->ih_arg);
 			mtx_unlock(&Giant);
 		}
-		snooze(SDMMC_INTR_POLL_INTERVAL);
+		if (interrupts) {
+			/* The handler serviced the card: unmask its interrupt again */
+			haiku_sdio_acknowledge_interrupt(sc->sc_sdio);
+			acquire_sem_etc(ih->ih_sem, 1, B_RELATIVE_TIMEOUT,
+				SDMMC_INTR_POLL_INTERVAL);
+		} else
+			snooze(SDMMC_INTR_POLL_ONLY_INTERVAL);
 	}
+
+	if (interrupts)
+		haiku_sdio_set_interrupt(sc->sc_sdio, -1);
 	return 0;
 }
 
 
-/*!	Establishes the card interrupt handler \a fun. As card interrupts do not
-	reach us, it is called periodically while any function's interrupt is
-	enabled (sdmmc_intr_enable()). Only one handler is supported.
+/*!	Establishes the card interrupt handler \a fun: called on card interrupts
+	(or periodically, if the controller cannot deliver them) while any
+	function's interrupt is enabled (sdmmc_intr_enable()). Only one handler
+	is supported.
 */
 void*
 sdmmc_intr_establish(struct sdmmc_softc* sc, int (*fun)(void*), void* arg,
@@ -272,9 +287,15 @@ sdmmc_intr_establish(struct sdmmc_softc* sc, int (*fun)(void*), void* arg,
 	ih->ih_softc = sc;
 	ih->ih_fun = fun;
 	ih->ih_arg = arg;
-	ih->ih_thread = spawn_kernel_thread(sdmmc_intr_poll_thread, name,
+	ih->ih_sem = create_sem(0, name);
+	if (ih->ih_sem < 0) {
+		free(ih, M_DEVBUF, sizeof(*ih));
+		return NULL;
+	}
+	ih->ih_thread = spawn_kernel_thread(sdmmc_intr_thread, name,
 		B_REAL_TIME_DISPLAY_PRIORITY, ih);
 	if (ih->ih_thread < 0) {
+		delete_sem(ih->ih_sem);
 		free(ih, M_DEVBUF, sizeof(*ih));
 		return NULL;
 	}
@@ -293,6 +314,7 @@ sdmmc_intr_disestablish(void* cookie)
 	int giant;
 
 	ih->ih_quit = 1;
+	release_sem(ih->ih_sem);
 
 	/* The poll thread may be waiting for Giant */
 	giant = mtx_owned(&Giant);
@@ -302,6 +324,7 @@ sdmmc_intr_disestablish(void* cookie)
 	if (giant)
 		mtx_lock(&Giant);
 
+	delete_sem(ih->ih_sem);
 	ih->ih_softc->sc_ih = NULL;
 	free(ih, M_DEVBUF, sizeof(*ih));
 }

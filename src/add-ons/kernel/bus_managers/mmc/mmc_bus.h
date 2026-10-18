@@ -162,6 +162,8 @@ public:
 									uint8_t function, uint16_t blockSize);
 				status_t		SdioEnableFunction(uint16_t rca,
 									uint8_t function, bool enable);
+				status_t		SdioSetInterrupt(sem_id sem);
+				void			SdioAcknowledgeInterrupt();
 
 				void			AcquireBus() { acquire_sem(fLockSemaphore); }
 				void			ReleaseBus() { release_sem(fLockSemaphore); }

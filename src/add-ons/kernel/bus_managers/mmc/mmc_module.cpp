@@ -218,6 +218,23 @@ mmc_bus_sdio_enable_function(device_node* node, void* cookie, uint16_t rca,
 
 
 static status_t
+mmc_bus_sdio_set_interrupt(device_node* node, void* cookie, sem_id sem)
+{
+	// (no bus lock: only touches interrupt registers, under a spinlock)
+	MMCBus* bus = (MMCBus*)cookie;
+	return bus->SdioSetInterrupt(sem);
+}
+
+
+static void
+mmc_bus_sdio_acknowledge_interrupt(device_node* node, void* cookie)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+	bus->SdioAcknowledgeInterrupt();
+}
+
+
+static status_t
 std_ops(int32 op, ...)
 {
 	switch (op) {
@@ -275,7 +292,9 @@ mmc_device_interface mmc_bus_controller_module = {
 	mmc_bus_sdio_write_direct,
 	mmc_bus_sdio_read_write_extended,
 	mmc_bus_sdio_set_block_size,
-	mmc_bus_sdio_enable_function
+	mmc_bus_sdio_enable_function,
+	mmc_bus_sdio_set_interrupt,
+	mmc_bus_sdio_acknowledge_interrupt
 };
 
 

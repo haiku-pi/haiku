@@ -58,6 +58,8 @@ class SdhciBus {
 			status_t			DoIO(uint8_t command, IOOperation* operation,
 									bool offsetAsSectors);
 			void				SetScanSemaphore(sem_id sem);
+			void				SetCardInterrupt(sem_id sem);
+			void				AcknowledgeCardInterrupt();
 			void				SetBusWidth(int width);
 			void				SetCardType(card_type type);
 			void				SetDmaWindow(phys_addr_t busOffset,
@@ -84,6 +86,8 @@ class SdhciBus {
 			uint8				fIrq;
 			ConditionVariable	fInterruptNotifier;
 			sem_id				fScanSemaphore;
+			sem_id				fCardInterruptSemaphore;
+			spinlock			fCardInterruptLock;
 			status_t			fStatus;
 			thread_id			fWorkerThread;
 			card_type			fCardType;
@@ -661,6 +665,8 @@ status_t execute_command(void* controller, uint8_t command,
 status_t do_io(void* controller, uint8_t command,
 	IOOperation* operation, bool offsetAsSectors);
 void set_scan_semaphore(void* controller, sem_id sem);
+void set_card_interrupt(void* controller, sem_id sem);
+void acknowledge_card_interrupt(void* controller);
 void set_bus_width(void* controller, int width);
 void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);

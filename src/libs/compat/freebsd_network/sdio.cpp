@@ -223,3 +223,18 @@ haiku_sdio_enable_function(struct haiku_sdio_device* device, int function,
 	return device->mmc->sdio_enable_function(device->node, device->cookie,
 		device->rca, function, enable != 0);
 }
+
+
+extern "C" int
+haiku_sdio_set_interrupt(struct haiku_sdio_device* device, int32_t semaphore)
+{
+	return device->mmc->sdio_set_interrupt(device->node, device->cookie,
+		semaphore);
+}
+
+
+extern "C" void
+haiku_sdio_acknowledge_interrupt(struct haiku_sdio_device* device)
+{
+	device->mmc->sdio_acknowledge_interrupt(device->node, device->cookie);
+}

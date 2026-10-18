@@ -119,6 +119,10 @@ typedef struct mmc_bus_interface {
 		// Execute a command (SDIO IO_RW_EXTENDED) whose data phase moves
 		// blockCount blocks of blockSize bytes between the card and a kernel
 		// buffer. blockSize need not be a multiple of 4.
+	void (*set_card_interrupt)(void* controller, sem_id sem);
+		// Release sem when the SDIO card interrupt is raised (negative: stop).
+		// The interrupt is then masked until acknowledge_card_interrupt().
+	void (*acknowledge_card_interrupt)(void* controller);
 } mmc_bus_interface;
 
 
@@ -160,6 +164,11 @@ typedef struct mmc_device_interface {
 	status_t (*sdio_enable_function)(device_node* node, void* cookie,
 		uint16_t rca, uint8_t function, bool enable);
 		// Enable a function and wait until it is ready, or disable it
+	status_t (*sdio_set_interrupt)(device_node* node, void* cookie,
+		sem_id sem);
+		// Release sem on a card interrupt (negative: stop), which then stays
+		// masked until the driver serviced the card and acknowledges it
+	void (*sdio_acknowledge_interrupt)(device_node* node, void* cookie);
 } mmc_device_interface;
 
 

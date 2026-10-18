@@ -37,6 +37,10 @@ int		haiku_sdio_set_block_size(struct haiku_sdio_device* device,
 			int function, uint16_t blockSize);
 int		haiku_sdio_enable_function(struct haiku_sdio_device* device,
 			int function, int enable);
+int		haiku_sdio_set_interrupt(struct haiku_sdio_device* device,
+			int32_t semaphore);
+			/* the card interrupt releases the semaphore, then stays masked */
+void	haiku_sdio_acknowledge_interrupt(struct haiku_sdio_device* device);
 
 #ifdef __cplusplus
 }
