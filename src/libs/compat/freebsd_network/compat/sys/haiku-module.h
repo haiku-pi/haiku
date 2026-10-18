@@ -82,6 +82,7 @@ void __haiku_init_hardware(void);
 status_t _fbsd_init_hardware();
 status_t _fbsd_init_hardware_pci(driver_t* drivers[]);
 status_t _fbsd_init_hardware_uhub(driver_t* drivers[]);
+status_t _fbsd_init_hardware_sdio(driver_t* drivers[]);
 status_t _fbsd_init_drivers();
 status_t _fbsd_uninit_drivers();
 
@@ -162,6 +163,18 @@ status_t wlan_close(void*);
 			NULL														\
 		};																\
 		_fbsd_init_hardware_pci(drivers);								\
+	}																	\
+	HAIKU_FBSD_WLAN_DRIVERS_GLUE(publicname);
+
+#define HAIKU_FBSD_WLAN_SDIO_DRIVER_GLUE(publicname, name)				\
+	extern driver_t *DRIVER_MODULE_NAME(name, sdio);					\
+	void __haiku_init_hardware()										\
+	{																	\
+		driver_t *drivers[] = {											\
+			DRIVER_MODULE_NAME(name, sdio),								\
+			NULL														\
+		};																\
+		_fbsd_init_hardware_sdio(drivers);								\
 	}																	\
 	HAIKU_FBSD_WLAN_DRIVERS_GLUE(publicname);
 

@@ -60,6 +60,13 @@ KernelStaticLibrary freebsd_usb.a :
 	usb_util.c
 	;
 
+ObjectHdrs [ FGristFiles sdio.o ]
+	: [ FDirName $(HAIKU_TOP) headers private drivers ] ;
+
+KernelStaticLibrary freebsd_sdio.a :
+	sdio.cpp
+	;
+
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev mii ] ;
 
 KernelStaticLibrary freebsd_mii.a :

@@ -31,6 +31,7 @@ struct root_device_softc {
 		BUS_INVALID = 0,
 		BUS_pci,
 		BUS_uhub,
+		BUS_sdio,
 	} bus;
 
 	struct pci_info	pci_info;
