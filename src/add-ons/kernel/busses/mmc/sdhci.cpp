@@ -169,8 +169,10 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 
 	// We want to see the other bits in the status register, but not have an
 	// interrupt trigger on them (we get a "command complete" interrupt on
-	// errors already)
-	fRegisters->interrupt_status_enable |= SDHCI_INT_ERROR_MASK | SDHCI_INT_NORMAL_MASK;
+	// errors already). The SDIO card interrupt is a level that stays set until
+	// its function driver services the card: it is not used yet.
+	fRegisters->interrupt_status_enable |= SDHCI_INT_ERROR_MASK
+		| (SDHCI_INT_NORMAL_MASK & ~SDHCI_INT_CARD_STATUS);
 
 	if (poll) {
 		// Spawn a polling thread, as the interrupts won't currently work on ACPI.

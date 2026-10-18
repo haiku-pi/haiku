@@ -442,14 +442,12 @@ MMCBus::_ScanSdioCard(uint32_t ocr)
 
 	if (vendor == 0x02d0)
 		_ProbeBroadcomChip(rca);
-	char name[8];
-	snprintf(name, sizeof(name), "%04x", device);
 	device_attr attrs[] = {
 		{ B_DEVICE_BUS, B_STRING_TYPE, {.string = "mmc" }},
 		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, {.string = "SDIO device" }},
-		{ B_DEVICE_VENDOR_ID, B_UINT32_TYPE, {.ui32 = vendor}},
-		{ B_DEVICE_ID, B_STRING_TYPE, {.string = name}},
-		{ "sdio/functions", B_UINT8_TYPE, {.ui8 = (uint8)functionCount}},
+		{ B_DEVICE_VENDOR_ID, B_UINT16_TYPE, {.ui16 = vendor}},
+		{ B_DEVICE_ID, B_UINT16_TYPE, {.ui16 = device}},
+		{ kSdioFunctionsAttribute, B_UINT8_TYPE, {.ui8 = (uint8)functionCount}},
 		{ kMmcRcaAttribute, B_UINT16_TYPE, {.ui16 = rca}},
 		{ kMmcTypeAttribute, B_UINT8_TYPE, {.ui8 = cardType}},
 		{}
