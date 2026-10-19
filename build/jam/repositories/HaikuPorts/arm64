@@ -9,6 +9,8 @@ RemotePackageRepository HaikuPorts
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
 	:
 	# architecture "any" packages
+	# haiku-pi: makes the icu74 bootstrap package's data directory exist (scripts/make-icu-shim.sh)
+	icu74_bootstrap-74.1-1
 	ca_root_certificates-2025_12_02-1
 	haiku_userguide-2026_08_11-1
 	haiku_userguide_en-2026_08_11-1
