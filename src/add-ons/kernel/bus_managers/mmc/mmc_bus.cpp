@@ -128,6 +128,33 @@ MMCBus::SetClock(int frequency)
 }
 
 
+uint32_t
+MMCBus::SupportedTimings()
+{
+	if (fController->supported_timings == NULL)
+		return (1 << MMC_TIMING_LEGACY) | (1 << MMC_TIMING_HIGH_SPEED);
+	return fController->supported_timings(fCookie);
+}
+
+
+status_t
+MMCBus::SwitchSignalVoltage()
+{
+	if (fController->switch_signal_voltage == NULL)
+		return B_NOT_SUPPORTED;
+	return fController->switch_signal_voltage(fCookie);
+}
+
+
+status_t
+MMCBus::SetTiming(mmc_timing timing)
+{
+	if (fController->set_timing == NULL)
+		return timing <= MMC_TIMING_HIGH_SPEED ? B_OK : B_NOT_SUPPORTED;
+	return fController->set_timing(fCookie, timing);
+}
+
+
 void
 MMCBus::SetBusWidth(int width)
 {
@@ -716,6 +743,14 @@ MMCBus::_WorkerThread(void* cookie)
 		// Probe OCR, waiting for card to become ready
 		// We keep repeating ACMD41 until the card replies that it is
 		// initialized. For MMC we already probed using CMD1 above.
+		// Ask SD cards for 1.8 V signalling (S18R) when the controller and
+		// the board can switch to it: the UHS-I timings need it
+		const uint32_t timings = bus->SupportedTimings();
+		const uint32_t uhsTimings = (1 << MMC_TIMING_SDR50)
+			| (1 << MMC_TIMING_DDR50) | (1 << MMC_TIMING_SDR104);
+		const uint32_t s18r = (timings & uhsTimings) != 0 ? 1 << 24 : 0;
+		bool signal1v8 = false;
+
 		if ((cardType != CARD_TYPE_MMC) && (cardType != CARD_TYPE_MMC_EXTENDED_CAPACITY)) {
 			do {
 				uint32_t cardStatus;
@@ -728,7 +763,8 @@ MMCBus::_WorkerThread(void* cookie)
 				if ((cardStatus & (1 << 5)) == 0)
 					ERROR("Card did not enter ACMD mode\n");
 
-				bus->ExecuteCommand(0, SD_SEND_OP_COND, hcs | 0xFF8000, &ocr);
+				bus->ExecuteCommand(0, SD_SEND_OP_COND, hcs | s18r | 0xFF8000,
+					&ocr);
 
 				if ((ocr & (1 << 31)) == 0) {
 					TRACE("Card is busy\n");
@@ -753,7 +789,22 @@ MMCBus::_WorkerThread(void* cookie)
 		// (MMC and SD commands with the same identifier sometime expect different responses)
 		bus->SetCardType((card_type)cardType);
 
-		// TODO send CMD11 to switch to low voltage mode if card supports it?
+		// The card accepted 1.8 V (S18A): switch it, then the bus (SD physical
+		// layer spec 4.2.4.2). Should the host side fail, the card no longer
+		// matches the bus; nothing but a power cycle would bring it back.
+		if (cardType != CARD_TYPE_MMC && cardType != CARD_TYPE_MMC_EXTENDED_CAPACITY
+			&& s18r != 0 && (ocr & (1 << 24)) != 0) {
+			uint32_t response;
+			status_t status = bus->ExecuteCommand(0, SD_VOLTAGE_SWITCH, 0,
+				&response);
+			if (status == B_OK)
+				status = bus->SwitchSignalVoltage();
+			signal1v8 = status == B_OK;
+			if (status != B_OK)
+				ERROR("switch to 1.8 V signalling failed: %s\n", strerror(status));
+			else
+				TRACE_ALWAYS("card signals at 1.8 V\n");
+		}
 
 		// We use CMD2 (ALL_SEND_CID) and CMD3 (SEND_RELATIVE_ADDR) to assign
 		// an RCA to all cards. Initially all cards have an RCA of 0 and will
@@ -834,6 +885,9 @@ MMCBus::_WorkerThread(void* cookie)
 				{ "mmc/year", B_UINT16_TYPE, {.ui16 = year}},
 				{ kMmcRcaAttribute, B_UINT16_TYPE, {.ui16 = rca}},
 				{ kMmcTypeAttribute, B_UINT8_TYPE, {.ui8 = cardType}},
+				{ kMmcSignalVoltage1v8Attribute, B_UINT8_TYPE,
+					{.ui8 = (uint8)(signal1v8 ? 1 : 0)}},
+				{ kMmcTimingsAttribute, B_UINT32_TYPE, {.ui32 = timings}},
 				{}
 			};
 

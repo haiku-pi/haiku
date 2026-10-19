@@ -41,6 +41,10 @@
 #endif
 #define TRACE_ALWAYS(x...)	dprintf("\33[33msdhci:\33[0m " x)
 #define ERROR(x...)			dprintf("\33[33msdhci:\33[0m " x)
+
+
+// host control 2: the I/O signals run at 1.8 V
+static const uint16_t kHostControl2Signal1v8 = 1 << 3;
 #define CALLED(x...)		TRACE("CALLED %s\n", __PRETTY_FUNCTION__)
 
 
@@ -69,6 +73,8 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 	fNonRemovable(quirks != NULL && quirks->non_removable),
 	fNoHighSpeedBit(quirks != NULL && quirks->no_high_speed_bit),
 	fAssume3v3(quirks != NULL && quirks->assume_3v3),
+	fSetSignalVoltage(quirks != NULL ? quirks->set_signal_voltage : NULL),
+	fSignalVoltageCookie(quirks != NULL ? quirks->signal_voltage_cookie : NULL),
 	fDmaBusOffset(0),
 	fDmaHighAddress(0x100000000LL),
 	fDmaCoherent(true),
@@ -241,6 +247,7 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 			replyType = Command::kNoReplyType;
 			break;
 		case SD_APP_CMD:
+		case SD_VOLTAGE_SWITCH:
 		case SD_ERASE_WR_BLK_START:
 		case SD_ERASE_WR_BLK_END:
 			replyType = Command::kR1Type;
@@ -796,6 +803,100 @@ SdhciBus::SetClock(int kilohertz, bool allowAuto)
 
 	// Finally, route the clock to the SD card
 	fRegisters->clock_control.EnableSD();
+}
+
+
+uint32_t
+SdhciBus::SupportedTimings()
+{
+	uint32_t timings = (1 << MMC_TIMING_LEGACY) | (1 << MMC_TIMING_HIGH_SPEED);
+
+	// UHS-I needs a host controller of spec 3.0 and a board that can switch
+	// the I/O voltage; SDR50 and SDR104 may need tuning, not implemented
+	if (fSetSignalVoltage == NULL
+		|| fRegisters->host_controller_version.SpecVersion() < 2) {
+		return timings;
+	}
+	if (fRegisters->capabilities.DDR50Support())
+		timings |= 1 << MMC_TIMING_DDR50;
+	if (fRegisters->capabilities.SDR50Support()
+		&& !fRegisters->capabilities.UseTuningForSDR50()) {
+		timings |= 1 << MMC_TIMING_SDR50;
+	}
+	return timings;
+}
+
+
+/*!	The host side of the switch to 1.8 V signalling, after the card accepted
+	CMD11 (SD host controller spec 3.0, 3.6.1): with the SD clock stopped,
+	the regulator and the controller go to 1.8 V; the card then drives all
+	data lines high once the clock runs again.
+*/
+status_t
+SdhciBus::SwitchSignalVoltage()
+{
+	if (fSetSignalVoltage == NULL)
+		return B_NOT_SUPPORTED;
+
+	fRegisters->clock_control.DisableSD();
+
+	status_t status = fSetSignalVoltage(fSignalVoltageCookie, true);
+	if (status != B_OK) {
+		ERROR("cannot switch the regulator to 1.8 V: %s\n", strerror(status));
+		return status;
+	}
+	fRegisters->host_control_2 |= kHostControl2Signal1v8;
+	snooze(5000);
+	if ((fRegisters->host_control_2 & kHostControl2Signal1v8) == 0) {
+		ERROR("1.8 V signalling did not stay enabled\n");
+		return B_ERROR;
+	}
+
+	fRegisters->clock_control.EnableSD();
+	snooze(1000);
+	const uint32_t dataLines = (fRegisters->present_state.Bits() >> 20) & 0xf;
+	if (dataLines != 0xf) {
+		ERROR("data lines %#" B_PRIx32 " after the switch to 1.8 V\n",
+			dataLines);
+		return B_ERROR;
+	}
+	return B_OK;
+}
+
+
+status_t
+SdhciBus::SetTiming(mmc_timing timing)
+{
+	// UHS mode select (host control 2 bits 0-2): SDR12, SDR25, SDR50, SDR104,
+	// DDR50
+	uint16_t mode;
+	switch (timing) {
+		case MMC_TIMING_LEGACY:
+			mode = 0;
+			break;
+		case MMC_TIMING_HIGH_SPEED:
+			mode = 1;
+			break;
+		case MMC_TIMING_SDR50:
+			mode = 2;
+			break;
+		case MMC_TIMING_SDR104:
+			mode = 3;
+			break;
+		case MMC_TIMING_DDR50:
+			mode = 4;
+			break;
+		default:
+			return B_BAD_VALUE;
+	}
+	if ((SupportedTimings() & (1 << timing)) == 0)
+		return B_NOT_SUPPORTED;
+
+	fRegisters->clock_control.DisableSD();
+	fRegisters->host_control_2
+		= (uint16_t)((fRegisters->host_control_2 & ~7) | mode);
+	fRegisters->clock_control.EnableSD();
+	return B_OK;
 }
 
 
@@ -1428,6 +1529,27 @@ acknowledge_card_interrupt(void* controller)
 {
 	SdhciBus* bus = (SdhciBus*)controller;
 	bus->AcknowledgeCardInterrupt();
+}
+
+
+uint32_t
+supported_timings(void* controller)
+{
+	return ((SdhciBus*)controller)->SupportedTimings();
+}
+
+
+status_t
+switch_signal_voltage(void* controller)
+{
+	return ((SdhciBus*)controller)->SwitchSignalVoltage();
+}
+
+
+status_t
+set_timing(void* controller, mmc_timing timing)
+{
+	return ((SdhciBus*)controller)->SetTiming(timing);
 }
 
 

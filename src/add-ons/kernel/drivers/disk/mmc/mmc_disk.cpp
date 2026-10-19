@@ -151,40 +151,80 @@ mmc_disk_execute_iorequest(void* data, IOOperation* operation)
 
 
 
-/*!	Switches an SD card from default speed (25 MHz) to high speed (50 MHz),
-	if it supports it (SD physical layer spec 4.3.10, SWITCH_FUNC).
+/*!	Switches an SD card from default speed (25 MHz) to its fastest bus speed
+	mode the controller can run too (SD physical layer spec 4.3.10,
+	SWITCH_FUNC): DDR50 (50 MHz, both clock edges) or SDR50 (100 MHz) when the
+	card signals at 1.8 V, high speed (50 MHz) otherwise.
 */
 static void
-switch_to_high_speed(mmc_disk_driver_info* info)
+switch_bus_speed(mmc_disk_driver_info* info)
 {
-	// Function group 1 is the access mode; function 1 is high speed. The
-	// status is big endian: support bits 415:400 (bytes 12-13), the selected
-	// function bits 379:376 (low nibble of byte 16).
-	static const uint32 kCheckHighSpeed = 0x00fffff1;
-	static const uint32 kSwitchHighSpeed = 0x80fffff1;
+	uint8 signal1v8 = 0;
+	uint32 timings = 1 << MMC_TIMING_HIGH_SPEED;
+	sDeviceManager->get_attr_uint8(info->node, kMmcSignalVoltage1v8Attribute,
+		&signal1v8, true);
+	sDeviceManager->get_attr_uint32(info->node, kMmcTimingsAttribute, &timings,
+		true);
+
+	// Function group 1 is the access mode: functions 1 (high speed, SDR25 at
+	// 1.8 V), 2 (SDR50), 3 (SDR104) and 4 (DDR50). The status is big endian:
+	// support bits 415:400 (bytes 12-13), the selected function bits 379:376
+	// (low nibble of byte 16).
+	static const struct {
+		uint8		function;
+		mmc_timing	timing;
+		uint32		kilohertz;
+		bool		needs1v8;
+		const char*	name;
+	} kModes[] = {
+		{ 4, MMC_TIMING_DDR50, 50000, true, "DDR50, 50 MHz" },
+		{ 2, MMC_TIMING_SDR50, 100000, true, "SDR50, 100 MHz" },
+		{ 1, MMC_TIMING_HIGH_SPEED, 50000, false, "high speed, 50 MHz" },
+	};
+	static const uint32 kCheck = 0x00fffff0;
+	static const uint32 kSwitch = 0x80fffff0;
 	uint8 switchStatus[64];
 
 	status_t status = info->mmc->execute_data_command(info->parent,
-		info->parentCookie, info->rca, SD_SWITCH_FUNC, kCheckHighSpeed,
+		info->parentCookie, info->rca, SD_SWITCH_FUNC, kCheck | 1,
 		switchStatus, sizeof(switchStatus));
-	if (status != B_OK || (switchStatus[13] & (1 << 1)) == 0) {
-		TRACE("No high speed: %s, support %02x\n", strerror(status),
-			switchStatus[13]);
+	if (status != B_OK) {
+		TRACE("No SWITCH_FUNC: %s\n", strerror(status));
 		return;
 	}
+	const uint8 supported = switchStatus[13];
 
-	status = info->mmc->execute_data_command(info->parent, info->parentCookie,
-		info->rca, SD_SWITCH_FUNC, kSwitchHighSpeed, switchStatus,
-		sizeof(switchStatus));
-	if (status != B_OK || (switchStatus[16] & 0xf) != 1) {
-		ERROR("switching to high speed failed: %s, function %x\n",
-			strerror(status), switchStatus[16] & 0xf);
+	for (size_t i = 0; i < B_COUNT_OF(kModes); i++) {
+		if ((kModes[i].needs1v8 && signal1v8 == 0)
+			|| (timings & (1 << kModes[i].timing)) == 0
+			|| (supported & (1 << kModes[i].function)) == 0) {
+			continue;
+		}
+
+		status = info->mmc->execute_data_command(info->parent,
+			info->parentCookie, info->rca, SD_SWITCH_FUNC,
+			kSwitch | kModes[i].function, switchStatus, sizeof(switchStatus));
+		if (status != B_OK
+			|| (switchStatus[16] & 0xf) != kModes[i].function) {
+			ERROR("switching to %s failed: %s, function %x\n", kModes[i].name,
+				strerror(status), switchStatus[16] & 0xf);
+			continue;
+		}
+
+		// The card switches within 8 clocks after the status was sent.
+		status = info->mmc->set_timing(info->parent, info->parentCookie,
+			kModes[i].timing);
+		if (status != B_OK) {
+			ERROR("controller cannot run %s: %s\n", kModes[i].name,
+				strerror(status));
+			return;
+		}
+		info->mmc->set_clock(info->parent, info->parentCookie,
+			kModes[i].kilohertz);
+		dprintf("mmc_disk: %s\n", kModes[i].name);
 		return;
 	}
-
-	// The card switches within 8 clocks after the status was sent.
-	info->mmc->set_clock(info->parent, info->parentCookie, 50000);
-	dprintf("mmc_disk: high speed, 50 MHz\n");
+	TRACE("No faster bus speed mode, support %02x\n", supported);
 }
 
 
@@ -257,7 +297,7 @@ mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 		TRACE("Switch to 4 bit mode for data transfers\n");
 		info->mmc->set_bus_width(info->parent, info->parentCookie, 4);
 		if (csd.structure_version() < 3)
-			switch_to_high_speed(info);
+			switch_bus_speed(info);
 	} else {
 		TRACE("Switching to 4 bit mode failed: %s\n", strerror(status));
 	}

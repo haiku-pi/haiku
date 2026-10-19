@@ -68,6 +68,9 @@ enum SD_COMMANDS {
 	SD_ERASE_WR_BLK_END = 33,
 	SD_ERASE = 38,
 
+	// Switch to 1.8 V signalling (after ACMD41 with S18R), class 0
+	SD_VOLTAGE_SWITCH = 11,
+
 	// Application specific commands, class 8
 	SD_APP_CMD = 55,
 
@@ -84,6 +87,21 @@ enum SDHCI_APPLICATION_COMMANDS {
 	SD_SET_BUS_WIDTH = 6,
 	SD_SWITCH_FUNC = 6, // Not an ACMD, with a 64 byte data phase
 	SD_SEND_OP_COND = 41,
+};
+
+
+// Bus timings (SD bus speed modes). The UHS-I ones need 1.8 V signalling.
+enum mmc_timing {
+	MMC_TIMING_LEGACY = 0,
+		// default speed, up to 25 MHz
+	MMC_TIMING_HIGH_SPEED,
+		// up to 50 MHz, 3.3 V
+	MMC_TIMING_SDR50,
+		// up to 100 MHz, 1.8 V
+	MMC_TIMING_DDR50,
+		// 50 MHz, data on both clock edges, 1.8 V
+	MMC_TIMING_SDR104,
+		// up to 208 MHz, 1.8 V
 };
 
 
@@ -123,6 +141,14 @@ typedef struct mmc_bus_interface {
 		// Release sem when the SDIO card interrupt is raised (negative: stop).
 		// The interrupt is then masked until acknowledge_card_interrupt().
 	void (*acknowledge_card_interrupt)(void* controller);
+	uint32_t (*supported_timings)(void* controller);
+		// Bit mask (1 << mmc_timing) of the timings the controller and the
+		// board can run; the UHS-I ones only if it can switch to 1.8 V.
+	status_t (*switch_signal_voltage)(void* controller);
+		// After the card accepted SD_VOLTAGE_SWITCH: switch the bus to 1.8 V
+		// signalling (SD physical layer spec 3.6.1).
+	status_t (*set_timing)(void* controller, enum mmc_timing timing);
+		// Set the controller's bus speed mode; the clock is set separately.
 } mmc_bus_interface;
 
 
@@ -169,6 +195,11 @@ typedef struct mmc_device_interface {
 		// Release sem on a card interrupt (negative: stop), which then stays
 		// masked until the driver serviced the card and acknowledges it
 	void (*sdio_acknowledge_interrupt)(device_node* node, void* cookie);
+
+	status_t (*set_timing)(device_node* node, void* cookie,
+		enum mmc_timing timing);
+		// Set the controller's bus speed mode, after switching the card to it
+		// (SD SWITCH_FUNC); then the clock with set_clock().
 } mmc_device_interface;
 
 
@@ -176,6 +207,10 @@ typedef struct mmc_device_interface {
 const char* const kMmcRcaAttribute = "mmc/rca";
 const char* const kMmcTypeAttribute = "mmc/type";
 const char* const kSdioFunctionsAttribute = "sdio/functions";
+const char* const kMmcSignalVoltage1v8Attribute = "mmc/1v8";
+	// uint8, 1: the card signals at 1.8 V, so it can run the UHS-I timings
+const char* const kMmcTimingsAttribute = "mmc/timings";
+	// uint32, the controller's supported_timings()
 
 
 #endif /* _MMC_H */

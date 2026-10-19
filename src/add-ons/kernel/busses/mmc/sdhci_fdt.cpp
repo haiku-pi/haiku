@@ -46,6 +46,9 @@ struct controller_info {
 	bool		assume_3v3;
 	int32		power_line;
 		// the firmware GPIO expander line that powers the card, or -1
+	int32		signal_voltage_line;
+		// the firmware GPIO expander line that selects the card's I/O voltage
+		// (high: 1.8 V), or -1
 };
 
 static const controller_info kControllers[] = {
@@ -53,13 +56,15 @@ static const controller_info kControllers[] = {
 	// accesses (which struct registers always uses), its base clock comes
 	// from the VideoCore firmware (EMMC2), and it does not snoop the CPU
 	// caches.
-	{ "brcm,bcm2711-emmc2", 12, false, false, false, -1 },
+	// Its I/O voltage regulator ("vqmmc-supply", a GPIO regulator) is line 4
+	// ("VDD_SD_IO_SEL") of the firmware's GPIO expander.
+	{ "brcm,bcm2711-emmc2", 12, false, false, false, -1, 4 },
 	// The Raspberry Pi's original controller (Arasan); on the Pi 4 it is
 	// wired to the WiFi chip's SDIO. Linux ignores its capabilities and does
 	// not use its DMA or the High Speed Enable bit, and runs it at 3.3 V; base
 	// clock: EMMC. The WiFi chip's WL_REG_ON is line 1 ("WL_ON") of the
 	// firmware's GPIO expander.
-	{ "brcm,bcm2835-mmc", 1, true, true, true, 1 },
+	{ "brcm,bcm2835-mmc", 1, true, true, true, 1, -1 },
 };
 
 
@@ -156,6 +161,43 @@ firmware_power_cycle(uint32 line)
 }
 
 
+/*!	Switches the card's I/O voltage regulator, a GPIO regulator on a line of
+	the Raspberry Pi firmware's GPIO expander (\a cookie), and waits for it to
+	settle.
+*/
+static status_t
+firmware_signal_voltage(void* cookie, bool lowVoltage)
+{
+#ifdef __aarch64__
+	bcm2835_mailbox_module_info* mailbox;
+	status_t status = get_module(BCM2835_MAILBOX_MODULE_NAME,
+		(module_info**)&mailbox);
+	if (status != B_OK)
+		return status;
+
+	const uint32 gpio = BCM2835_FIRMWARE_GPIO_BASE + (uint32)(addr_t)cookie;
+	uint32 values[2] = { gpio, lowVoltage ? 1u : 0u };
+	status = mailbox->property_tag(BCM2835_TAG_SET_GPIO_STATE, values,
+		sizeof(values), sizeof(values), NULL);
+	snooze(5000);
+		// the regulator's "regulator-settling-time-us"
+
+	values[0] = gpio;
+	values[1] = 0;
+	if (status == B_OK) {
+		status = mailbox->property_tag(BCM2835_TAG_GET_GPIO_STATE, values,
+			sizeof(values), sizeof(uint32), NULL);
+	}
+	put_module(BCM2835_MAILBOX_MODULE_NAME);
+	if (status == B_OK && values[1] != (lowVoltage ? 1u : 0u))
+		status = B_ERROR;
+	return status;
+#else
+	return B_NOT_SUPPORTED;
+#endif
+}
+
+
 status_t
 init_bus_fdt(device_node* node, void** bus_cookie)
 {
@@ -186,6 +228,10 @@ init_bus_fdt(device_node* node, void** bus_cookie)
 	quirks.no_high_speed_bit = info->no_high_speed_bit;
 	quirks.force_pio = info->force_pio;
 	quirks.assume_3v3 = info->assume_3v3;
+	if (info->signal_voltage_line >= 0) {
+		quirks.set_signal_voltage = firmware_signal_voltage;
+		quirks.signal_voltage_cookie = (void*)(addr_t)info->signal_voltage_line;
+	}
 
 	uint32 baseClockKHz;
 	const uint32* clock = (const uint32*)fdt->get_prop(device, "clock-frequency",
@@ -340,4 +386,7 @@ mmc_bus_interface gSDHCIFDTDeviceModule = {
 	.execute_io_command = execute_io_command,
 	.set_card_interrupt = set_card_interrupt,
 	.acknowledge_card_interrupt = acknowledge_card_interrupt,
+	.supported_timings = supported_timings,
+	.switch_signal_voltage = switch_signal_voltage,
+	.set_timing = set_timing,
 };

@@ -333,4 +333,7 @@ mmc_bus_interface gSDHCIPCIDeviceModule = {
 	.execute_io_command = execute_io_command,
 	.set_card_interrupt = set_card_interrupt,
 	.acknowledge_card_interrupt = acknowledge_card_interrupt,
+	.supported_timings = supported_timings,
+	.switch_signal_voltage = switch_signal_voltage,
+	.set_timing = set_timing,
 };

@@ -146,6 +146,18 @@ mmc_bus_set_clock(device_node* node, void* cookie, uint32_t kilohertz)
 
 
 static status_t
+mmc_bus_set_timing(device_node* node, void* cookie, mmc_timing timing)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t status = bus->SetTiming(timing);
+	bus->ReleaseBus();
+	return status;
+}
+
+
+static status_t
 mmc_bus_sdio_read_direct(device_node* node, void* cookie, uint16_t rca,
 	uint8_t function, uint32_t address, uint8_t* value)
 {
@@ -294,7 +306,8 @@ mmc_device_interface mmc_bus_controller_module = {
 	mmc_bus_sdio_set_block_size,
 	mmc_bus_sdio_enable_function,
 	mmc_bus_sdio_set_interrupt,
-	mmc_bus_sdio_acknowledge_interrupt
+	mmc_bus_sdio_acknowledge_interrupt,
+	mmc_bus_set_timing
 };
 
 

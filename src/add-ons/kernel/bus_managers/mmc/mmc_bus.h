@@ -147,6 +147,9 @@ public:
 									uint32_t argument, void* buffer,
 									size_t length);
 				void			SetClock(int frequency);
+				uint32_t		SupportedTimings();
+				status_t		SwitchSignalVoltage();
+				status_t		SetTiming(mmc_timing timing);
 				void			SetBusWidth(int width);
 				void			SetCardType(card_type type);
 

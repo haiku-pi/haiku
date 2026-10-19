@@ -31,6 +31,10 @@ struct sdhci_quirks {
 		// the DMA engines are unusable
 	bool	assume_3v3;
 		// the capabilities register reports no voltages; the slot runs at 3.3 V
+	status_t (*set_signal_voltage)(void* cookie, bool lowVoltage);
+	void*	signal_voltage_cookie;
+		// switches the board's I/O voltage regulator between 3.3 V and 1.8 V
+		// (NULL: the slot stays at 3.3 V, so no UHS-I timings)
 };
 
 
@@ -60,6 +64,9 @@ class SdhciBus {
 			void				SetScanSemaphore(sem_id sem);
 			void				SetCardInterrupt(sem_id sem);
 			void				AcknowledgeCardInterrupt();
+			uint32_t			SupportedTimings();
+			status_t			SwitchSignalVoltage();
+			status_t			SetTiming(mmc_timing timing);
 			void				SetBusWidth(int width);
 			void				SetCardType(card_type type);
 			void				SetDmaWindow(phys_addr_t busOffset,
@@ -96,6 +103,9 @@ class SdhciBus {
 			bool				fNonRemovable;
 			bool				fNoHighSpeedBit;
 			bool				fAssume3v3;
+			status_t			(*fSetSignalVoltage)(void* cookie,
+									bool lowVoltage);
+			void*				fSignalVoltageCookie;
 			phys_addr_t			fDmaBusOffset;
 			phys_addr_t			fDmaHighAddress;
 			bool				fDmaCoherent;
@@ -667,6 +677,9 @@ status_t do_io(void* controller, uint8_t command,
 void set_scan_semaphore(void* controller, sem_id sem);
 void set_card_interrupt(void* controller, sem_id sem);
 void acknowledge_card_interrupt(void* controller);
+uint32_t supported_timings(void* controller);
+status_t switch_signal_voltage(void* controller);
+status_t set_timing(void* controller, mmc_timing timing);
 void set_bus_width(void* controller, int width);
 void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);
