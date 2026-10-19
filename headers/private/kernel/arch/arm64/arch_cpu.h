@@ -171,9 +171,7 @@ static inline void arch_cpu_wait(int32* variable, int32 test)
 
 static inline void arch_cpu_idle(void)
 {
-	// Complete the outstanding writes first (as Linux's cpu_do_idle): the
-	// end-of-interrupt write to the GIC can otherwise wait in a buffer while
-	// the CPU sleeps, and the GIC delivers it nothing else until then
+	// Complete the outstanding memory accesses first, as Linux's cpu_do_idle()
 	arm64_dsb(sy);
 	arm64_wfi();
 }
