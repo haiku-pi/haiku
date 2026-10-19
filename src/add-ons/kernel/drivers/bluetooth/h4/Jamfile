@@ -1,0 +1,5 @@
+SubDir HAIKU_TOP src add-ons kernel drivers bluetooth h4 ;
+
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel drivers bluetooth h4 bcm2711_bt ;
+}

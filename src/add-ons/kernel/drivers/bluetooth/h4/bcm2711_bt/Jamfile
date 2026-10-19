@@ -1,0 +1,19 @@
+SubDir HAIKU_TOP src add-ons kernel drivers bluetooth h4 bcm2711_bt ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders bluetooth drivers net ;
+UseLibraryHeaders [ FDirName libfdt ] ;
+
+local libFDTSources =
+	fdt.c
+	fdt_ro.c
+	fdt_strerror.c
+;
+
+KernelAddon bcm2711_bt :
+	bcm2711_bt.cpp
+	$(libFDTSources)
+;
+
+SEARCH on [ FGristFiles $(libFDTSources) ]
+	= [ FDirName $(HAIKU_TOP) src libs libfdt ] ;

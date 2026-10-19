@@ -182,6 +182,8 @@ AddDriversToPackage audio old :
 	$(SYSTEM_ADD_ONS_DRIVERS_AUDIO_OLD) ;
 AddDriversToPackage bluetooth h2 :
 	$(SYSTEM_ADD_ONS_DRIVERS_BT_H2) ;
+AddDriversToPackage bluetooth h4 :
+	$(SYSTEM_ADD_ONS_DRIVERS_BT_H4) ;
 AddDriversToPackage midi :
 	$(SYSTEM_ADD_ONS_DRIVERS_MIDI) ;
 AddDriversToPackage bus :
