@@ -270,6 +270,9 @@ struct v3d_job {
 	uint32				overflow_chunks;
 		// bit mask of the overflow chunks the binner got
 
+	bigtime_t			submitted;
+	bigtime_t			started;
+		// queued, and first kicked (for the statistics)
 	bigtime_t			kicked;
 	bigtime_t			last_progress;
 	bigtime_t			next_check;
@@ -341,6 +344,22 @@ struct v3d_device {
 	ConditionVariable	job_done;
 	v3d_bo*				quarantine;
 	uint32				resets;
+
+	// statistics (kernel setting "v3d_stats true"): printed every few seconds
+	struct {
+		bool			enabled;
+		bigtime_t		window_start;
+		uint32			cl_jobs;
+		uint32			tfu_jobs;
+		bigtime_t		gpu_time;
+			// first kick to completion
+		bigtime_t		latency;
+		bigtime_t		max_latency;
+			// submission to completion
+		uint32			waits;
+		bigtime_t		wait_time;
+			// clients sleeping in WAIT_BO/SYNCOBJ_WAIT
+	} stats;
 
 	sem_id				worker_sem;
 	thread_id			worker;

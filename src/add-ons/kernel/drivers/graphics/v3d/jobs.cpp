@@ -27,12 +27,15 @@
 
 #include "v3d_private.h"
 
+#include <driver_settings.h>
+
 #include <util/AutoLock.h>
 
 
 static const uint32 kMaxJobBOs = 16384;
 static const int32 kSpuriousLimit = 1000;
 static const int32 kBurstLimit = 200000;
+static const bigtime_t kStatsInterval = 5000000;
 
 
 static void reset_gpu(v3d_device* device, const char* reason);
@@ -394,6 +397,7 @@ schedule(v3d_device* device)
 		device->queue_tail = NULL;
 	job->next = NULL;
 	device->active = job;
+	job->started = system_time();
 
 	if (job->is_tfu)
 		kick_tfu(device, job);
@@ -418,8 +422,40 @@ free_job(v3d_device* device, v3d_job* job)
 	resubmitting a job that wedged the GPU wedges it again).
 */
 static void
+account_job(v3d_device* device, v3d_job* job)
+{
+	auto& stats = device->stats;
+	const bigtime_t now = system_time();
+	if (job->is_tfu)
+		stats.tfu_jobs++;
+	else
+		stats.cl_jobs++;
+	stats.gpu_time += now - job->started;
+	const bigtime_t latency = now - job->submitted;
+	stats.latency += latency;
+	if (latency > stats.max_latency)
+		stats.max_latency = latency;
+
+	if (now - stats.window_start < kStatsInterval)
+		return;
+	const uint32 jobs = stats.cl_jobs + stats.tfu_jobs;
+	TRACE_ALWAYS("stats %" B_PRId64 " ms: %" B_PRIu32 " CL + %" B_PRIu32 " TFU jobs, GPU %"
+		B_PRId64 " us/job, submit to done %" B_PRId64 " us/job (max %" B_PRId64 " us), %"
+		B_PRIu32 " waits for %" B_PRId64 " ms\n", (now - stats.window_start) / 1000,
+		stats.cl_jobs, stats.tfu_jobs, stats.gpu_time / jobs, stats.latency / jobs,
+		stats.max_latency, stats.waits, stats.wait_time / 1000);
+	const bool enabled = stats.enabled;
+	memset(&stats, 0, sizeof(stats));
+	stats.enabled = enabled;
+	stats.window_start = now;
+}
+
+
+static void
 finish_job(v3d_device* device, v3d_job* job)
 {
+	if (device->stats.enabled)
+		account_job(device, job);
 	device->active = NULL;
 	device->completed_seqno = job->seqno;
 
@@ -772,6 +808,11 @@ v3d_jobs_start(v3d_device* device)
 		return status;
 	}
 
+	void* settings = load_driver_settings("kernel");
+	device->stats.enabled = get_driver_boolean_parameter(settings, "v3d_stats", false, true);
+	unload_driver_settings(settings);
+	device->stats.window_start = system_time();
+
 	device->worker = spawn_kernel_thread(&worker_thread, "v3d worker",
 		B_URGENT_DISPLAY_PRIORITY, device);
 	if (device->worker < 0) {
@@ -862,6 +903,7 @@ queue_job(v3d_file* file, v3d_job* job, uint32* handles, uint32 count,
 	free(handles);
 
 	job->seqno = ++device->submitted_seqno;
+	job->submitted = system_time();
 	for (uint32 i = 0; i < job->bo_count; i++)
 		job->bos[i]->last_seqno = job->seqno;
 
@@ -983,7 +1025,10 @@ status_t
 v3d_wait_seqno(v3d_device* device, v3d_file* file, uint64 seqno,
 	bigtime_t deadline)
 {
+	const bigtime_t start = system_time();
+	bool waited = false;
 	while (device->completed_seqno < seqno) {
+		waited = true;
 		if (file->closing)
 			return B_FILE_ERROR;
 		if (deadline == 0
@@ -996,6 +1041,10 @@ v3d_wait_seqno(v3d_device* device, v3d_file* file, uint64 seqno,
 			deadline);
 		if (status == B_INTERRUPTED)
 			return status;
+	}
+	if (waited && device->stats.enabled) {
+		device->stats.waits++;
+		device->stats.wait_time += system_time() - start;
 	}
 	return B_OK;
 }
