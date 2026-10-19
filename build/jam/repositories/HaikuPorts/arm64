@@ -1,7 +1,7 @@
-# haiku-pi: fluidlite, glu, libogg, libvorbis, mesa (and their _devel) are ours, built by the
-# coordination repository's scripts/package-gl-stack.sh and scripts/package-port.py and staged in
-# download/; a build needs -sHAIKU_NO_DOWNLOADS=1, as Haiku's servers do not have them. The "any"
-# packages without _bootstrap are the x86_64 repository's (scripts/fetch-any-packages.sh).
+# haiku-pi: bzip2, fluidlite, glu, gzip, libogg, libvorbis, mesa, tar, unzip (and their _devel)
+# are ours, built by the coordination repository (scripts/package-gl-stack.sh, scripts/package-port.py)
+# and staged in download/; a build needs -sHAIKU_NO_DOWNLOADS=1, as Haiku's servers do not have them.
+# The "any" packages without _bootstrap are the x86_64 repository's (scripts/fetch-any-packages.sh).
 RemotePackageRepository HaikuPorts
 	: arm64
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
@@ -12,8 +12,11 @@ RemotePackageRepository HaikuPorts
 	haiku_userguide_en-2026_08_11-1
 	haiku_welcome-2026_08_11-1
 	haikuporter-0_bootstrap-1
+	intel_wifi_firmwares-2025_02_11-1
 	noto-20170202_bootstrap-7
 	noto_sans_cjk_jp-2.004-2
+	ralink_wifi_firmwares-2023_08_04-1
+	realtek_wifi_firmwares-2019_01_02-1
 	sounds_community_default-0.1-1
 	timgmsoundfont-2011.12.11-1
 	:
@@ -22,6 +25,8 @@ RemotePackageRepository HaikuPorts
 	bash-5.3_bootstrap-1
 	binutils-2.41_2026_03_10_bootstrap-1
 	bison-3.8.2_bootstrap-1
+	bzip2-1.0.8-1
+	bzip2_devel-1.0.8-1
 	coreutils-9.9_bootstrap-1
 	curl-8.19.0_bootstrap-1
 	curl_devel-8.19.0_bootstrap-1
@@ -40,6 +45,7 @@ RemotePackageRepository HaikuPorts
 	glu-9.0.3-1
 	glu_devel-9.0.3-1
 	grep-3.11_bootstrap-1
+	gzip-1.9-1
 	icu74-74.1_bootstrap-1
 	icu74_devel-74.1_bootstrap-1
 	icu74_tools-74.1_bootstrap-1
@@ -58,7 +64,9 @@ RemotePackageRepository HaikuPorts
 	ncurses6_devel-6.6_bootstrap-1
 	python3.10-3.10.19_bootstrap-1
 	sed-4.9_bootstrap-1
+	tar-1.35-1
 	texinfo-7.2_bootstrap-1
+	unzip-6.10c23-1
 	zlib-1.2.13_bootstrap-1
 	zlib_devel-1.2.13_bootstrap-1
 	:
