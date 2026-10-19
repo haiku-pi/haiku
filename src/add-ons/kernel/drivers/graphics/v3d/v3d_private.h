@@ -185,7 +185,9 @@ struct v3d_bo {
 		// one per handle, one per job using it
 	area_id				area;
 	void*				address;
-		// the kernel's (write-combining) mapping
+		// the kernel's (write-combining) mapping; for an imported BO (area
+		// < 0): the client's, wired, in imported_team
+	team_id				imported_team;
 	size_t				size;
 	uint32				gpu_address;
 	uint64				last_seqno;
@@ -331,6 +333,8 @@ bool v3d_wait_for_clear(volatile uint32* registers, uint32 offset, uint32 bit,
 	const char* what);
 status_t v3d_va_alloc(v3d_device* device, size_t size, uint32* _address);
 void v3d_va_free(v3d_device* device, uint32 address, size_t size);
+status_t v3d_map_memory(v3d_device* device, team_id team, void* address,
+	size_t size, uint32 gpuAddress);
 status_t v3d_map_area(v3d_device* device, void* address, size_t size,
 	uint32 gpuAddress);
 void v3d_unmap_range(v3d_device* device, uint32 gpuAddress, size_t size);

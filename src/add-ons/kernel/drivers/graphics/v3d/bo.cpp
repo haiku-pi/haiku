@@ -38,7 +38,12 @@ static void
 bo_release(v3d_device* device, v3d_bo* bo)
 {
 	v3d_va_free(device, bo->gpu_address, bo->size);
-	delete_area(bo->area);
+	if (bo->area >= 0)
+		delete_area(bo->area);
+	else {
+		unlock_memory_etc(bo->imported_team, bo->address, bo->size,
+			B_READ_DEVICE);
+	}
 	free(bo);
 }
 
@@ -178,6 +183,9 @@ mmap_bo(v3d_file* file, drm_v3d_mmap_bo* args)
 	v3d_bo* bo = v3d_bo_lookup(file, args->handle);
 	if (bo == NULL)
 		return B_ENTRY_NOT_FOUND;
+	if (bo->area < 0)
+		return B_NOT_ALLOWED;
+			// imported: the client has it mapped already
 	bo->references++;
 		// keeps the BO while we clone it unlocked
 	locker.Unlock();
@@ -240,6 +248,100 @@ gem_close(v3d_file* file, drm_gem_close* args)
 }
 
 
+/*!	A range of the calling team's memory as a BO (a Haiku extension): the
+	pages are wired for the BO's life and entered into the GPU page table, so
+	that the GPU renders straight into, say, a BBitmap. The range need not be
+	page aligned: offset is the GPU address of its first byte.
+*/
+static status_t
+import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
+{
+	v3d_device* device = file->device;
+	const addr_t start = ROUNDDOWN((addr_t)args->address, B_PAGE_SIZE);
+	const addr_t end = ROUNDUP((addr_t)(args->address + args->size), B_PAGE_SIZE);
+	const size_t size = end - start;
+	if (args->size == 0 || size > kMaxBOSize || end < start
+		|| !IS_USER_ADDRESS(start) || !IS_USER_ADDRESS(end - 1)) {
+		return B_BAD_VALUE;
+	}
+
+	v3d_bo* bo = (v3d_bo*)calloc(1, sizeof(v3d_bo));
+	if (bo == NULL)
+		return B_NO_MEMORY;
+	bo->size = size;
+	bo->references = 1;
+	bo->area = -1;
+	bo->address = (void*)start;
+	bo->imported_team = team_get_current_team_id();
+
+	// The GPU writes it: as a device reading into memory
+	status_t status = lock_memory_etc(bo->imported_team, bo->address, size,
+		B_READ_DEVICE);
+	if (status != B_OK) {
+		free(bo);
+		return status;
+	}
+
+	MutexLocker locker(device->lock);
+	status = v3d_va_alloc(device, size, &bo->gpu_address);
+	if (status == B_OK) {
+		status = v3d_map_memory(device, bo->imported_team, bo->address, size,
+			bo->gpu_address);
+		if (status != B_OK)
+			v3d_va_free(device, bo->gpu_address, size);
+	}
+	uint32 handle = 0;
+	if (status == B_OK) {
+		status = v3d_handle_alloc(file->bos, file->bo_slots, bo, &handle);
+		if (status != B_OK) {
+			v3d_unmap_range(device, bo->gpu_address, size);
+			v3d_va_free(device, bo->gpu_address, size);
+		}
+	}
+	if (status != B_OK) {
+		unlock_memory_etc(bo->imported_team, bo->address, size, B_READ_DEVICE);
+		free(bo);
+		return status;
+	}
+
+	args->handle = handle;
+	args->offset = bo->gpu_address + (uint32)(args->address - start);
+	return B_OK;
+}
+
+
+/*!	Writes back and drops the CPU's cache lines of an imported BO (through the
+	physical map: the GPU does not snoop the caches).
+*/
+static status_t
+sync_bo(v3d_file* file, drm_v3d_haiku_sync_bo* args)
+{
+	MutexLocker locker(file->device->lock);
+	v3d_bo* bo = v3d_bo_lookup(file, args->handle);
+	if (bo == NULL)
+		return B_BAD_VALUE;
+	if (bo->area >= 0)
+		return B_OK;
+			// write-combining: nothing cached
+
+	size_t offset = 0;
+	while (offset < bo->size) {
+		physical_entry ranges[16];
+		uint32 count = B_COUNT_OF(ranges);
+		status_t status = get_memory_map_etc(bo->imported_team,
+			(uint8*)bo->address + offset, bo->size - offset, ranges, &count);
+		if (status != B_OK && status != B_BUFFER_OVERFLOW)
+			return status;
+		for (uint32 i = 0; i < count; i++) {
+			arm64_dcache_flush_range(KERNEL_PMAP_BASE + ranges[i].address,
+				ranges[i].size);
+			offset += ranges[i].size;
+		}
+	}
+	return B_OK;
+}
+
+
 /*!	Waits until the last job using the BO completed. The timeout is
 	relative; as Linux, the time not used is returned in timeout_ns.
 */
@@ -286,6 +388,10 @@ v3d_bo_ioctl(v3d_file* file, uint32 nr, void* data)
 			return get_bo_offset(file, (drm_v3d_get_bo_offset*)data);
 		case DRM_COMMAND_BASE + DRM_V3D_WAIT_BO:
 			return wait_bo(file, (drm_v3d_wait_bo*)data);
+		case DRM_COMMAND_BASE + DRM_V3D_HAIKU_IMPORT_MEMORY:
+			return import_memory(file, (drm_v3d_haiku_import_memory*)data);
+		case DRM_COMMAND_BASE + DRM_V3D_HAIKU_SYNC_BO:
+			return sync_bo(file, (drm_v3d_haiku_sync_bo*)data);
 		case 0x09:
 			// DRM_IOCTL_GEM_CLOSE
 			return gem_close(file, (drm_gem_close*)data);

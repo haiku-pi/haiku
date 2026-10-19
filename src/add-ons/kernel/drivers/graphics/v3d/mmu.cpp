@@ -171,12 +171,23 @@ status_t
 v3d_map_area(v3d_device* device, void* address, size_t size,
 	uint32 gpuAddress)
 {
+	return v3d_map_memory(device, B_SYSTEM_TEAM, address, size, gpuAddress);
+}
+
+
+/*!	Enters the (wired) pages of \a team's range [address, address + size)
+	into the page table at \a gpuAddress.
+*/
+status_t
+v3d_map_memory(v3d_device* device, team_id team, void* address, size_t size,
+	uint32 gpuAddress)
+{
 	uint32 entry = gpuAddress >> kGpuPageShift;
 	size_t offset = 0;
 	while (offset < size) {
 		physical_entry ranges[16];
 		uint32 count = B_COUNT_OF(ranges);
-		status_t status = get_memory_map_etc(B_SYSTEM_TEAM,
+		status_t status = get_memory_map_etc(team,
 			(uint8*)address + offset, size - offset, ranges, &count);
 		if (status != B_OK && status != B_BUFFER_OVERFLOW)
 			return status;

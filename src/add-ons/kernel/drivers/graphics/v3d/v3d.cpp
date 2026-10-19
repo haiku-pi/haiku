@@ -599,6 +599,12 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		case DRM_COMMAND_BASE + DRM_V3D_GET_BO_OFFSET:
 			size = sizeof(drm_v3d_get_bo_offset);
 			break;
+		case DRM_COMMAND_BASE + DRM_V3D_HAIKU_IMPORT_MEMORY:
+			size = sizeof(drm_v3d_haiku_import_memory);
+			break;
+		case DRM_COMMAND_BASE + DRM_V3D_HAIKU_SYNC_BO:
+			size = sizeof(drm_v3d_haiku_sync_bo);
+			break;
 		default:
 			// SUBMIT_TFU, SUBMIT_CSD, perfmon, CPU jobs, PRIME, FLINK: not yet
 			return B_DEV_INVALID_IOCTL;
@@ -618,6 +624,8 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		drm_v3d_mmap_bo			mmap_bo;
 		drm_v3d_get_param		get_param;
 		drm_v3d_get_bo_offset	get_bo_offset;
+		drm_v3d_haiku_import_memory import_memory;
+		drm_v3d_haiku_sync_bo	sync_bo;
 	} data;
 	memset(&data, 0, sizeof(data));
 

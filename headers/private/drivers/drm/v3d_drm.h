@@ -45,12 +45,20 @@ extern "C" {
 #define DRM_V3D_PERFMON_GET_COUNTER               0x0c
 #define DRM_V3D_PERFMON_SET_GLOBAL                0x0d
 
+/* Haiku extensions (numbers far from Linux's): a client's memory as a BO, so
+ * that the GPU renders straight into it (a BBitmap the app_server shows), and
+ * the cache maintenance around the GPU's writes into it. */
+#define DRM_V3D_HAIKU_IMPORT_MEMORY               0x30
+#define DRM_V3D_HAIKU_SYNC_BO                     0x31
+
 #define DRM_IOCTL_V3D_SUBMIT_CL           DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CL, struct drm_v3d_submit_cl)
 #define DRM_IOCTL_V3D_WAIT_BO             DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_WAIT_BO, struct drm_v3d_wait_bo)
 #define DRM_IOCTL_V3D_CREATE_BO           DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_CREATE_BO, struct drm_v3d_create_bo)
 #define DRM_IOCTL_V3D_MMAP_BO             DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_MMAP_BO, struct drm_v3d_mmap_bo)
 #define DRM_IOCTL_V3D_GET_PARAM           DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_GET_PARAM, struct drm_v3d_get_param)
 #define DRM_IOCTL_V3D_GET_BO_OFFSET       DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_GET_BO_OFFSET, struct drm_v3d_get_bo_offset)
+#define DRM_IOCTL_V3D_HAIKU_IMPORT_MEMORY DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_HAIKU_IMPORT_MEMORY, struct drm_v3d_haiku_import_memory)
+#define DRM_IOCTL_V3D_HAIKU_SYNC_BO       DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_HAIKU_SYNC_BO, struct drm_v3d_haiku_sync_bo)
 #define DRM_IOCTL_V3D_SUBMIT_TFU          DRM_IOW(DRM_COMMAND_BASE + DRM_V3D_SUBMIT_TFU, struct drm_v3d_submit_tfu)
 #define DRM_IOCTL_V3D_SUBMIT_CSD          DRM_IOW(DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CSD, struct drm_v3d_submit_csd)
 #define DRM_IOCTL_V3D_PERFMON_CREATE      DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_PERFMON_CREATE, \
@@ -309,6 +317,30 @@ struct drm_v3d_get_param {
  * This is the same value returned by drm_v3d_create_bo, if that was called
  * from this DRM fd.
  */
+/**
+ * struct drm_v3d_haiku_import_memory - wires [address, address + size) of the
+ * calling team and maps it into the GPU's address space as a BO (not
+ * mmap()able: the client has it already). handle and offset (the GPU address
+ * of address) are returned. The memory must stay allocated until the handle is
+ * closed; the GPU never snoops the CPU caches, see drm_v3d_haiku_sync_bo.
+ */
+struct drm_v3d_haiku_import_memory {
+	__u64 address;
+	__u64 size;
+	__u32 handle;
+	__u32 offset;
+};
+
+/**
+ * struct drm_v3d_haiku_sync_bo - writes back and drops the CPU's cache lines
+ * of an imported BO: before a job the GPU uses it in, and after that job
+ * completed, before the CPU reads what the GPU wrote.
+ */
+struct drm_v3d_haiku_sync_bo {
+	__u32 handle;
+	__u32 pad;
+};
+
 struct drm_v3d_get_bo_offset {
 	__u32 handle;
 	__u32 offset;
