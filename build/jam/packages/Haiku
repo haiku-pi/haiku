@@ -104,6 +104,7 @@ AddFilesToPackage add-ons kernel interrupt_controllers :
 	;
 AddFilesToPackage add-ons kernel power cpufreq :
 	amd_pstates@x86,x86_64
+	bcm2835_cpufreq@arm64
 	intel_pstates@x86,x86_64
 	;
 AddFilesToPackage add-ons kernel power cpuidle :

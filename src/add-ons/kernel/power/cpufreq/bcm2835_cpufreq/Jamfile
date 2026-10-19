@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src add-ons kernel power cpufreq bcm2835_cpufreq ;
+
+UsePrivateHeaders drivers ;
+UsePrivateKernelHeaders ;
+
+KernelAddon bcm2835_cpufreq :
+	bcm2835_cpufreq.cpp
+	;

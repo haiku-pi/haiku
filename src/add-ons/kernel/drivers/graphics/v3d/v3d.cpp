@@ -54,8 +54,9 @@ enum {
 	kAsbAcknowledge		= 1 << 1,
 };
 
-static const uint32 kV3dClock = 5;
-	// the firmware's ID of the V3D clock
+static const uint32 kV3dClock = BCM2835_CLOCK_V3D;
+static const uint32 kCoreClock = BCM2835_CLOCK_CORE;
+	// the core clock also clocks the V3D's memory side (L2T, AXI)
 
 // "V3D" in the low bytes of CORE0_IDENT0; 0xdeadbeef means unpowered
 static const uint32 kCoreIdentMagic = 0x443356;
@@ -158,6 +159,28 @@ stop_bridge(volatile uint32* asb, uint32 offset)
 }
 
 
+/*!	The firmware runs the core clock at its maximum (500 MHz) only while the
+	ARM runs in turbo (bcm2835_cpufreq), otherwise at its minimum (200 MHz),
+	where a 1920x1080 frame takes the V3D half as long again (15.7 instead of
+	10.4 ms per job, QuakeSpasm). Asks for the maximum while the GPU is on,
+	whatever the CPU's scheduler mode.
+*/
+static status_t
+set_core_clock_max()
+{
+	uint32 maxRate = 0;
+	status_t status = firmware_call(BCM2835_TAG_GET_MAX_CLOCK_RATE, kCoreClock,
+		0, 1, &maxRate);
+	if (status != B_OK || maxRate == 0)
+		return status != B_OK ? status : B_ERROR;
+
+	// clock ID, rate, skip setting turbo
+	uint32 values[3] = { kCoreClock, maxRate, 0 };
+	return sMailbox->property_tag(BCM2835_TAG_SET_CLOCK_RATE, values,
+		sizeof(values), sizeof(values), NULL);
+}
+
+
 status_t
 v3d_power_on(v3d_device* device)
 {
@@ -202,10 +225,13 @@ v3d_power_on(v3d_device* device)
 	delete_area(asbArea);
 	delete_area(pmArea);
 
+	status_t coreStatus = set_core_clock_max();
+
 	TRACE_ALWAYS("power on: qpu %s, domain %s, clock %s, PM_GRAFX %#" B_PRIx32
-		" -> %#" B_PRIx32 ", bridges %s/%s\n", strerror(qpuStatus),
-		strerror(domainStatus), strerror(clockStatus), graphics, graphicsAfter,
-		strerror(masterStatus), strerror(slaveStatus));
+		" -> %#" B_PRIx32 ", bridges %s/%s, core clock %s\n",
+		strerror(qpuStatus), strerror(domainStatus), strerror(clockStatus),
+		graphics, graphicsAfter, strerror(masterStatus), strerror(slaveStatus),
+		strerror(coreStatus));
 
 	if (clockStatus != B_OK || masterStatus != B_OK || slaveStatus != B_OK)
 		return B_ERROR;
@@ -282,10 +308,16 @@ start_gpu(v3d_device* device)
 		hub_write(device, kHubInterruptMaskSet, ~0u);
 		hub_write(device, kHubInterruptClear, ~0u);
 
-		uint32 rate = 0, measured = 0;
+		uint32 rate = 0, measured = 0, coreRate = 0, coreMeasured = 0,
+			armMeasured = 0;
 		firmware_call(BCM2835_TAG_GET_CLOCK_RATE, kV3dClock, 0, 1, &rate);
 		firmware_call(BCM2835_TAG_GET_CLOCK_MEASURED, kV3dClock, 0, 1,
 			&measured);
+		firmware_call(BCM2835_TAG_GET_CLOCK_RATE, kCoreClock, 0, 1, &coreRate);
+		firmware_call(BCM2835_TAG_GET_CLOCK_MEASURED, kCoreClock, 0, 1,
+			&coreMeasured);
+		firmware_call(BCM2835_TAG_GET_CLOCK_MEASURED, BCM2835_CLOCK_ARM, 0, 1,
+			&armMeasured);
 
 		device->report_length = snprintf(device->report,
 			sizeof(device->report),
@@ -293,13 +325,15 @@ start_gpu(v3d_device* device)
 			", hub ident %#" B_PRIx32 "/%#" B_PRIx32 "/%#" B_PRIx32 "/%#"
 			B_PRIx32 ", uif %#" B_PRIx32 ", mmu debug %#" B_PRIx32
 			", clock %" B_PRIu32 " MHz (measured %" B_PRIu32 " MHz)"
-			", interrupt %" B_PRIu64 "\n",
+			", core %" B_PRIu32 " MHz (measured %" B_PRIu32 " MHz)"
+			", ARM measured %" B_PRIu32 " MHz, interrupt %" B_PRIu64 "\n",
 			core_read(device, kCoreIdent0), core_read(device, kCoreIdent1),
 			core_read(device, kCoreIdent2), hub_read(device, kHubIdent0),
 			hub_read(device, kHubIdent1), hub_read(device, kHubIdent2),
 			hub_read(device, kHubIdent3), hub_read(device, kHubUifConfig),
 			hub_read(device, kMmuDebugInfo), rate / 1000000,
-			measured / 1000000, device->interrupt);
+			measured / 1000000, coreRate / 1000000, coreMeasured / 1000000,
+			armMeasured / 1000000, device->interrupt);
 		TRACE_ALWAYS("%s", device->report);
 
 		device->powered = true;

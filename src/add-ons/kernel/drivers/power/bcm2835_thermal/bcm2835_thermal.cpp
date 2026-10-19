@@ -143,13 +143,22 @@ bcm2835_thermal_read(void* cookie, off_t position, void* buffer,
 	if (status != B_OK)
 		return status;
 
+	// the clocks the firmware runs now (it lowers them when hot)
+	const uint32 clockIDs[3] = { BCM2835_CLOCK_ARM, BCM2835_CLOCK_CORE,
+		BCM2835_CLOCK_V3D };
+	uint32 clocks[3] = {};
+	for (uint32 i = 0; i < 3; i++)
+		firmware_value(BCM2835_TAG_GET_CLOCK_MEASURED, clockIDs[i], clocks[i]);
+
 	const uint32 now = info.throttled & 0xffff;
 	const uint32 sinceBoot = info.throttled >> kThrottledSinceBootShift;
 	char text[256];
 	int32 length = snprintf(text, sizeof(text),
 		"  Current Temperature: %" B_PRIu32 ".%" B_PRIu32 " C\n"
 		"  Critical Temperature: %" B_PRIu32 ".%" B_PRIu32 " C\n"
-		"  Throttled: %#" B_PRIx32 "%s%s%s%s (since boot: %#" B_PRIx32 ")\n",
+		"  Throttled: %#" B_PRIx32 "%s%s%s%s (since boot: %#" B_PRIx32 ")\n"
+		"  Clocks: ARM %" B_PRIu32 " MHz, core %" B_PRIu32 " MHz, V3D %"
+		B_PRIu32 " MHz\n",
 		info.current_temp / 10, info.current_temp % 10,
 		info.critical_temp / 10, info.critical_temp % 10,
 		info.throttled,
@@ -157,7 +166,8 @@ bcm2835_thermal_read(void* cookie, off_t position, void* buffer,
 		(now & kThrottledArmFrequencyCapped) != 0 ? ", frequency capped" : "",
 		(now & kThrottledThrottled) != 0 ? ", throttled" : "",
 		(now & kThrottledSoftTempLimit) != 0 ? ", soft temperature limit" : "",
-		sinceBoot);
+		sinceBoot, clocks[0] / 1000000, clocks[1] / 1000000,
+		clocks[2] / 1000000);
 
 	length = min_c((int32)*_length, length + 1);
 	if (user_memcpy(buffer, text, length) != B_OK)

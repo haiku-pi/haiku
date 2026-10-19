@@ -1,5 +1,6 @@
 SubDir HAIKU_TOP src add-ons kernel power cpufreq ;
 
 SubInclude HAIKU_TOP src add-ons kernel power cpufreq amd_pstates ;
+SubInclude HAIKU_TOP src add-ons kernel power cpufreq bcm2835_cpufreq ;
 SubInclude HAIKU_TOP src add-ons kernel power cpufreq intel_pstates ;
 

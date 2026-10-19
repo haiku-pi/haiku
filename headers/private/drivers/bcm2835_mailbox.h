@@ -30,6 +30,11 @@ typedef struct bcm2835_mailbox_module_info {
 } bcm2835_mailbox_module_info;
 
 
+// Clock IDs of the clock tags
+#define BCM2835_CLOCK_ARM					3
+#define BCM2835_CLOCK_CORE					4
+#define BCM2835_CLOCK_V3D					5
+
 // Tags (https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface)
 #define BCM2835_TAG_GET_FIRMWARE_REVISION	0x00000001
 #define BCM2835_TAG_GET_BOARD_MODEL			0x00010001
@@ -47,6 +52,7 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_TAG_SET_DOMAIN_STATE		0x00038030
 #define BCM2835_TAG_GET_TEMPERATURE			0x00030006
 #define BCM2835_TAG_GET_MAX_CLOCK_RATE		0x00030004
+#define BCM2835_TAG_GET_MIN_CLOCK_RATE		0x00030007
 #define BCM2835_TAG_GET_MAX_TEMPERATURE		0x0003000a
 #define BCM2835_TAG_GET_THROTTLED			0x00030046
 #define BCM2835_TAG_SET_CLOCK_RATE			0x00038002
