@@ -1,8 +1,8 @@
 # haiku-pi: bzip2, ffmpeg6, fluidlite, glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip and
-# their _devel are ours, built by the coordination repository (scripts/package-gl-stack.sh,
-# scripts/package-port.py) and staged in download/; a build needs -sHAIKU_NO_DOWNLOADS=1, as
-# Haiku's servers do not have them.
-# The "any" packages without _bootstrap are the x86_64 repository's (scripts/fetch-any-packages.sh).
+# zstd (with their _devel, and zstd_source) are ours, built by the coordination repository
+# (scripts/build-packages.sh) and staged in download/; a build needs -sHAIKU_NO_DOWNLOADS=1, as
+# Haiku's servers do not have them (scripts/fetch-build-packages.sh fetches upstream's own). The
+# "any" packages without _bootstrap are the x86_64 repository's (scripts/fetch-any-packages.sh).
 RemotePackageRepository HaikuPorts
 	: arm64
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
@@ -74,6 +74,8 @@ RemotePackageRepository HaikuPorts
 	unzip-6.10c23-1
 	zlib-1.2.13_bootstrap-1
 	zlib_devel-1.2.13_bootstrap-1
+	zstd-1.5.7-1
+	zstd_devel-1.5.7-1
 	:
 	# source packages
 	bash
@@ -99,6 +101,7 @@ RemotePackageRepository HaikuPorts
 	sed
 	texinfo
 	zlib
+	zstd
 	:
 	# debuginfo packages
 	;
