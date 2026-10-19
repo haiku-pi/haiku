@@ -7,7 +7,9 @@ UsePrivateHeaders drivers ;
 
 KernelAddon v3d :
 	bo.cpp
+	cpu_jobs.cpp
 	jobs.cpp
 	mmu.cpp
+	sync_file.cpp
 	v3d.cpp
 	;

@@ -140,6 +140,12 @@ enum {
 	kGmpConfig				= 0x0804,
 	kGmpViolationAddress	= 0x0808,
 
+	// compute shader dispatch (V3D 4.x offsets): writing CFG0 starts it
+	kCsdStatus				= 0x0900,
+	kCsdQueuedConfig0		= 0x0904,
+	kCsdCurrentConfig4		= 0x0930,
+		// batches still to go
+
 	kErrorFdbgo				= 0x0f04,
 	kErrorFdbgb				= 0x0f08,
 	kErrorFdbgr				= 0x0f0c,
@@ -198,6 +204,7 @@ static const bigtime_t kWatchdogHardLimit = 10000000;
 
 
 struct v3d_device;
+struct v3d_sync_file_select;
 
 
 struct v3d_bo {
@@ -222,7 +229,14 @@ struct v3d_bo {
 };
 
 
+/*!	A fence is a job's sequence number: jobs complete in submission order
+	(one queue), so it signals once completed_seqno reaches it, and of two
+	fences the later one implies the earlier (merging sync files keeps the
+	maximum). Running the queues concurrently will need a fence per queue.
+*/
 struct v3d_syncobj {
+	int32				references;
+		// the file's handle, CPU jobs that use it
 	bool				has_fence;
 	uint64				seqno;
 		// signalled once job "seqno" completed (0: always)
@@ -239,22 +253,45 @@ struct v3d_file {
 };
 
 
+enum v3d_job_type {
+	V3D_JOB_TYPE_CL,
+		// a binner and/or render control list
+	V3D_JOB_TYPE_TFU,
+		// texture formatting (tfu below)
+	V3D_JOB_TYPE_CSD,
+		// a compute shader dispatch (csd_config below)
+	V3D_JOB_TYPE_CPU,
+		// work the driver does on the CPU in queue order (cpu below)
+};
+
+
 enum v3d_job_stage {
 	V3D_JOB_QUEUED,
 	V3D_JOB_BIN,
 	V3D_JOB_RENDER,
 	V3D_JOB_TFU,
+	V3D_JOB_CSD,
 };
+
+
+struct v3d_cpu_job;
 
 
 struct v3d_job {
 	v3d_job*			next;
 	uint64				seqno;
+	v3d_job_type		type;
 	v3d_job_stage		stage;
-	bool				is_tfu;
-		// a texture formatting job (tfu below), else a control list job
 
 	drm_v3d_submit_tfu	tfu;
+	uint32				csd_config[7];
+	bool				skip;
+		// a dispatch of an empty grid (indirect): completes without running
+	v3d_cpu_job*		cpu;
+
+	uint32*				handles;
+	uint32				handle_count;
+		// the BO handles, until the job is queued (bos below)
 
 	uint32				bcl_start;
 	uint32				bcl_end;
@@ -351,6 +388,8 @@ struct v3d_device {
 		bigtime_t		window_start;
 		uint32			cl_jobs;
 		uint32			tfu_jobs;
+		uint32			csd_jobs;
+		uint32			cpu_jobs;
 		bigtime_t		gpu_time;
 			// first kick to completion
 		bigtime_t		latency;
@@ -364,6 +403,23 @@ struct v3d_device {
 	sem_id				worker_sem;
 	thread_id			worker;
 	bool				quit;
+
+	// sync files waited for with select()/poll(). Taken after the device
+	// lock, or alone (the VFS may hold an I/O context lock), never before it.
+	mutex				select_lock;
+	v3d_sync_file_select* selects;
+};
+
+
+/*!	The extensions of a submit ioctl (DRM_V3D_SUBMIT_EXTENSION). */
+struct v3d_submit_ext {
+	bool				multisync;
+	uint32*				out_syncs;
+	uint32				out_sync_count;
+		// syncobj handles that get the (last) job's fence
+	uint32				cpu_type;
+	uint64				cpu_extension;
+		// the CPU job extension (DRM_V3D_EXT_ID_CPU_*), a user address
 };
 
 
@@ -401,10 +457,30 @@ status_t v3d_jobs_start(v3d_device* device);
 void v3d_jobs_stop(v3d_device* device);
 status_t v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args);
 status_t v3d_submit_tfu(v3d_file* file, drm_v3d_submit_tfu* args);
+status_t v3d_submit_csd(v3d_file* file, drm_v3d_submit_csd* args);
+status_t v3d_submit_cpu(v3d_file* file, drm_v3d_submit_cpu* args);
+status_t v3d_csd_job_create(const drm_v3d_submit_csd& args, v3d_job** _job);
+void v3d_job_free(v3d_device* device, v3d_job* job);
+status_t v3d_copy_user_array(uint64 userAddress, uint32 count,
+	uint32** _array);
 status_t v3d_wait_seqno(v3d_device* device, v3d_file* file, uint64 seqno,
 	bigtime_t deadline);
 status_t v3d_syncobj_ioctl(v3d_file* file, uint32 nr, void* data);
+v3d_syncobj* v3d_syncobj_lookup(v3d_file* file, uint32 handle);
+void v3d_syncobj_put(v3d_syncobj* syncobj);
 void v3d_file_close_syncobjs(v3d_file* file);
+
+// cpu_jobs.cpp
+status_t v3d_cpu_job_create(const drm_v3d_submit_cpu& args,
+	const v3d_submit_ext& ext, v3d_job** _first);
+status_t v3d_cpu_job_resolve(v3d_file* file, v3d_job* job);
+void v3d_cpu_job_run(v3d_device* device, v3d_job* job);
+void v3d_cpu_job_free(v3d_device* device, v3d_cpu_job* cpu);
+
+// sync_file.cpp
+status_t v3d_sync_file_create(v3d_device* device, uint64 seqno, int* _fd);
+status_t v3d_sync_file_get_seqno(v3d_device* device, int fd, uint64* _seqno);
+void v3d_sync_file_notify(v3d_device* device);
 
 
 static inline uint32
@@ -432,6 +508,16 @@ static inline void
 core_write(v3d_device* device, uint32 offset, uint32 value)
 {
 	device->core[offset / 4] = value;
+}
+
+
+/*!	Whether job \a seqno has completed. Safe without the device lock (for
+	the sync files): completed_seqno only grows.
+*/
+static inline bool
+v3d_seqno_completed(v3d_device* device, uint64 seqno)
+{
+	return seqno <= (uint64)atomic_get64((int64*)&device->completed_seqno);
 }
 
 

@@ -7,9 +7,9 @@
 /*!	The Raspberry Pi 4's 3D GPU, V3D 4.2 ("brcm,2711-v3d").
 
 	The driver publishes /dev/dri/renderD128 and speaks the Linux v3d uAPI
-	over ioctl(): buffer objects, control list jobs, syncobjs - what Mesa's
-	v3d driver needs. Reading the device returns the identification
-	registers.
+	over ioctl(): buffer objects, control list, texture formatting, compute
+	and CPU jobs, syncobjs and sync files - what Mesa's v3d and v3dv drivers
+	need. Reading the device returns the identification registers.
 
 	Nothing touches the hardware while the system boots: an MMIO access to an
 	unclocked V3D never completes. The first open() powers the GPU on, sets
@@ -381,11 +381,11 @@ get_param(v3d_file* file, drm_v3d_get_param* args)
 		case DRM_V3D_PARAM_SUPPORTS_TFU:
 		case DRM_V3D_PARAM_SUPPORTS_CSD:
 		case DRM_V3D_PARAM_SUPPORTS_CACHE_FLUSH:
+		case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
+		case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
 			args->value = 1;
 			return B_OK;
 		case DRM_V3D_PARAM_SUPPORTS_PERFMON:
-		case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
-		case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
 		case DRM_V3D_PARAM_MAX_PERF_COUNTERS:
 		case DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES:
 		case DRM_V3D_PARAM_CONTEXT_RESET_COUNTER:
@@ -608,6 +608,10 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		case 0xc0:
 			size = sizeof(drm_syncobj_destroy);
 			break;
+		case 0xc1:
+		case 0xc2:
+			size = sizeof(drm_syncobj_handle);
+			break;
 		case 0xc3:
 			size = sizeof(drm_syncobj_wait);
 			break;
@@ -620,6 +624,14 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 			break;
 		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_TFU:
 			size = sizeof(drm_v3d_submit_tfu);
+			copyOut = false;
+			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CSD:
+			size = sizeof(drm_v3d_submit_csd);
+			copyOut = false;
+			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CPU:
+			size = sizeof(drm_v3d_submit_cpu);
 			copyOut = false;
 			break;
 		case DRM_COMMAND_BASE + DRM_V3D_WAIT_BO:
@@ -644,7 +656,7 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 			size = sizeof(drm_v3d_haiku_sync_bo);
 			break;
 		default:
-			// SUBMIT_CSD, perfmon, CPU jobs, PRIME, FLINK: not yet
+			// perfmon, PRIME, FLINK: not yet
 			return B_DEV_INVALID_IOCTL;
 	}
 
@@ -656,8 +668,11 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		drm_syncobj_destroy		syncobj_destroy;
 		drm_syncobj_wait		syncobj_wait;
 		drm_syncobj_array		syncobj_array;
+		drm_syncobj_handle		syncobj_handle;
 		drm_v3d_submit_cl		submit_cl;
 		drm_v3d_submit_tfu		submit_tfu;
+		drm_v3d_submit_csd		submit_csd;
+		drm_v3d_submit_cpu		submit_cpu;
 		drm_v3d_wait_bo			wait_bo;
 		drm_v3d_create_bo		create_bo;
 		drm_v3d_mmap_bo			mmap_bo;
@@ -689,8 +704,16 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_TFU:
 			status = v3d_submit_tfu(file, &data.submit_tfu);
 			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CSD:
+			status = v3d_submit_csd(file, &data.submit_csd);
+			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CPU:
+			status = v3d_submit_cpu(file, &data.submit_cpu);
+			break;
 		case 0xbf:
 		case 0xc0:
+		case 0xc1:
+		case 0xc2:
 		case 0xc3:
 		case 0xc4:
 		case 0xc5:
@@ -835,6 +858,7 @@ v3d_init_driver(device_node* node, void** _driverCookie)
 	device->overflow_area = -1;
 	device->worker = -1;
 	mutex_init(&device->lock, "v3d");
+	mutex_init(&device->select_lock, "v3d sync file select");
 	B_INITIALIZE_SPINLOCK(&device->irq_lock);
 	device->job_done.Init(device, "v3d job done");
 
@@ -875,6 +899,7 @@ v3d_uninit_driver(void* driverCookie)
 		delete_area(device->core_area);
 	if (device->hub_area >= 0)
 		delete_area(device->hub_area);
+	mutex_destroy(&device->select_lock);
 	mutex_destroy(&device->lock);
 	free(device);
 }
