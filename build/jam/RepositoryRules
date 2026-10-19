@@ -197,6 +197,13 @@ rule RemotePackageRepository repository : architecture : repositoryUrl
 
 	# build the repository info file
 	local repositoryInfoTemplate = <repository-info-template>haikuports ;
+	# haiku-pi: an architecture's own template, where it has one (arm64: our
+	# repository, as Haiku's servers have no arm64 HaikuPorts repository)
+	if [ Glob $(HAIKU_TOP)/src/data/repository_infos
+			: haikuports_$(architecture) ] {
+		repositoryInfoTemplate
+			= <repository-info-template>haikuports_$(architecture) ;
+	}
 	SEARCH on $(repositoryInfoTemplate)
 		= $(HAIKU_TOP)/src/data/repository_infos ;
 	PreprocessPackageOrRepositoryInfo $(repositoryInfo)
