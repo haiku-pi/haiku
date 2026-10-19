@@ -841,6 +841,18 @@ device_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				B_READ_AREA | B_WRITE_AREA, 0, info.frame_buffer_area, true);
 			if (area < 0)
 				return area;
+
+			// A clone of the boot frame buffer (physical memory) keeps its
+			// write-combining type, but a clone of a mode's frame buffer (RAM)
+			// would be cacheable: the firmware would scan out stale memory.
+			area_info source;
+			physical_entry entry;
+			if (get_area_info(info.frame_buffer_area, &source) == B_OK
+				&& get_memory_map(source.address, B_PAGE_SIZE, &entry, 1)
+					== B_OK) {
+				vm_set_area_memory_type(area, entry.address,
+					B_WRITE_COMBINING_MEMORY);
+			}
 			return _user_get_area_info(area, (area_info*)buffer);
 		}
 
