@@ -29,6 +29,7 @@
 #include <team.h>
 #include <util/AutoLock.h>
 #include <vm/vm.h>
+#include <vm/VMAddressSpace.h>
 
 
 static const size_t kMaxBOSize = 512 * 1024 * 1024;
@@ -43,6 +44,7 @@ bo_release(v3d_device* device, v3d_bo* bo)
 	else {
 		unlock_memory_etc(bo->imported_team, bo->address, bo->size,
 			B_READ_DEVICE);
+		delete_area(bo->imported_area);
 	}
 	free(bo);
 }
@@ -249,9 +251,14 @@ gem_close(v3d_file* file, drm_gem_close* args)
 
 
 /*!	A range of the calling team's memory as a BO (a Haiku extension): the
-	pages are wired for the BO's life and entered into the GPU page table, so
-	that the GPU renders straight into, say, a BBitmap. The range need not be
-	page aligned: offset is the GPU address of its first byte.
+	GPU renders straight into, say, a BBitmap. The range need not be page
+	aligned: offset is the GPU address of its first byte.
+
+	The pages are wired for the BO's life, but in a kernel clone of the
+	client's area, not in the client's own: the client may die with the BO
+	still alive (its file is closed after its address space is gone), and a
+	team's areas must not be wired when they are deleted. The clone shares
+	the area's cache, so the pages stay until the BO lets them go.
 */
 static status_t
 import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
@@ -265,19 +272,40 @@ import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
 		return B_BAD_VALUE;
 	}
 
+	// the whole range must be one area of the caller's
+	const area_id source = area_for((void*)start);
+	area_info info;
+	if (source < 0 || get_area_info(source, &info) != B_OK
+		|| start < (addr_t)info.address
+		|| end > (addr_t)info.address + info.size) {
+		return B_BAD_ADDRESS;
+	}
+
 	v3d_bo* bo = (v3d_bo*)calloc(1, sizeof(v3d_bo));
 	if (bo == NULL)
 		return B_NO_MEMORY;
 	bo->size = size;
 	bo->references = 1;
 	bo->area = -1;
-	bo->address = (void*)start;
-	bo->imported_team = team_get_current_team_id();
+	bo->imported_team = VMAddressSpace::KernelID();
+
+	void* cloneAddress;
+	bo->imported_area = vm_clone_area(bo->imported_team, "v3d imported memory",
+		&cloneAddress, B_ANY_KERNEL_ADDRESS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, REGION_NO_PRIVATE_MAP, source,
+		true);
+	if (bo->imported_area < 0) {
+		status_t status = bo->imported_area;
+		free(bo);
+		return status;
+	}
+	bo->address = (uint8*)cloneAddress + (start - (addr_t)info.address);
 
 	// The GPU writes it: as a device reading into memory
 	status_t status = lock_memory_etc(bo->imported_team, bo->address, size,
 		B_READ_DEVICE);
 	if (status != B_OK) {
+		delete_area(bo->imported_area);
 		free(bo);
 		return status;
 	}
@@ -300,6 +328,7 @@ import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
 	}
 	if (status != B_OK) {
 		unlock_memory_etc(bo->imported_team, bo->address, size, B_READ_DEVICE);
+		delete_area(bo->imported_area);
 		free(bo);
 		return status;
 	}

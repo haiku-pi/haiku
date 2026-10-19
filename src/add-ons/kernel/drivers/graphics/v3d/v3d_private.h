@@ -206,8 +206,12 @@ struct v3d_bo {
 	area_id				area;
 	void*				address;
 		// the kernel's (write-combining) mapping; for an imported BO (area
-		// < 0): the client's, wired, in imported_team
+		// < 0): in the kernel's clone of the client's area, wired, in
+		// imported_team (the kernel team)
 	team_id				imported_team;
+	area_id				imported_area;
+		// for an imported BO: the kernel's clone of the client's area, which
+		// keeps the pages after the client's team is gone
 	size_t				size;
 	uint32				gpu_address;
 	uint64				last_seqno;
