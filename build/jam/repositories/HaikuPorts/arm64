@@ -1,8 +1,9 @@
-# haiku-pi: bzip2, ffmpeg6, fluidlite, glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip and
-# zstd (with their _devel, and zstd_source) are ours, built by the coordination repository
-# (scripts/build-packages.sh) and staged in download/; a build needs -sHAIKU_NO_DOWNLOADS=1, as
-# Haiku's servers do not have them (scripts/fetch-build-packages.sh fetches upstream's own). The
-# "any" packages without _bootstrap are the x86_64 repository's (scripts/fetch-any-packages.sh).
+# haiku-pi: bzip2, ffmpeg6, fluidlite, glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip,
+# zstd and the NetSurf block below (with their _devel, and zstd_source) are ours, built by the
+# coordination repository (scripts/build-packages.sh) and staged in download/; a build needs
+# -sHAIKU_NO_DOWNLOADS=1, as Haiku's servers do not have them (scripts/fetch-build-packages.sh
+# fetches upstream's own). The "any" packages without _bootstrap are the x86_64 repository's
+# (scripts/fetch-any-packages.sh).
 RemotePackageRepository HaikuPorts
 	: arm64
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
@@ -29,8 +30,6 @@ RemotePackageRepository HaikuPorts
 	bzip2-1.0.8-1
 	bzip2_devel-1.0.8-1
 	coreutils-9.9_bootstrap-1
-	curl-8.19.0_bootstrap-1
-	curl_devel-8.19.0_bootstrap-1
 	expat-2.5.0_bootstrap-1
 	expat_devel-2.5.0_bootstrap-1
 	ffmpeg6-6.1.6-1
@@ -76,6 +75,43 @@ RemotePackageRepository HaikuPorts
 	zlib_devel-1.2.13_bootstrap-1
 	zstd-1.5.7-1
 	zstd_devel-1.5.7-1
+	# haiku-pi: NetSurf and its dependencies (scripts/build-netsurf.sh); curl replaces the
+	# bootstrap one (that has no TLS)
+	curl-8.22.0-1
+	curl_devel-8.22.0-1
+	hubbub-0.3.8-1
+	hubbub_devel-0.3.8-1
+	libcss-0.9.2-1
+	libcss_devel-0.9.2-1
+	libdom-0.4.2-1
+	libdom_devel-0.4.2-1
+	libiconv-1.18-1
+	libiconv_devel-1.18-1
+	libjpeg_turbo-3.1.4.1-1
+	libjpeg_turbo_devel-3.1.4.1-1
+	libnsbmp-0.1.7-1
+	libnsbmp_devel-0.1.7-1
+	libnsgif-1.0.0-1
+	libnsgif_devel-1.0.0-1
+	libnslog-0.1.3-1
+	libnslog_devel-0.1.3-1
+	libnspsl-0.1.7-1
+	libnspsl_devel-0.1.7-1
+	libnsutils-0.1.1-1
+	libnsutils_devel-0.1.1-1
+	libparserutils-0.2.5-1
+	libparserutils_devel-0.2.5-1
+	libpng16-1.6.53-1
+	libpng16_devel-1.6.53-1
+	libsvgtiny-0.1.8-1
+	libsvgtiny_devel-0.1.8-1
+	libutf8proc-2.11.3-1
+	libutf8proc_devel-2.11.3-1
+	libwapcaplet-0.4.3-1
+	libwapcaplet_devel-0.4.3-1
+	netsurf-3.11-1
+	openssl3-3.5.9-1
+	openssl3_devel-3.5.9-1
 	:
 	# source packages
 	bash
