@@ -25,6 +25,10 @@ RemotePackageRepository HaikuPorts
 	gcc-13.3.0_2026_03_29_bootstrap-1
 	gcc_syslibs-13.3.0_2026_03_29_bootstrap-1
 	gcc_syslibs_devel-13.3.0_2026_03_29_bootstrap-1
+	# haiku-pi: built by scripts/package-gl-stack.sh (coordination repository), staged in
+	# download/; a build listing them needs -sHAIKU_NO_DOWNLOADS=1 (the servers do not have them)
+	glu-9.0.3-1
+	glu_devel-9.0.3-1
 	grep-3.11_bootstrap-1
 	icu74-74.1_bootstrap-1
 	icu74_devel-74.1_bootstrap-1
@@ -34,6 +38,8 @@ RemotePackageRepository HaikuPorts
 	libffi_devel-3.4.6_bootstrap-1
 	m4-1.4.19_bootstrap-1
 	make-4.4.1_bootstrap-1
+	mesa-26.2.0-1
+	mesa_devel-26.2.0-1
 	ncurses6-6.6_bootstrap-1
 	ncurses6_devel-6.6_bootstrap-1
 	python3.10-3.10.19_bootstrap-1
