@@ -485,26 +485,23 @@ wlan_control(void* cookie, uint32 op, void* arg, size_t length)
 					return EOPNOTSUPP;
 			}
 
+			// Every setting the driver's ioctl takes returns ENETRESET, which makes the driver
+			// stop and restart the interface (and start a new scan). Three restarts in a row
+			// sometimes left bwfm's last scan unfinished and the network never joined, so the
+			// settings go to net80211 directly and only the last one through the driver: one
+			// restart, with the whole configuration in place.
 			IFF_LOCKGIANT(ifp);
-			status_t status = ifp->if_ioctl(ifp, SIOCS80211NWID, (caddr_t)&ifr);
-			if (status != B_OK) {
-				IFF_UNLOCKGIANT(ifp);
-				return status;
-			}
-			if (wpapsk.i_enabled) {
-				status = ifp->if_ioctl(ifp, SIOCS80211WPAPSK, (caddr_t)&wpapsk);
-				if (status != B_OK) {
-					IFF_UNLOCKGIANT(ifp);
-					return status;
-				}
-			}
+			status_t status = B_OK;
 			if (wpaparams.i_enabled) {
-				status = ifp->if_ioctl(ifp, SIOCS80211WPAPARMS, (caddr_t)&wpaparams);
-				if (status != B_OK) {
-					IFF_UNLOCKGIANT(ifp);
-					return status;
+				status = ieee80211_ioctl(ifp, SIOCS80211NWID, (caddr_t)&ifr);
+				if ((status == B_OK || status == ENETRESET) && wpapsk.i_enabled)
+					status = ieee80211_ioctl(ifp, SIOCS80211WPAPSK, (caddr_t)&wpapsk);
+				if (status == B_OK || status == ENETRESET) {
+					status = ifp->if_ioctl(ifp, SIOCS80211WPAPARMS,
+						(caddr_t)&wpaparams);
 				}
-			}
+			} else
+				status = ifp->if_ioctl(ifp, SIOCS80211NWID, (caddr_t)&ifr);
 			IFF_UNLOCKGIANT(ifp);
 			if (status != B_OK)
 				return status;
