@@ -6,8 +6,9 @@
 
 /*!	Control list jobs, the interrupt handler, the watchdog, and syncobjs.
 
-	One job is on the GPU at a time (its binner list, then its render list),
-	but the caller does not wait for it: SUBMIT_CL queues the job and returns.
+	One job is on the GPU at a time (its binner list, then its render list;
+	or a texture formatting unit job), but the caller does not wait for it:
+	SUBMIT_CL and SUBMIT_TFU queue the job and return.
 	A worker thread owns the hardware: it kicks jobs, takes their completion
 	from the interrupt handler, runs the watchdog and resets a wedged GPU.
 	Waits (WAIT_BO, SYNCOBJ_WAIT) sleep until a job's sequence number has
@@ -345,6 +346,42 @@ kick_render(v3d_device* device, v3d_job* job)
 }
 
 
+/*!	The TFU reads and writes memory through the MMU like the other units:
+	the prologue's barrier and TLB flush apply. Writing the input
+	configuration starts it.
+*/
+static void
+kick_tfu(v3d_device* device, v3d_job* job)
+{
+	prepare_caches(device);
+	{
+		// a completion still latched from the previous TFU job
+		InterruptsSpinLocker locker(device->irq_lock);
+		if ((hub_read(device, kHubInterruptStatus) & kHubTfuDone) != 0)
+			hub_write(device, kHubInterruptClear, kHubTfuDone);
+		device->pending_hub &= ~kHubTfuDone;
+	}
+
+	const drm_v3d_submit_tfu& tfu = job->tfu;
+	hub_write(device, kTfuInputImageAddress, tfu.iia);
+	hub_write(device, kTfuInputImageStride, tfu.iis);
+	hub_write(device, kTfuInputChromaAddress, tfu.ica);
+	hub_write(device, kTfuInputUAddress, tfu.iua);
+	hub_write(device, kTfuOutputAddress, tfu.ioa);
+	hub_write(device, kTfuOutputSize, tfu.ios);
+	hub_write(device, kTfuCoefficient0, tfu.coef[0]);
+	if ((tfu.coef[0] & kTfuUseCoefficients) != 0) {
+		hub_write(device, kTfuCoefficient1, tfu.coef[1]);
+		hub_write(device, kTfuCoefficient2, tfu.coef[2]);
+		hub_write(device, kTfuCoefficient3, tfu.coef[3]);
+	}
+
+	job->stage = V3D_JOB_TFU;
+	start_watchdog(job, hub_read(device, kTfuControlStatus), 0);
+	hub_write(device, kTfuInputConfig, tfu.icfg | kTfuInterruptOnCompletion);
+}
+
+
 static void
 schedule(v3d_device* device)
 {
@@ -358,7 +395,9 @@ schedule(v3d_device* device)
 	job->next = NULL;
 	device->active = job;
 
-	if (job->bcl_start != job->bcl_end)
+	if (job->is_tfu)
+		kick_tfu(device, job);
+	else if (job->bcl_start != job->bcl_end)
 		kick_bin(device, job);
 	else
 		kick_render(device, job);
@@ -415,7 +454,11 @@ static void
 progress_registers(v3d_device* device, v3d_job* job, uint32& current,
 	uint32& _return)
 {
-	if (job->stage == V3D_JOB_BIN) {
+	if (job->stage == V3D_JOB_TFU) {
+		// its conversion count moves while it works
+		current = hub_read(device, kTfuControlStatus);
+		_return = 0;
+	} else if (job->stage == V3D_JOB_BIN) {
 		current = core_read(device, kCle0CurrentAddress);
 		_return = core_read(device, kCle0ReturnAddress);
 	} else {
@@ -428,6 +471,18 @@ progress_registers(v3d_device* device, v3d_job* job, uint32& current,
 static void
 dump_job(v3d_device* device, v3d_job* job)
 {
+	if (job->is_tfu) {
+		const drm_v3d_submit_tfu& tfu = job->tfu;
+		ERROR("TFU job %" B_PRIu64 " wedged: cs %#" B_PRIx32 ", icfg %#"
+			B_PRIx32 " iia %#" B_PRIx32 " iis %#" B_PRIx32 " ioa %#" B_PRIx32
+			" ios %#" B_PRIx32 ", hub int %#" B_PRIx32 ", mmu illegal %#"
+			B_PRIx32 "\n", job->seqno, hub_read(device, kTfuControlStatus),
+			tfu.icfg, tfu.iia, tfu.iis, tfu.ioa, tfu.ios,
+			hub_read(device, kHubInterruptStatus),
+			hub_read(device, kMmuIllegalAddress));
+		return;
+	}
+
 	ERROR("%s list of job %" B_PRIu64 " wedged: int %#" B_PRIx32
 		", ct0 cs %#" B_PRIx32 " ca %#" B_PRIx32 " [%#" B_PRIx32 "..%#"
 		B_PRIx32 "] ra %#" B_PRIx32 ", ct1 cs %#" B_PRIx32 " ca %#" B_PRIx32
@@ -637,6 +692,9 @@ process_events(v3d_device* device)
 	else if (job != NULL && job->stage == V3D_JOB_RENDER
 		&& (core & kRenderDone) != 0)
 		render_done(device, job);
+	else if (job != NULL && job->stage == V3D_JOB_TFU
+		&& (hub & kHubTfuDone) != 0)
+		finish_job(device, job);
 
 	if ((core & kGmpViolation) != 0) {
 		ERROR("GMP violation at %#" B_PRIx32 "\n",
@@ -766,11 +824,74 @@ v3d_jobs_stop(v3d_device* device)
 //	#pragma mark - submission and waits
 
 
-status_t
-v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args)
+/*!	Takes the job's buffers by handle, gives it the next sequence number and
+	the out-sync its fence, and queues it. Owns \a job and \a handles.
+*/
+static status_t
+queue_job(v3d_file* file, v3d_job* job, uint32* handles, uint32 count,
+	uint32 outSync)
 {
 	v3d_device* device = file->device;
 
+	if (count > 0) {
+		job->bos = (v3d_bo**)calloc(count, sizeof(v3d_bo*));
+		if (job->bos == NULL) {
+			free(handles);
+			free(job);
+			return B_NO_MEMORY;
+		}
+	}
+
+	MutexLocker locker(device->lock);
+	if (device->broken) {
+		free(handles);
+		free_job(device, job);
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	for (uint32 i = 0; i < count; i++) {
+		v3d_bo* bo = v3d_bo_lookup(file, handles[i]);
+		if (bo == NULL) {
+			free(handles);
+			free_job(device, job);
+			return B_ENTRY_NOT_FOUND;
+		}
+		bo->references++;
+		job->bos[job->bo_count++] = bo;
+	}
+	free(handles);
+
+	job->seqno = ++device->submitted_seqno;
+	for (uint32 i = 0; i < job->bo_count; i++)
+		job->bos[i]->last_seqno = job->seqno;
+
+	// The out-sync gets the job's fence now (DRM semantics); an unknown
+	// handle is ignored, as Linux does.
+	v3d_syncobj* syncobj = v3d_handle_lookup(file->syncobjs,
+		file->syncobj_slots, outSync);
+	if (syncobj != NULL) {
+		syncobj->has_fence = true;
+		syncobj->seqno = job->seqno;
+	}
+
+	if (device->queue_tail != NULL)
+		device->queue_tail->next = job;
+	else
+		device->queue_head = job;
+	device->queue_tail = job;
+
+	// for SYNCOBJ_WAIT with WAIT_FOR_SUBMIT
+	device->job_done.NotifyAll();
+	locker.Unlock();
+
+	release_sem(device->worker_sem);
+	return B_OK;
+}
+
+
+status_t
+v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args)
+{
 	// The client wrote its control lists through a write-combining mapping
 	// on this CPU; the worker that starts the job may run on another one,
 	// and its barrier does not drain this CPU's write buffer.
@@ -803,10 +924,7 @@ v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args)
 	if (count > 0) {
 		const void* userHandles = (const void*)(addr_t)args->bo_handles;
 		handles = (uint32*)malloc(count * sizeof(uint32));
-		job->bos = (v3d_bo**)calloc(count, sizeof(v3d_bo*));
-		if (handles == NULL || job->bos == NULL) {
-			free(handles);
-			free(job->bos);
+		if (handles == NULL) {
 			free(job);
 			return B_NO_MEMORY;
 		}
@@ -814,56 +932,46 @@ v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args)
 			|| user_memcpy(handles, userHandles, count * sizeof(uint32))
 				!= B_OK) {
 			free(handles);
-			free(job->bos);
 			free(job);
 			return B_BAD_ADDRESS;
 		}
 	}
 
-	MutexLocker locker(device->lock);
-	if (device->broken) {
-		free(handles);
-		free_job(device, job);
-		return B_DEVICE_NOT_FOUND;
+	return queue_job(file, job, handles, count, args->out_sync);
+}
+
+
+/*!	A texture formatting unit job (texture uploads, mipmap generation): the
+	TFU converts the input image into the output BO's tiled layout and
+	writes the requested mip levels.
+*/
+status_t
+v3d_submit_tfu(v3d_file* file, drm_v3d_submit_tfu* args)
+{
+	// the source image was written through a write-combining mapping
+	v3d_barrier();
+
+	if (args->flags != 0 || args->extensions != 0 || args->bo_handles[0] == 0)
+		return B_BAD_VALUE;
+
+	v3d_job* job = (v3d_job*)calloc(1, sizeof(v3d_job));
+	if (job == NULL)
+		return B_NO_MEMORY;
+	job->is_tfu = true;
+	job->tfu = *args;
+
+	// the output BO first, then the inputs; 0 ends the list
+	uint32 count = 0;
+	while (count < B_COUNT_OF(args->bo_handles) && args->bo_handles[count] != 0)
+		count++;
+	uint32* handles = (uint32*)malloc(count * sizeof(uint32));
+	if (handles == NULL) {
+		free(job);
+		return B_NO_MEMORY;
 	}
+	memcpy(handles, args->bo_handles, count * sizeof(uint32));
 
-	for (uint32 i = 0; i < count; i++) {
-		v3d_bo* bo = v3d_bo_lookup(file, handles[i]);
-		if (bo == NULL) {
-			free(handles);
-			free_job(device, job);
-			return B_ENTRY_NOT_FOUND;
-		}
-		bo->references++;
-		job->bos[job->bo_count++] = bo;
-	}
-	free(handles);
-
-	job->seqno = ++device->submitted_seqno;
-	for (uint32 i = 0; i < job->bo_count; i++)
-		job->bos[i]->last_seqno = job->seqno;
-
-	// The out-sync gets the job's fence now (DRM semantics); an unknown
-	// handle is ignored, as Linux does.
-	v3d_syncobj* syncobj = v3d_handle_lookup(file->syncobjs,
-		file->syncobj_slots, args->out_sync);
-	if (syncobj != NULL) {
-		syncobj->has_fence = true;
-		syncobj->seqno = job->seqno;
-	}
-
-	if (device->queue_tail != NULL)
-		device->queue_tail->next = job;
-	else
-		device->queue_head = job;
-	device->queue_tail = job;
-
-	// for SYNCOBJ_WAIT with WAIT_FOR_SUBMIT
-	device->job_done.NotifyAll();
-	locker.Unlock();
-
-	release_sem(device->worker_sem);
-	return B_OK;
+	return queue_job(file, job, handles, count, args->out_sync);
 }
 
 

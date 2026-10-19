@@ -584,6 +584,10 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CL:
 			size = sizeof(drm_v3d_submit_cl);
 			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_TFU:
+			size = sizeof(drm_v3d_submit_tfu);
+			copyOut = false;
+			break;
 		case DRM_COMMAND_BASE + DRM_V3D_WAIT_BO:
 			size = sizeof(drm_v3d_wait_bo);
 			break;
@@ -606,7 +610,7 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 			size = sizeof(drm_v3d_haiku_sync_bo);
 			break;
 		default:
-			// SUBMIT_TFU, SUBMIT_CSD, perfmon, CPU jobs, PRIME, FLINK: not yet
+			// SUBMIT_CSD, perfmon, CPU jobs, PRIME, FLINK: not yet
 			return B_DEV_INVALID_IOCTL;
 	}
 
@@ -619,6 +623,7 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 		drm_syncobj_wait		syncobj_wait;
 		drm_syncobj_array		syncobj_array;
 		drm_v3d_submit_cl		submit_cl;
+		drm_v3d_submit_tfu		submit_tfu;
 		drm_v3d_wait_bo			wait_bo;
 		drm_v3d_create_bo		create_bo;
 		drm_v3d_mmap_bo			mmap_bo;
@@ -646,6 +651,9 @@ v3d_control(void* cookie, uint32 op, void* arg, size_t length)
 			break;
 		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CL:
 			status = v3d_submit_cl(file, &data.submit_cl);
+			break;
+		case DRM_COMMAND_BASE + DRM_V3D_SUBMIT_TFU:
+			status = v3d_submit_tfu(file, &data.submit_tfu);
 			break;
 		case 0xbf:
 		case 0xc0:

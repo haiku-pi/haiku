@@ -37,6 +37,20 @@ enum {
 	kHubInterruptMaskSet	= 0x0060,
 	kHubInterruptMaskClear	= 0x0064,
 
+	// texture formatting unit (V3D 4.x offsets)
+	kTfuControlStatus		= 0x0400,
+	kTfuInputConfig			= 0x0408,
+	kTfuInputImageAddress	= 0x040c,
+	kTfuInputChromaAddress	= 0x0410,
+	kTfuInputImageStride	= 0x0414,
+	kTfuInputUAddress		= 0x0418,
+	kTfuOutputAddress		= 0x041c,
+	kTfuOutputSize			= 0x0420,
+	kTfuCoefficient0		= 0x0424,
+	kTfuCoefficient1		= 0x0428,
+	kTfuCoefficient2		= 0x042c,
+	kTfuCoefficient3		= 0x0430,
+
 	kMmuCacheControl		= 0x1000,
 	kMmuControl				= 0x1200,
 	kMmuPageTableBase		= 0x1204,
@@ -44,6 +58,12 @@ enum {
 	kMmuIllegalAddress		= 0x1230,
 	kMmuViolationAddress	= 0x1234,
 	kMmuDebugInfo			= 0x1238,
+};
+
+// TFU bits
+enum {
+	kTfuInterruptOnCompletion = 1 << 0,
+	kTfuUseCoefficients		= 1u << 31,
 };
 
 // Hub interrupts
@@ -219,6 +239,7 @@ enum v3d_job_stage {
 	V3D_JOB_QUEUED,
 	V3D_JOB_BIN,
 	V3D_JOB_RENDER,
+	V3D_JOB_TFU,
 };
 
 
@@ -226,6 +247,10 @@ struct v3d_job {
 	v3d_job*			next;
 	uint64				seqno;
 	v3d_job_stage		stage;
+	bool				is_tfu;
+		// a texture formatting job (tfu below), else a control list job
+
+	drm_v3d_submit_tfu	tfu;
 
 	uint32				bcl_start;
 	uint32				bcl_end;
@@ -352,6 +377,7 @@ void v3d_file_close_bos(v3d_file* file);
 status_t v3d_jobs_start(v3d_device* device);
 void v3d_jobs_stop(v3d_device* device);
 status_t v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args);
+status_t v3d_submit_tfu(v3d_file* file, drm_v3d_submit_tfu* args);
 status_t v3d_wait_seqno(v3d_device* device, v3d_file* file, uint64 seqno,
 	bigtime_t deadline);
 status_t v3d_syncobj_ioctl(v3d_file* file, uint32 nr, void* data);
