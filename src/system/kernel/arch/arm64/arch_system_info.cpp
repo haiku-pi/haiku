@@ -10,6 +10,7 @@
 #include <boot/kernel_args.h>
 
 #include "cpu.h"
+#include <smp.h>
 
 
 static cpu_vendor sCPUVendor = B_CPU_VENDOR_UNKNOWN;
@@ -28,9 +29,9 @@ arch_fill_topology_node(cpu_topology_node_info* node, int32 cpu)
 			break;
 		case B_TOPOLOGY_CORE:
 			node->data.core.model = static_cast<uint32>(gCPU[cpu].arch.midr);
-			// TODO: This can be taken from SMBIOS Type 4, or the device tree depending on the
-			// device
-			node->data.core.default_frequency = 0;
+			// TODO: SMBIOS Type 4 or the device tree have the nominal clock on some
+			// devices; until then the measured one (arch_get_frequency())
+			arch_get_frequency(&node->data.core.default_frequency, cpu);
 			break;
 		default:
 			break;
@@ -104,16 +105,57 @@ arch_system_info_init(struct kernel_args *args)
 }
 
 
+/*!	The current CPU's clock, measured: its PMU cycle counter against the
+	generic timer over 100 us (the cycle counter is architectural; under QEMU
+	it runs at a fixed rate). The result is kept for a second, as monitors
+	ask often.
+*/
+static void
+measure_frequency(void* _frequency, int cpu)
+{
+	static uint64 sFrequency[SMP_MAX_CPUS];
+	static bigtime_t sMeasured[SMP_MAX_CPUS];
+	uint64* frequency = (uint64*)_frequency;
+
+	const bigtime_t now = system_time();
+	if (sMeasured[cpu] != 0 && now - sMeasured[cpu] < 1000000) {
+		*frequency = sFrequency[cpu];
+		return;
+	}
+
+	// cycle counter on, counting every cycle (PMCR_EL0.E, D clear)
+	const uint64 pmcr = READ_SPECIALREG(PMCR_EL0);
+	WRITE_SPECIALREG(PMCR_EL0, (pmcr | 1) & ~(uint64)(1 << 3));
+	WRITE_SPECIALREG(PMCNTENSET_EL0, 1ul << 31);
+	arm64_isb();
+
+	const uint64 timerFrequency = READ_SPECIALREG(CNTFRQ_EL0);
+	const cpu_status state = disable_interrupts();
+	const uint64 start = READ_SPECIALREG(CNTVCT_EL0);
+	const uint64 startCycles = READ_SPECIALREG(PMCCNTR_EL0);
+	const uint64 end = start + timerFrequency / 10000;
+	uint64 ticks;
+	while ((ticks = READ_SPECIALREG(CNTVCT_EL0)) < end)
+		;
+	const uint64 cycles = READ_SPECIALREG(PMCCNTR_EL0) - startCycles;
+	restore_interrupts(state);
+
+	sFrequency[cpu] = cycles * timerFrequency / (ticks - start);
+	sMeasured[cpu] = now;
+	*frequency = sFrequency[cpu];
+}
+
+
 status_t
 arch_get_frequency(uint64 *frequency, int32 cpu)
 {
-	// HACKME: This is a tricky one. There are a few options with wildly varying availability:
-	// * ARMv8.4 Activity Monitors (AMEVCNTR0 counter)
-	// * PMU cycle counter sampling
-	// * on Apple M-series, p-state registers
-	// * ACPI CPPC feedback counters
-	// In QEMU, the only one that "works" is PMU, but it returns constant 1 GHz.
-
+	// The options vary wildly in availability: ARMv8.4 activity monitors
+	// (AMEVCNTR0), the PMU cycle counter, ACPI CPPC feedback counters, Apple's
+	// p-state registers. The PMU cycle counter is there on every core.
 	*frequency = 0;
+	if (cpu == smp_get_current_cpu())
+		measure_frequency(frequency, cpu);
+	else
+		call_single_cpu_sync(cpu, &measure_frequency, frequency);
 	return B_OK;
 }

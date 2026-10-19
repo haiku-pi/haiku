@@ -63,6 +63,44 @@ firmware_value(uint32 tag, uint32 id, uint32& value)
 }
 
 
+/*!	The board, from the firmware's revision code (new style: bit 23 set; see
+	the Raspberry Pi documentation's "revision codes"), e.g. 0xc03111:
+	"Raspberry Pi 4 Model B rev 1.1, 4 GB, BCM2711".
+*/
+static void
+describe_board(char* buffer, size_t size)
+{
+	uint32 values[1] = {};
+	if (sMailbox->property_tag(BCM2835_TAG_GET_BOARD_REVISION, values,
+			sizeof(values), 0, NULL) != B_OK) {
+		snprintf(buffer, size, "unknown");
+		return;
+	}
+	const uint32 code = values[0];
+	if ((code & (1 << 23)) == 0) {
+		snprintf(buffer, size, "revision %#" B_PRIx32, code);
+		return;
+	}
+
+	const uint32 type = (code >> 4) & 0xff;
+	const uint32 processor = (code >> 12) & 0xf;
+	const uint32 memory = (code >> 20) & 0x7;
+	const char* typeName = type == 0x11 ? "4 Model B" : type == 0x13 ? "400"
+		: type == 0x14 ? "Compute Module 4" : type == 0x17 ? "5" : NULL;
+	static const char* const kProcessors[] = { "BCM2835", "BCM2836", "BCM2837",
+		"BCM2711", "BCM2712" };
+	char typeBuffer[16];
+	if (typeName == NULL) {
+		snprintf(typeBuffer, sizeof(typeBuffer), "type %#" B_PRIx32, type);
+		typeName = typeBuffer;
+	}
+	snprintf(buffer, size, "Raspberry Pi %s rev 1.%" B_PRIu32 ", %" B_PRIu32
+		" MB, %s (%#" B_PRIx32 ")", typeName, code & 0xf, 256u << memory,
+		processor < B_COUNT_OF(kProcessors) ? kProcessors[processor] : "?",
+		code);
+}
+
+
 static status_t
 get_thermal(bcm2835_thermal_type& info)
 {
@@ -150,16 +188,20 @@ bcm2835_thermal_read(void* cookie, off_t position, void* buffer,
 	for (uint32 i = 0; i < 3; i++)
 		firmware_value(BCM2835_TAG_GET_CLOCK_MEASURED, clockIDs[i], clocks[i]);
 
+	char board[96];
+	describe_board(board, sizeof(board));
+
 	const uint32 now = info.throttled & 0xffff;
 	const uint32 sinceBoot = info.throttled >> kThrottledSinceBootShift;
-	char text[256];
+	char text[384];
 	int32 length = snprintf(text, sizeof(text),
+		"  Board: %s\n"
 		"  Current Temperature: %" B_PRIu32 ".%" B_PRIu32 " C\n"
 		"  Critical Temperature: %" B_PRIu32 ".%" B_PRIu32 " C\n"
 		"  Throttled: %#" B_PRIx32 "%s%s%s%s (since boot: %#" B_PRIx32 ")\n"
 		"  Clocks: ARM %" B_PRIu32 " MHz, core %" B_PRIu32 " MHz, V3D %"
 		B_PRIu32 " MHz\n",
-		info.current_temp / 10, info.current_temp % 10,
+		board, info.current_temp / 10, info.current_temp % 10,
 		info.critical_temp / 10, info.critical_temp % 10,
 		info.throttled,
 		(now & kThrottledUnderVoltage) != 0 ? ", under-voltage" : "",
