@@ -1,6 +1,9 @@
 SubDir HAIKU_TOP src add-ons kernel drivers audio ;
 
 SubInclude HAIKU_TOP src add-ons kernel drivers audio ac97 ;
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel drivers audio bcm2711_pwm ;
+}
 SubInclude HAIKU_TOP src add-ons kernel drivers audio cmedia ;
 SubInclude HAIKU_TOP src add-ons kernel drivers audio echo ;
 SubInclude HAIKU_TOP src add-ons kernel drivers audio emuxki ;

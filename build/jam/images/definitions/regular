@@ -285,6 +285,10 @@ SYSTEM_ADD_ONS_DRIVERS_AUDIO +=
 	sis7018
 ;
 
+SYSTEM_ADD_ONS_DRIVERS_AUDIO += [ FFilterByBuildFeatures
+	bcm2711_pwm@arm64
+] ;
+
 SYSTEM_ADD_ONS_DRIVERS_AUDIO_OLD +=
 	#cmedia
 ;
