@@ -36,17 +36,6 @@ struct per_cpu_timer_data {
 static per_cpu_timer_data sPerCPU[SMP_MAX_CPUS];
 
 
-/*!	TODO: bring-up diagnostic (the Raspberry Pi 4's boot freeze): when the
-	next timer event of \a cpu is due (-1: none). Reads without the lock.
-*/
-bigtime_t
-timer_debug_next_event(int32 cpu)
-{
-	timer* event = sPerCPU[cpu].events;
-	return event != NULL ? event->schedule_time : -1;
-}
-
-
 //#define TRACE_TIMER
 #ifdef TRACE_TIMER
 #	define TRACE(x) dprintf x

@@ -25,6 +25,39 @@ static bigtime_t sTimerMaxInterval;
 
 #define TIMER_IRQ 27
 
+// CNTKCTL_EL1: the event stream (an event when bit EVNTI of the virtual counter
+// goes from 0 to 1: at 54 MHz, bit 12 every 152 us), which bounds every wait
+// for an event (arch_cpu_wait()), as Linux's arch timer does it
+#define CNTKCTL_EVNTEN (1 << 2)
+#define CNTKCTL_EVNTDIR (1 << 3)
+#define CNTKCTL_EVNTI_SHIFT 4
+#define CNTKCTL_EVNTI_MASK (0xf << CNTKCTL_EVNTI_SHIFT)
+static const uint32 kEventStreamBit = 12;
+
+
+static void
+enable_event_stream()
+{
+	uint64 control = READ_SPECIALREG(CNTKCTL_EL1);
+	control &= ~(CNTKCTL_EVNTI_MASK | CNTKCTL_EVNTDIR);
+	control |= CNTKCTL_EVNTEN | (kEventStreamBit << CNTKCTL_EVNTI_SHIFT);
+	WRITE_SPECIALREG(CNTKCTL_EL1, control);
+	arm64_isb();
+}
+
+
+/*!	A write to the timer's registers is only certain to reach the timer at the
+	next context synchronization (as Linux's arch_timer_reg_write_cp15()):
+	without it, a timer armed outside an interrupt could stay disabled until the
+	CPU happened to take another interrupt (seconds on an idle CPU).
+*/
+static inline void
+write_timer_control(uint64 control)
+{
+	WRITE_SPECIALREG(CNTV_CTL_EL0, control);
+	arm64_isb();
+}
+
 
 void
 arch_timer_set_hardware_timer(bigtime_t timeout)
@@ -33,21 +66,21 @@ arch_timer_set_hardware_timer(bigtime_t timeout)
 		timeout = sTimerMaxInterval;
 
 	WRITE_SPECIALREG(CNTV_TVAL_EL0, timeout * sTimerTicksUS);
-	WRITE_SPECIALREG(CNTV_CTL_EL0, TIMER_ENABLE);
+	write_timer_control(TIMER_ENABLE);
 }
 
 
 void
 arch_timer_clear_hardware_timer()
 {
-	WRITE_SPECIALREG(CNTV_CTL_EL0, TIMER_DISABLED);
+	write_timer_control(TIMER_DISABLED);
 }
 
 
 int32
 arch_timer_interrupt(void *data)
 {
-	WRITE_SPECIALREG(CNTV_CTL_EL0, TIMER_DISABLED);
+	write_timer_control(TIMER_DISABLED);
 	return timer_interrupt();
 }
 
@@ -74,6 +107,7 @@ arch_init_timer(kernel_args *args)
 	sTimerMaxInterval = INT32_MAX / sTimerTicksUS;
 
 	WRITE_SPECIALREG(CNTV_CTL_EL0, TIMER_DISABLED);
+	enable_event_stream();
 	install_io_interrupt_handler(TIMER_IRQ, &arch_timer_interrupt, NULL, 0);
 
 	return B_OK;
@@ -89,6 +123,7 @@ arm64_timer_per_cpu_init()
 		return B_ERROR;
 
 	WRITE_SPECIALREG(CNTV_CTL_EL0, TIMER_DISABLED);
+	enable_event_stream();
 	ic->EnableInterrupt(TIMER_IRQ);
 
 	return B_OK;

@@ -35,63 +35,6 @@ static volatile uint32_t* sGicdRegs;
 static volatile uint32_t* sGiccRegs;
 
 
-// TODO: work-around for a Raspberry Pi 4 stall, root cause open: after an
-// interrupt of SPI 158 (the SD controllers'), the distributor shows it active
-// and pending while CPU 0 has taken its end of interrupt, and delivers CPU 0
-// nothing anymore, its timer included, until another CPU writes the GIC (an
-// SGI). Unaided, a boot stopped for over a minute; under SD load it happens
-// about once a minute. Linux's GIC setup (priorities, active state, bypass)
-// and its split priority drop/deactivation did not change the rate.
-// Every CPU runs a periodic check of the others: one whose next timer event is
-// overdue and that took no interrupt since is sent an SGI, which gets it going
-// again within microseconds. The period bounds a stall.
-extern bigtime_t timer_debug_next_event(int32 cpu);
-
-static const bigtime_t kWatchdogPeriod = 25000;
-static int32 sRecoveries;
-static bigtime_t sLastInterrupt[SMP_MAX_CPUS];
-static uint32 sLastIrq[SMP_MAX_CPUS];
-static bigtime_t sNudged[SMP_MAX_CPUS];
-static int32 sReports[SMP_MAX_CPUS];
-static timer sWatchdog[SMP_MAX_CPUS];
-static int32 sWatchdogStarted[SMP_MAX_CPUS];
-
-
-static int32
-gic_watchdog(timer* /*unused*/)
-{
-	const int32 self = smp_get_current_cpu();
-	const bigtime_t now = system_time();
-	for (int32 cpu = 0; cpu < smp_get_num_cpus(); cpu++) {
-		if (cpu == self)
-			continue;
-
-		const bigtime_t nudged = atomic_get64(&sNudged[cpu]);
-		if (nudged != 0 && sLastInterrupt[cpu] > nudged
-			&& atomic_test_and_set64(&sNudged[cpu], 0, nudged) == nudged) {
-			sReports[cpu] = 0;
-		}
-
-		const bigtime_t due = timer_debug_next_event(cpu);
-		if (due < 0 || now - due < kWatchdogPeriod
-			|| sLastInterrupt[cpu] > due) {
-			continue;
-		}
-
-		// (short: the serial output is synchronous, in a timer interrupt)
-		if (atomic_add(&sReports[cpu], 1) == 0) {
-			dprintf("gic watchdog: CPU %" B_PRId32 " stalled %" B_PRId64
-				" us, last interrupt %" B_PRIu32 " (%" B_PRId32 ")\n", cpu,
-				now - due, sLastIrq[cpu], atomic_add(&sRecoveries, 1) + 1);
-		}
-		atomic_test_and_set64(&sNudged[cpu], now, 0);
-		// SGI 0 (an empty ICI) to that CPU's interface (identity on the Pi)
-		sGicdRegs[GICD_REG_SGIR] = (1 << cpu) << 16;
-	}
-	return B_HANDLED_INTERRUPT;
-}
-
-
 /*!	The current CPU's view of the GIC: its banked SGI/PPI state, the
 	priority it runs at (0xff = none active) and its highest pending
 	interrupt.
@@ -255,17 +198,6 @@ void GICv2InterruptController::HandleInterrupt()
 {
 	uint32_t iar = fGiccRegs[GICC_REG_IAR];
 	uint32_t irqnr = iar & 0x3FF;
-
-	const int32 cpu = smp_get_current_cpu();
-	if (irqnr < 1020) {
-		sLastInterrupt[cpu] = system_time();
-		sLastIrq[cpu] = irqnr;
-		if (sWatchdogStarted[cpu] == 0 && sLastInterrupt[cpu] > 10000000) {
-			sWatchdogStarted[cpu] = 1;
-			add_timer(&sWatchdog[cpu], &gic_watchdog, kWatchdogPeriod,
-				B_PERIODIC_TIMER);
-		}
-	}
 
 	if ((irqnr == 1022) || (irqnr == 1023)) {
 		dprintf("spurious interrupt (%d)\n", irqnr);

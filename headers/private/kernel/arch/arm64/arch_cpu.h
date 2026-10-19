@@ -145,6 +145,30 @@ static inline void arch_cpu_pause(void)
 }
 
 
+/*!	Waits while *variable != test, for cpu_wait(): sleeps until another CPU
+	writes the variable's cache line (the exclusive monitor's event, as Linux's
+	__cmpwait()), or the generic timer's event stream wakes it (every ~150 us,
+	arm64_timer_per_cpu_init()). Unlike a polling loop, this leaves the line
+	alone: the polling loads of a waiter could make another CPU's
+	load/store-exclusive pair on the same line (atomics without LSE, as on the
+	Cortex-A72) fail for as long as they kept coming, with both CPUs' interrupts
+	disabled.
+*/
+static inline void arch_cpu_wait(int32* variable, int32 test)
+{
+	uint32 value;
+	__asm__ __volatile__(
+		"	sevl\n"
+		"	wfe\n"
+		"	ldxr	%w0, %1\n"
+		"	cmp		%w0, %w2\n"
+		"	b.eq	1f\n"
+		"	wfe\n"
+		"1:\n"
+		: "=&r" (value) : "Q" (*variable), "r" (test) : "memory", "cc");
+}
+
+
 static inline void arch_cpu_idle(void)
 {
 	// Complete the outstanding writes first (as Linux's cpu_do_idle): the

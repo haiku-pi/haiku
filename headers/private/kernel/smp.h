@@ -233,6 +233,9 @@ CPUSet::IsEmpty() const
 static inline bool
 try_acquire_spinlock_inline(spinlock* lock)
 {
+	// test first: a failing exchange still writes the lock's cache line
+	if (atomic_get(&lock->lock) != 0)
+		return false;
 	return atomic_get_and_set(&lock->lock, 1) == 0;
 }
 

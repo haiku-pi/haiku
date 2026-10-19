@@ -264,7 +264,8 @@ try_acquire_spinlock(spinlock* lock)
 	}
 #endif
 
-	if (atomic_get_and_set(&lock->lock, 1) != 0) {
+	// test first: a failing exchange still writes the lock's cache line
+	if (atomic_get(&lock->lock) != 0 || atomic_get_and_set(&lock->lock, 1) != 0) {
 #if B_DEBUG_SPINLOCK_CONTENTION
 		atomic_add(&lock->failed_try_acquire, 1);
 #endif
