@@ -36,6 +36,7 @@
 #define GICC_REG_RPR		5
 #define GICC_REG_HPPIR		6
 
+#define GICC_REG_APR		52
 #define GICC_REG_IIDR		63
 #define GICC_REG_DIR		1024
 

@@ -19,6 +19,14 @@
 
 #define ICI_IRQ 0
 
+// the priority of every interrupt (the same, so that none preempts another),
+// and the mask that lets them all through (as Linux: GICD_INT_DEF_PRI,
+// GICC_INT_PRI_THRESHOLD)
+static const uint32 kInterruptPriority = 0xa0;
+static const uint32 kPriorityMask = 0xf0;
+// GICC_CTLR: the bypass disable bits, which the firmware sets up
+static const uint32 kGiccBypassDisableMask = 0x1e0;
+
 #define GICC_REG_RPR	5
 #define GICC_REG_HPPIR	6
 
@@ -27,17 +35,20 @@ static volatile uint32_t* sGicdRegs;
 static volatile uint32_t* sGiccRegs;
 
 
-// TODO: work-around for a Raspberry Pi 4 boot freeze, root cause open: an SPI
-// (seen: 158, the SD controllers') stays active on CPU 0 after its end of
-// interrupt, so that CPU takes nothing of that priority anymore, its timer
-// included, while it sleeps; any other CPU's access to the GIC releases it
-// (unaided, the boot stopped for over a minute in about half of all boots).
+// TODO: work-around for a Raspberry Pi 4 stall, root cause open: after an
+// interrupt of SPI 158 (the SD controllers'), the distributor shows it active
+// and pending while CPU 0 has taken its end of interrupt, and delivers CPU 0
+// nothing anymore, its timer included, until another CPU writes the GIC (an
+// SGI). Unaided, a boot stopped for over a minute; under SD load it happens
+// about once a minute. Linux's GIC setup (priorities, active state, bypass)
+// and its split priority drop/deactivation did not change the rate.
 // Every CPU runs a periodic check of the others: one whose next timer event is
-// overdue and that took no interrupt since is reported and sent an SGI, which
-// gets it going again within microseconds.
+// overdue and that took no interrupt since is sent an SGI, which gets it going
+// again within microseconds. The period bounds a stall.
 extern bigtime_t timer_debug_next_event(int32 cpu);
 
-static const bigtime_t kWatchdogPeriod = 250000;
+static const bigtime_t kWatchdogPeriod = 25000;
+static int32 sRecoveries;
 static bigtime_t sLastInterrupt[SMP_MAX_CPUS];
 static uint32 sLastIrq[SMP_MAX_CPUS];
 static bigtime_t sNudged[SMP_MAX_CPUS];
@@ -58,9 +69,6 @@ gic_watchdog(timer* /*unused*/)
 		const bigtime_t nudged = atomic_get64(&sNudged[cpu]);
 		if (nudged != 0 && sLastInterrupt[cpu] > nudged
 			&& atomic_test_and_set64(&sNudged[cpu], 0, nudged) == nudged) {
-			dprintf("gic watchdog: CPU %" B_PRId32 " took interrupt %" B_PRIu32
-				" %" B_PRId64 " us after the SGI\n", cpu, sLastIrq[cpu],
-				sLastInterrupt[cpu] - nudged);
 			sReports[cpu] = 0;
 		}
 
@@ -70,17 +78,11 @@ gic_watchdog(timer* /*unused*/)
 			continue;
 		}
 
-		if (atomic_add(&sReports[cpu], 1) < 4) {
-			dprintf("gic watchdog (CPU %" B_PRId32 "): CPU %" B_PRId32 " has a "
-				"timer event %" B_PRId64 " us overdue, last interrupt %" B_PRIu32
-				" %" B_PRId64 " us ago; SPI pending %#" B_PRIx32 " %#" B_PRIx32
-				" %#" B_PRIx32 " %#" B_PRIx32 ", active %#" B_PRIx32 " %#"
-				B_PRIx32 " %#" B_PRIx32 " %#" B_PRIx32 "; sending it an SGI\n",
-				self, cpu, now - due, sLastIrq[cpu], now - sLastInterrupt[cpu],
-				sGicdRegs[GICD_REG_ISPENDR + 1], sGicdRegs[GICD_REG_ISPENDR + 2],
-				sGicdRegs[GICD_REG_ISPENDR + 3], sGicdRegs[GICD_REG_ISPENDR + 4],
-				sGicdRegs[GICD_REG_ISACTIVER + 1], sGicdRegs[GICD_REG_ISACTIVER + 2],
-				sGicdRegs[GICD_REG_ISACTIVER + 3], sGicdRegs[GICD_REG_ISACTIVER + 4]);
+		// (short: the serial output is synchronous, in a timer interrupt)
+		if (atomic_add(&sReports[cpu], 1) == 0) {
+			dprintf("gic watchdog: CPU %" B_PRId32 " stalled %" B_PRId64
+				" us, last interrupt %" B_PRIu32 " (%" B_PRId32 ")\n", cpu,
+				now - due, sLastIrq[cpu], atomic_add(&sRecoveries, 1) + 1);
 		}
 		atomic_test_and_set64(&sNudged[cpu], now, 0);
 		// SGI 0 (an empty ICI) to that CPU's interface (identity on the Pi)
@@ -155,10 +157,15 @@ GICv2InterruptController::GICv2InterruptController(phys_addr_t gicd_addr, phys_a
 	reserve_io_interrupt_vectors(32 * lineRegs, 0, INTERRUPT_TYPE_IRQ);
 
 	for (uint32 i = 1; i < lineRegs; i++) { // 1 bit per IRQ
-		// mask and clear state before enabling
+		// mask and clear state before enabling: an interrupt the firmware
+		// left active would never be delivered again
 		fGicdRegs[GICD_REG_ICENABLER + i] = 0xffffffff;
 		fGicdRegs[GICD_REG_ICPENDR + i] = 0xffffffff;
+		fGicdRegs[GICD_REG_ICACTIVER + i] = 0xffffffff;
 	}
+
+	for (uint32 i = 8; i < lineRegs * 8; i++) // 8 bits per IRQ
+		fGicdRegs[GICD_REG_IPRIORITYR + i] = kInterruptPriority * 0x01010101;
 
 	// route SPIs to the boot CPU
 	// TODO: don't assume boot CPU is CPU 0
@@ -195,14 +202,21 @@ GICv2InterruptController::PerCpuInit()
 	// configure IRQs 0-31 (SGIs/PPIs) which are banked per CPU interface
 	fGicdRegs[GICD_REG_ICENABLER] = 0xffffffff;
 	fGicdRegs[GICD_REG_ICPENDR] = 0xffffffff;
+	fGicdRegs[GICD_REG_ICACTIVER] = 0xffffffff;
+	for (uint32 i = 0; i < 8; i++)
+		fGicdRegs[GICD_REG_IPRIORITYR + i] = kInterruptPriority * 0x01010101;
 
-	// disable priority masking
-	fGiccRegs[GICC_REG_PMR] = 0xff;
+	// no active priorities left from before (as Linux's gic_cpu_if_up())
+	for (uint32 i = 0; i < 4; i++)
+		fGiccRegs[GICC_REG_APR + i] = 0;
+
+	fGiccRegs[GICC_REG_PMR] = kPriorityMask;
 	// disable interrupt preemption
 	fGiccRegs[GICC_REG_BPR] = 0x07;
 
-	// enable GICC
-	fGiccRegs[GICC_REG_CTLR] = 0x01;
+	// enable GICC, keeping the firmware's bypass settings
+	fGiccRegs[GICC_REG_CTLR]
+		= (fGiccRegs[GICC_REG_CTLR] & kGiccBypassDisableMask) | 0x01;
 
 	EnableInterrupt(ICI_IRQ);
 
@@ -213,14 +227,9 @@ GICv2InterruptController::PerCpuInit()
 void
 GICv2InterruptController::EnableInterrupt(int32 irq)
 {
-	uint32_t ena_reg = GICD_REG_ISENABLER + irq / 32;
-	uint32_t ena_val = 1 << (irq % 32);
-	fGicdRegs[ena_reg] = ena_val;
-
-	uint32_t prio_reg = GICD_REG_IPRIORITYR + irq / 4;
-	uint32_t prio_val = fGicdRegs[prio_reg];
-	prio_val |= 0x80 << (irq % 4 * 8);
-	fGicdRegs[prio_reg] = prio_val;
+	// (the priorities were set when the GIC was configured: changing that
+	// of a neighbour that is active or pending is unpredictable)
+	fGicdRegs[GICD_REG_ISENABLER + irq / 32] = 1 << (irq % 32);
 }
 
 
