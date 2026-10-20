@@ -123,9 +123,18 @@ static RemoteDiskDevice* sDevices;
 static RemoteDiskDevice*
 device_for_name(const char* name)
 {
+	// devfs opens a partition of the disk ("disk/virtual/remote_disk/0/1")
+	// under its own name: everything up to the last '/' names the disk
+	const char* leaf = strrchr(name, '/');
+	if (leaf == NULL)
+		return NULL;
+	size_t directoryLength = leaf + 1 - name;
+
 	for (int i = 0; i < MAX_REMOTE_DISKS; i++) {
-		if (strcmp(name, kPublishedNames[i]) == 0)
+		if (strncmp(name, kPublishedNames[i], directoryLength) == 0
+			&& strchr(kPublishedNames[i] + directoryLength, '/') == NULL) {
 			return sDevices + i;
+		}
 	}
 	return NULL;
 }
@@ -166,7 +175,7 @@ remote_disk_close(void* cookie)
 static status_t
 remote_disk_read(void* cookie, off_t position, void* buffer, size_t* numBytes)
 {
-	TRACE(("remote_disk_read(%p, %lld, %p, %lu)\n", cookie, position, buffer,
+	TRACE(("remote_disk_read(%p, %" B_PRIdOFF ", %p, %zu)\n", cookie, position, buffer,
 		*numBytes));
 
 	RemoteDiskDevice* device = (RemoteDiskDevice*)cookie;
@@ -180,7 +189,7 @@ remote_disk_read(void* cookie, off_t position, void* buffer, size_t* numBytes)
 	}
 
 	*numBytes = bytesRead;
-	TRACE(("remote_disk_read() done: %ld\n", bytesRead));
+	TRACE(("remote_disk_read() done: %zd\n", bytesRead));
 	return B_OK;
 }
 
@@ -189,7 +198,7 @@ static status_t
 remote_disk_write(void* cookie, off_t position, const void* buffer,
 	size_t* numBytes)
 {
-	TRACE(("remote_disk_write(%p, %lld, %p, %lu)\n", cookie, position, buffer,
+	TRACE(("remote_disk_write(%p, %" B_PRIdOFF ", %p, %zu)\n", cookie, position, buffer,
 		*numBytes));
 
 	RemoteDiskDevice* device = (RemoteDiskDevice*)cookie;
@@ -199,12 +208,12 @@ remote_disk_write(void* cookie, off_t position, const void* buffer,
 		*numBytes);
 	if (bytesWritten < 0) {
 		*numBytes = 0;
-		TRACE(("remote_disk_write() failed: %s\n", strerror(bytesRead)));
+		TRACE(("remote_disk_write() failed: %s\n", strerror(bytesWritten)));
 		return bytesWritten;
 	}
 
 	*numBytes = bytesWritten;
-	TRACE(("remote_disk_written() done: %ld\n", bytesWritten));
+	TRACE(("remote_disk_written() done: %zd\n", bytesWritten));
 	return B_OK;
 }
 
@@ -212,7 +221,7 @@ remote_disk_write(void* cookie, off_t position, const void* buffer,
 static status_t
 remote_disk_control(void* cookie, uint32 op, void* arg, size_t len)
 {
-	TRACE(("remote_disk_control(%p, %lu, %p, %lu)\n", cookie, op, arg, len));
+	TRACE(("remote_disk_control(%p, %" B_PRIu32 ", %p, %zu)\n", cookie, op, arg, len));
 
 	RemoteDiskDevice* device = (RemoteDiskDevice*)cookie;
 	DeviceLocker locker(device);
@@ -290,11 +299,11 @@ remote_disk_control(void* cookie, uint32 op, void* arg, size_t len)
 		case B_EJECT_DEVICE:
 		case B_LOAD_MEDIA:
 		case B_GET_NEXT_OPEN_DEVICE:
-			TRACE(("remote_disk: another ioctl: %lx (%lu)\n", op, op));
+			TRACE(("remote_disk: another ioctl: %" B_PRIx32 " (%" B_PRIu32 ")\n", op, op));
 			return B_BAD_VALUE;
 
 		default:
-			TRACE(("remote_disk: unknown ioctl: %lx (%lu)\n", op, op));
+			TRACE(("remote_disk: unknown ioctl: %" B_PRIx32 " (%" B_PRIu32 ")\n", op, op));
 			return B_BAD_VALUE;
 	}
 }
