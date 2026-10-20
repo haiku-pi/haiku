@@ -9,8 +9,6 @@ RemotePackageRepository HaikuPorts
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
 	:
 	# architecture "any" packages
-	# haiku-pi: makes the icu74 bootstrap package's data directory exist (scripts/make-icu-shim.sh)
-	icu74_bootstrap-74.1-1
 	# haiku-pi: makes the ncurses6 bootstrap package's terminfo directory exist (scripts/make-bootstrap-shim.sh)
 	ncurses6_bootstrap-6.6-1
 	ca_root_certificates-2025_12_02-1
@@ -52,9 +50,9 @@ RemotePackageRepository HaikuPorts
 	glu_devel-9.0.3-1
 	grep-3.11_bootstrap-1
 	gzip-1.9-1
-	icu74-74.1_bootstrap-1
-	icu74_devel-74.1_bootstrap-1
-	icu74_tools-74.1_bootstrap-1
+	# haiku-pi: ICU 74.1 with its data in libicudata (scripts/build-icu.sh; tools in the runtime package)
+	icu74-74.1-1
+	icu74_devel-74.1-1
 	less-668_bootstrap-1
 	libffi-3.4.6_bootstrap-1
 	libffi_devel-3.4.6_bootstrap-1
