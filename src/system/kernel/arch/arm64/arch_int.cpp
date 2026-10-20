@@ -281,7 +281,6 @@ do_sync_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
-	HeartbeatScope heartbeat(5, 0xff00ff);
 	// What a user thread gets for an exception that is not handled below
 	debug_exception_type exceptionType = B_GENERAL_PROTECTION_FAULT;
 	uint32 signalNumber = SIGILL;

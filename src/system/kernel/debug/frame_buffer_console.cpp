@@ -102,8 +102,7 @@ static uint32 sPalette30[] = {
 
 static struct console_info sConsole;
 
-// DIAGNOSTIC: the frame buffer mapped write-combining (the console's own mapping
-// is cacheable: a stopped CPU's last marks could stay in its cache)
+// DIAGNOSTIC: where the heartbeat marks go
 static addr_t sHeartbeatBase;
 static int32 sHeartbeatBytesPerRow;
 
@@ -479,18 +478,6 @@ frame_buffer_console_init(kernel_args* args)
 		args->frame_buffer.height, args->frame_buffer.depth,
 		args->frame_buffer.bytes_per_row);
 
-	if (args->frame_buffer.depth == 32) {
-		void* heartbeat;
-		if (map_physical_memory("frame buffer heartbeat",
-				args->frame_buffer.physical_buffer.start,
-				args->frame_buffer.bytes_per_row * 128,
-				B_ANY_KERNEL_ADDRESS,
-				B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_WRITE_COMBINING_MEMORY,
-				&heartbeat) >= 0) {
-			sHeartbeatBytesPerRow = args->frame_buffer.bytes_per_row;
-			sHeartbeatBase = (addr_t)heartbeat;
-		}
-	}
 	return B_OK;
 #else
 	return B_NO_INIT;
@@ -556,6 +543,27 @@ frame_buffer_console_init_post_vm(kernel_args* args)
 status_t
 frame_buffer_console_init_post_modules(kernel_args* args)
 {
+	if (args->frame_buffer.enabled && args->frame_buffer.depth == 32
+		&& sConsole.frame_buffer != 0) {
+		// DIAGNOSTIC: a mapping of our own of the frame buffer's first rows
+		// (the memory type the console's mapping has); each mark is also
+		// cleaned to memory, where the display engine reads it
+		void* heartbeat;
+		area_id area = map_physical_memory("frame buffer heartbeat",
+			args->frame_buffer.physical_buffer.start,
+			ROUNDUP(args->frame_buffer.bytes_per_row * 80, B_PAGE_SIZE),
+			B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA,
+			&heartbeat);
+		if (area >= 0) {
+			sHeartbeatBytesPerRow = args->frame_buffer.bytes_per_row;
+			sHeartbeatBase = (addr_t)heartbeat;
+		}
+		dprintf("heartbeat: area %" B_PRId32 " at %p (frame buffer %#"
+			B_PRIxPHYSADDR ", %" B_PRId32 " bytes per row)\n", area, heartbeat,
+			args->frame_buffer.physical_buffer.start,
+			(int32)args->frame_buffer.bytes_per_row);
+	}
+
 	if (sConsole.frame_buffer == 0)
 		return B_OK;
 
@@ -590,6 +598,7 @@ _user_frame_buffer_update(addr_t baseAddress, int32 width, int32 height,
 
 
 static const int32 kHeartbeatSize = 10;
+static int32 sHeartbeatBusy[4];
 static const int32 kHeartbeatPitch = 14;
 
 
@@ -601,6 +610,9 @@ heartbeat_fill(int32 x, int32 y, int32 size, uint32 color)
 		uint32* pixel = (uint32*)row;
 		for (int32 j = 0; j < size; j++)
 			pixel[j] = color;
+		// clean the row's cache lines to memory (64-byte lines)
+		for (addr_t line = row & ~(addr_t)63; line < row + size * 4; line += 64)
+			asm volatile("dc cvac, %0" :: "r"(line) : "memory");
 	}
 }
 
@@ -619,9 +631,13 @@ debug_heartbeat(int32 slot, uint32 color)
 	if (sHeartbeatBase == 0)
 		return;
 	int32 cpu = smp_get_current_cpu();
+	if (cpu < 0 || cpu > 3 || sHeartbeatBusy[cpu] != 0)
+		return;
+	sHeartbeatBusy[cpu] = 1;
 	heartbeat_fill(4 + slot * kHeartbeatPitch, 4 + cpu * kHeartbeatPitch,
 		kHeartbeatSize, color);
-	asm volatile("dsb st" ::: "memory");
+	sHeartbeatBusy[cpu] = 0;
+	asm volatile("dsb sy" ::: "memory");
 }
 
 
@@ -634,9 +650,13 @@ debug_heartbeat_bits(int32 slot, uint64 value, int32 bits)
 	if (sHeartbeatBase == 0)
 		return;
 	int32 cpu = smp_get_current_cpu();
+	if (cpu < 0 || cpu > 3 || sHeartbeatBusy[cpu] != 0)
+		return;
+	sHeartbeatBusy[cpu] = 1;
 	int32 x = 4 + slot * kHeartbeatPitch;
 	int32 y = 4 + cpu * kHeartbeatPitch + 2;
 	for (int32 i = bits - 1; i >= 0; i--, x += 5)
 		heartbeat_fill(x, y, 4, ((value >> i) & 1) != 0 ? 0xffffff : 0x000060);
-	asm volatile("dsb st" ::: "memory");
+	sHeartbeatBusy[cpu] = 0;
+	asm volatile("dsb sy" ::: "memory");
 }
