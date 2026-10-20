@@ -536,6 +536,15 @@ VMSAv8TranslationMap::GetMemoryAttr(uint32 attributes, uint32 memoryType, bool i
 	if ((attributes & B_WRITE_AREA) != 0 || (attributes & B_KERNEL_WRITE_AREA) != 0)
 		attr |= kAttrSWDBM; // Mark as writeable
 
+	// Kernel stacks begin accessed and writable (dirty): the exception entry
+	// code stores the iframe on the stack, and the first access to a stack
+	// page there (access flag fault, then write permission fault) would
+	// fault inside the exception vector, each nested exception storing to
+	// the same page again. They are never paged out; their accessed and dirty
+	// state does not matter.
+	if ((attributes & B_KERNEL_STACK_AREA) != 0 && (attr & kAttrSWDBM) != 0)
+		attr = (attr & ~kAttrAPReadOnly) | kAttrAF;
+
 	// When supported by hardware copy our SWDBM bit into DBM,
 	// so that kAttrAPReadOnly is cleared on write attempt automatically
 	// without going through fault handler.
