@@ -208,9 +208,16 @@ class InterruptScope {
 public:
 	InterruptScope(struct iframe *iframe) {
 		fThread = thread_get_current_thread();
-		if (fThread)
+		if (fThread) {
 			arm64_push_iframe(&fThread->arch_info.iframes, iframe);
-		else
+			// From user mode: the time since the thread last left the kernel
+			// was user time (the destructor's thread_at_kernel_exit() counts
+			// the time since this as kernel time), for every exception, not
+			// only system calls: else a thread interrupted by its timer had
+			// all its user time counted as kernel time
+			if ((iframe->spsr & PSR_M_MASK) == PSR_M_EL0t)
+				thread_at_kernel_entry(system_time());
+		} else
 			arm64_push_iframe(&gBootFrameStack, iframe);
 	}
 
@@ -394,7 +401,6 @@ do_sync_handler(iframe * frame)
 				}
 			}
 
-			thread_at_kernel_entry(system_time());
 			thread_get_current_thread()->arch_info.old_x0 = frame->x[0];
 
 			enable_interrupts();
