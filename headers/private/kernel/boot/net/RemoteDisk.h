@@ -35,6 +35,7 @@ public:
 
 private:
 	ssize_t _ReadFromPacket(off_t &pos, uint8 *&buffer, size_t &bufferSize);
+	ssize_t _ReadPipelined(off_t pos, uint8 *buffer, size_t bufferSize);
 	
 	static status_t _SendRequest(UDPSocket *socket, ip_addr_t serverAddress,
 		uint16 serverPort, remote_disk_header *request, size_t size,
