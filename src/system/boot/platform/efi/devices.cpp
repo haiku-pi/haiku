@@ -262,7 +262,9 @@ platform_register_boot_device(Node *device, disk_identifier* defaultDiskID)
 			|| gBootParams.AddInt32("server IP", remoteDisk->ServerIPAddress())
 				!= B_OK
 			|| gBootParams.AddInt32("server port", remoteDisk->ServerPort())
-				!= B_OK) {
+				!= B_OK
+			|| (gNetBootNetMask != 0
+				&& gBootParams.AddInt32("net mask", gNetBootNetMask) != B_OK)) {
 			return B_NO_MEMORY;
 		}
 	} else {

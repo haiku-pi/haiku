@@ -51,5 +51,7 @@ extern const efi_system_table		*kSystemTable;
 extern const efi_boot_services		*kBootServices;
 extern const efi_runtime_services	*kRuntimeServices;
 extern efi_handle kImage;
+extern uint32_t gNetBootNetMask;
+	// from the "ip=" load option, 0 if not given
 
 #endif	/* EFI_PLATFORM_H */

@@ -25,6 +25,8 @@
 #include <efi/protocol/loaded-image.h>
 
 
+uint32_t gNetBootNetMask = 0;
+
 static efi_guid sNetworkProtocolGUID = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
 static efi_guid sLoadedImageProtocolGUID = EFI_LOADED_IMAGE_PROTOCOL_GUID;
 
@@ -176,10 +178,9 @@ EFIEthernetInterface::Init()
 			if (*ptr == '=') {
 				TRACE("Key at %ld: %s\n", ptr - base, base);
 				// Found a key-value separator, see if it's a known option
-				if (ptr - base != 2)
-					continue;
-
-				if (strncmp(base, "ip", 2) == 0) {
+				// (any other key is skipped: a "continue" here never got past
+				// its '=')
+				if (ptr - base == 2 && strncmp(base, "ip", 2) == 0) {
 					TRACE("Found ip configuration in command line\n");
 					break;
 				}
@@ -206,6 +207,17 @@ EFIEthernetInterface::Init()
 		TRACE("Found IP address from load options: %s\n", ptr);
 		ip_addr_t address = ip_parse_address(ptr);
 		SetIPAddress(address);
+
+		// <client-ip>:<server-ip>:<gw-ip>:<netmask>:...: the net mask for the
+		// kernel, if given (otherwise it picks one by the address' class)
+		const char* field = ptr;
+		for (int i = 0; i < 3 && field != NULL; i++) {
+			field = strchr(field, ':');
+			if (field != NULL)
+				field++;
+		}
+		if (field != NULL && *field >= '0' && *field <= '9')
+			gNetBootNetMask = ip_parse_address(field);
 	}
 
 #if 0
