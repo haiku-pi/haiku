@@ -1,5 +1,5 @@
 # haiku-pi: bzip2, ffmpeg6, fluidlite, glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip,
-# zstd and the NetSurf and WebKit blocks below (with their _devel, and zstd_source) are ours, built
+# zstd and the NetSurf, CPython and WebKit blocks below (with their _devel, and zstd_source) are ours, built
 # by the coordination repository (scripts/build-packages.sh) and staged in download/; a build needs
 # -sHAIKU_NO_DOWNLOADS=1, as Haiku's servers do not have them (scripts/fetch-build-packages.sh
 # fetches upstream's own). The "any" packages without _bootstrap are the x86_64 repository's
@@ -114,6 +114,9 @@ RemotePackageRepository HaikuPorts
 	netsurf-3.11-1
 	openssl3-3.5.9-1
 	openssl3_devel-3.5.9-1
+	# haiku-pi: CPython (scripts/build-python.sh)
+	python3.14-3.14.8-1
+	python3.14_devel-3.14.8-1
 	# haiku-pi: HaikuWebKit (WebPositive) and its dependencies (scripts/build-webkit.sh)
 	brotli-1.2.0-1
 	brotli_devel-1.2.0-1
