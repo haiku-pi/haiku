@@ -1247,6 +1247,24 @@ SdhciBus::HandleInterrupt()
 
 	TRACE("interrupt function called %x\n", intmask);
 
+	// An interrupt that keeps coming back faster than anything could service
+	// it (a level nobody clears) would starve its CPU: report it once and stop
+	// its signals, so that the system stays alive to show it.
+	const bigtime_t now = system_time();
+	if (now - fStormWindowStart > 100000) {
+		fStormWindowStart = now;
+		fStormCount = 0;
+	}
+	if (++fStormCount > 20000) {
+		dprintf("sdhci: interrupt storm (status %#" B_PRIx32 ", signals %#"
+			B_PRIx32 ", present state %#" B_PRIx32 "): masking it\n", intmask,
+			fRegisters->interrupt_signal_enable,
+			fRegisters->present_state.Bits());
+		fRegisters->interrupt_signal_enable = 0;
+		fStormCount = 0;
+		return B_HANDLED_INTERRUPT;
+	}
+
 	// handling card presence interrupts
 	if ((intmask & SDHCI_INT_CARD_REM) != 0) {
 		// We can get spurious interrupts as the card is inserted or removed,

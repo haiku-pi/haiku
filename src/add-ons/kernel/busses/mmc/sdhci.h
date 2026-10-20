@@ -96,6 +96,8 @@ class SdhciBus {
 	private:
 			struct registers*	fRegisters;
 			uint32				fCommandResult;
+			bigtime_t			fStormWindowStart = 0;
+			int32				fStormCount = 0;
 			uint8				fIrq;
 			ConditionVariable	fInterruptNotifier;
 			sem_id				fScanSemaphore;
