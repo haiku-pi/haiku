@@ -62,11 +62,52 @@
 
 #define MSG_ALLOCATE_PER_CPU		(4)
 
-// These macros define the number of unsuccessful iterations in
-// acquire_spinlock() and acquire_spinlock_nocheck() after which the functions
-// panic(), assuming a deadlock.
-#define SPINLOCK_DEADLOCK_COUNT				100000000
-#define SPINLOCK_DEADLOCK_COUNT_NO_CHECK	2000000000
+// How long the acquire_*spinlock*() functions wait before they panic(),
+// assuming a deadlock, and how long a synchronous ICI may stay unprocessed.
+// A time, not a number of iterations: cpu_wait() may sleep until the lock's
+// cache line changes or for a while (WFE on arm64), so an iteration takes
+// from nanoseconds to a fraction of a millisecond.
+#define SPINLOCK_DEADLOCK_TIMEOUT			(5 * 1000000LL)
+#define SPINLOCK_DEADLOCK_TIMEOUT_NO_CHECK	(100 * 1000000LL)
+#define ICI_DEADLOCK_TIMEOUT				(10 * 1000000LL)
+
+
+/*!	Measures how long a CPU has waited for something: Expired() is called once
+	per failed attempt, and reads the clock only every 1024 attempts. A gap of
+	more than a second between two readings (the CPU halted in the kernel
+	debugger meanwhile) starts the measurement over.
+*/
+class DeadlockTimer {
+public:
+	DeadlockTimer()
+		:
+		fCount(0),
+		fStart(0),
+		fLast(0)
+	{
+	}
+
+	bool Expired(bigtime_t timeout)
+	{
+		if ((++fCount & 1023) != 0)
+			return false;
+
+		const bigtime_t now = system_time();
+		if (fStart == 0 || now - fLast > 1000000)
+			fStart = now;
+		fLast = now;
+		if (now - fStart < timeout)
+			return false;
+
+		fStart = now;
+		return true;
+	}
+
+private:
+	uint32		fCount;
+	bigtime_t	fStart;
+	bigtime_t	fLast;
+};
 
 
 struct smp_msg {
@@ -295,14 +336,13 @@ acquire_spinlock(spinlock* lock)
 		const bigtime_t start = system_time();
 #endif
 		int currentCPU = smp_get_current_cpu();
+		DeadlockTimer deadlockTimer;
 		while (1) {
-			uint32 count = 0;
 			while (lock->lock != 0) {
-				if (++count == SPINLOCK_DEADLOCK_COUNT) {
+				if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT)) {
 					panic("acquire_spinlock(): Failed to acquire spinlock %p "
 						"for a long time (value: %" B_PRIx32 ")", lock,
 						lock->lock);
-					count = 0;
 				}
 
 				process_all_pending_ici(currentCPU);
@@ -382,17 +422,16 @@ try_acquire_write_spinlock(rw_spinlock* lock)
 void
 acquire_write_spinlock(rw_spinlock* lock)
 {
-	uint32 count = 0;
+	DeadlockTimer deadlockTimer;
 	int32 currentCPU = smp_get_current_cpu();
 	while (true) {
 		if (try_acquire_write_spinlock(lock))
 			break;
 
 		while (lock->lock != 0) {
-			if (++count == SPINLOCK_DEADLOCK_COUNT) {
+			if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT)) {
 				panic("acquire_write_spinlock(): Failed to acquire spinlock %p "
 					"for a long time!", lock);
-				count = 0;
 			}
 
 			process_all_pending_ici(currentCPU);
@@ -405,16 +444,15 @@ acquire_write_spinlock(rw_spinlock* lock)
 static void
 acquire_write_spinlock_nocheck(rw_spinlock* lock)
 {
-	uint32 count = 0;
+	DeadlockTimer deadlockTimer;
 	while (true) {
 		if (try_acquire_write_spinlock(lock))
 			break;
 
 		while (lock->lock != 0) {
-			if (++count == SPINLOCK_DEADLOCK_COUNT_NO_CHECK) {
+			if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT_NO_CHECK)) {
 				panic("acquire_write_spinlock(): Failed to acquire spinlock %p "
 					"for a long time!", lock);
-				count = 0;
 			}
 
 			cpu_wait(&lock->lock, 0);
@@ -428,16 +466,15 @@ acquire_write_spinlock_nocheck(rw_spinlock* lock)
 static void
 acquire_write_spinlock_cpu(int32 currentCPU, rw_spinlock* lock)
 {
-	uint32 count = 0;
+	DeadlockTimer deadlockTimer;
 	while (true) {
 		if (try_acquire_write_spinlock(lock))
 			break;
 
 		while (lock->lock != 0) {
-			if (++count == SPINLOCK_DEADLOCK_COUNT) {
+			if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT)) {
 				panic("acquire_write_spinlock(): Failed to acquire spinlock %p "
 					"for a long time!", lock);
-				count = 0;
 			}
 
 			process_all_pending_ici(currentCPU);
@@ -485,17 +522,16 @@ try_acquire_read_spinlock(rw_spinlock* lock)
 void
 acquire_read_spinlock(rw_spinlock* lock)
 {
-	uint32 count = 0;
+	DeadlockTimer deadlockTimer;
 	int currentCPU = smp_get_current_cpu();
 	while (1) {
 		if (try_acquire_read_spinlock(lock))
 			break;
 
 		while ((lock->lock & (1u << 31)) != 0) {
-			if (++count == SPINLOCK_DEADLOCK_COUNT) {
+			if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT)) {
 				panic("acquire_read_spinlock(): Failed to acquire spinlock %p "
 					"for a long time!", lock);
-				count = 0;
 			}
 
 			process_all_pending_ici(currentCPU);
@@ -508,16 +544,15 @@ acquire_read_spinlock(rw_spinlock* lock)
 static void
 acquire_read_spinlock_nocheck(rw_spinlock* lock)
 {
-	uint32 count = 0;
+	DeadlockTimer deadlockTimer;
 	while (1) {
 		if (try_acquire_read_spinlock(lock))
 			break;
 
 		while ((lock->lock & (1u << 31)) != 0) {
-			if (++count == SPINLOCK_DEADLOCK_COUNT_NO_CHECK) {
+			if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT_NO_CHECK)) {
 				panic("acquire_read_spinlock(): Failed to acquire spinlock %p "
 					"for a long time!", lock);
-				count = 0;
 			}
 
 			cpu_wait(&lock->lock, 0);
@@ -978,7 +1013,13 @@ smp_send_ici(int32 targetCPU, int32 message, addr_t data, addr_t data2,
 		// wait for the other cpu to finish processing it
 		// the interrupt handler will ref count it to <0
 		// if the message is sync after it has removed it from the mailbox
+		DeadlockTimer deadlockTimer;
 		while (msg->done == 0) {
+			if (deadlockTimer.Expired(ICI_DEADLOCK_TIMEOUT)) {
+				panic("smp_send_ici(): CPU %" B_PRId32 " has not processed ICI "
+					"message %p (%" B_PRId32 ") for a long time", targetCPU,
+					msg, msg->message);
+			}
 			process_all_pending_ici(currentCPU);
 			cpu_wait(&msg->done, 1);
 		}
@@ -1049,7 +1090,13 @@ smp_broadcast_ici(int32 message, addr_t data, addr_t data2, addr_t data3,
 		// if the message is sync after it has removed it from the mailbox
 		TRACE("smp_broadcast_ici: waiting for ack\n");
 
+		DeadlockTimer deadlockTimer;
 		while (msg->done == 0) {
+			if (deadlockTimer.Expired(ICI_DEADLOCK_TIMEOUT)) {
+				panic("%s(): ICI message %p (%" B_PRId32 ") not processed for "
+					"a long time (see \"ici_message\")", __func__, msg,
+					msg->message);
+			}
 			process_all_pending_ici(currentCPU);
 			cpu_wait(&msg->done, 1);
 		}
@@ -1149,7 +1196,13 @@ smp_multicast_ici(const CPUSet& cpuMask, int32 message, addr_t data,
 		// wait for the other cpus to finish processing it
 		// the interrupt handler will ref count it to <0
 		// if the message is sync after it has removed it from the mailbox
+		DeadlockTimer deadlockTimer;
 		while (msg->done == 0) {
+			if (deadlockTimer.Expired(ICI_DEADLOCK_TIMEOUT)) {
+				panic("%s(): ICI message %p (%" B_PRId32 ") not processed for "
+					"a long time (see \"ici_message\")", __func__, msg,
+					msg->message);
+			}
 			process_all_pending_ici(currentCPU);
 			cpu_wait(&msg->done, 1);
 		}
@@ -1238,7 +1291,13 @@ smp_multicast_ici_interrupts_disabled(int32 currentCPU, const CPUSet& cpuMask,
 		TRACE("smp_multicast_ici_interrupts_disabled %" B_PRId32 ": waiting for "
 			"ack\n", currentCPU);
 
+		DeadlockTimer deadlockTimer;
 		while (msg->done == 0) {
+			if (deadlockTimer.Expired(ICI_DEADLOCK_TIMEOUT)) {
+				panic("%s(): ICI message %p (%" B_PRId32 ") not processed for "
+					"a long time (see \"ici_message\")", __func__, msg,
+					msg->message);
+			}
 			process_all_pending_ici(currentCPU);
 			cpu_wait(&msg->done, 1);
 		}
