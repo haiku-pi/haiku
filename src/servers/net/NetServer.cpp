@@ -76,6 +76,7 @@ private:
 			status_t			_RemoveInterface(const char* name);
 			status_t			_DisableInterface(const char* name);
 			bool				_TestForInterface(const char* name);
+			bool				_IsBootInterface(const char* device);
 			status_t			_ConfigureInterface(BMessage& interface);
 			status_t			_ConfigureResolver(
 									BMessage& resolverConfiguration);
@@ -412,6 +413,30 @@ NetServer::_TestForInterface(const char* name)
 			return true;
 	}
 
+	return false;
+}
+
+
+/*!	Returns whether the kernel configured \a device before we started: it
+	does so when it boots from the network (its boot volume on a remote disk),
+	and reconfiguring the interface would take the boot volume away.
+*/
+bool
+NetServer::_IsBootInterface(const char* device)
+{
+	BNetworkInterface interface(device);
+	if (!interface.Exists())
+		return false;
+
+	for (int32 i = 0; i < interface.CountAddresses(); i++) {
+		BNetworkInterfaceAddress address;
+		if (interface.GetAddressAt(i, address) == B_OK
+			&& address.Address().Family() == AF_INET
+			&& !address.Address().IsEmpty()
+			&& !address.Address().IsWildcard()) {
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -756,6 +781,12 @@ NetServer::_ConfigureDevices(const char* startPath,
 			continue;
 
 		if (S_ISBLK(stat.st_mode) || S_ISCHR(stat.st_mode)) {
+			if (_IsBootInterface(path.Path())) {
+				syslog(LOG_INFO, "%s: %s was configured for the network "
+					"boot, leaving it as it is\n", Name(), path.Path());
+				continue;
+			}
+
 			if (suggestedInterface != NULL
 				&& suggestedInterface->SetString("device", path.Path()) == B_OK
 				&& _ConfigureInterface(*suggestedInterface) == B_OK)
@@ -799,6 +830,11 @@ NetServer::_ConfigureInterfacesFromSettings(BStringList& devicesSet,
 				}
 				continue;
 			}
+		}
+
+		if (_IsBootInterface(device)) {
+			devicesSet.Add(device);
+			continue;
 		}
 
 		if (_ConfigureInterface(interface) == B_OK)
