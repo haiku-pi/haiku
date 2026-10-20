@@ -26,6 +26,7 @@
 
 
 uint32_t gNetBootNetMask = 0;
+uint32_t gNetBootGateway = 0;
 
 static efi_guid sNetworkProtocolGUID = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
 static efi_guid sLoadedImageProtocolGUID = EFI_LOADED_IMAGE_PROTOCOL_GUID;
@@ -208,16 +209,22 @@ EFIEthernetInterface::Init()
 		ip_addr_t address = ip_parse_address(ptr);
 		SetIPAddress(address);
 
-		// <client-ip>:<server-ip>:<gw-ip>:<netmask>:...: the net mask for the
-		// kernel, if given (otherwise it picks one by the address' class)
+		// <client-ip>:<server-ip>:<gw-ip>:<netmask>:...: the gateway and the
+		// net mask for the kernel, if given (otherwise it routes everything
+		// directly, and picks a mask by the address' class)
 		const char* field = ptr;
-		for (int i = 0; i < 3 && field != NULL; i++) {
+		for (int i = 1; i <= 3; i++) {
 			field = strchr(field, ':');
-			if (field != NULL)
-				field++;
+			if (field == NULL)
+				break;
+			field++;
+			if (*field < '0' || *field > '9')
+				continue;
+			if (i == 2)
+				gNetBootGateway = ip_parse_address(field);
+			else if (i == 3)
+				gNetBootNetMask = ip_parse_address(field);
 		}
-		if (field != NULL && *field >= '0' && *field <= '9')
-			gNetBootNetMask = ip_parse_address(field);
 	}
 
 #if 0

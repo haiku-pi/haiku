@@ -94,13 +94,15 @@ keep_network_modules_loaded()
 
 class NetStackInitializer {
 public:
-	NetStackInitializer(uint64 clientMAC, uint32 clientIP, uint32 netMask)
+	NetStackInitializer(uint64 clientMAC, uint32 clientIP, uint32 netMask,
+		uint32 gateway)
 		:
 		fSocket(-1),
 		fLinkSocket(-1),
 		fClientMAC(clientMAC),
 		fClientIP(clientIP),
 		fNetMask(netMask),
+		fGateway(gateway),
 		fFoundInterface(false),
 		fConfiguredInterface(false)
 	{
@@ -303,10 +305,20 @@ private:
 			}
 		}
 
-		// set default route; remove previous one, if any
+		// set default route (through the gateway, if there is one); remove
+		// previous one, if any
 		route_entry route;
 		memset(&route, 0, sizeof(route_entry));
 		route.flags = RTF_STATIC | RTF_DEFAULT;
+		sockaddr_in gateway;
+		if (fGateway != 0) {
+			memset(&gateway, 0, sizeof(gateway));
+			gateway.sin_family = AF_INET;
+			gateway.sin_len = sizeof(sockaddr_in);
+			gateway.sin_addr.s_addr = htonl(fGateway);
+			route.gateway = (sockaddr*)&gateway;
+			route.flags |= RTF_GATEWAY;
+		}
 
 		request.ifr_route = route;
 		ioctl(fSocket, SIOCDELRT, &request, sizeof(request));
@@ -354,6 +366,7 @@ private:
 	uint64				fClientMAC;
 	uint32				fClientIP;
 	uint32				fNetMask;
+	uint32				fGateway;
 	bool				fFoundInterface;
 	bool				fConfiguredInterface;
 };
@@ -403,7 +416,10 @@ NetBootMethod::Init()
 		}
 	}
 
-	NetStackInitializer initializer(clientMAC, clientIP, netMask);
+	uint32 gateway = 0;
+	fBootVolume.FindInt32("gateway IP", (int32*)&gateway);
+
+	NetStackInitializer initializer(clientMAC, clientIP, netMask, gateway);
 	status = initializer.Init();
 	if (status != B_OK)
 		return status;
