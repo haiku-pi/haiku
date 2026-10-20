@@ -4,6 +4,8 @@
  */
 
 
+#include <limits.h>
+
 #include <arch/debug.h>
 
 #include <arch_cpu.h>
@@ -366,18 +368,141 @@ arch_debug_stack_trace(void)
 }
 
 
+/*!	The iframe that \a fp points to, if it is one of \a thread's: the
+	exception entry code makes an iframe the frame record the handler's chain
+	starts from.
+*/
+static iframe*
+find_iframe(Thread* thread, addr_t fp)
+{
+	struct iframe_stack* frameStack
+		= thread != NULL ? &thread->arch_info.iframes : &gBootFrameStack;
+	for (int32 i = 0; i < frameStack->index; i++) {
+		if (fp == (addr_t)frameStack->frames[i])
+			return frameStack->frames[i];
+	}
+	return NULL;
+}
+
+
+static bool
+is_kernel_stack_address(Thread* thread, addr_t address)
+{
+	// Without a thread (early in the boot) no frame is on a user stack.
+	if (thread == NULL)
+		return IS_KERNEL_ADDRESS(address);
+
+	// (the whole frame record, two words)
+	return address >= thread->kernel_stack_base
+		&& address + 2 * sizeof(addr_t) <= thread->kernel_stack_top;
+}
+
+
+/*!	Reads the frame record at \a fp outside the kernel debugger: directly on
+	the kernel stack, with user_memcpy() on a user stack.
+*/
+static status_t
+get_next_frame_no_debugger(addr_t fp, addr_t* _next, addr_t* _ip,
+	bool onKernelStack)
+{
+	addr_t frame[2];
+		// [0] = saved fp, [1] = return address
+	if (onKernelStack) {
+		if (fp % sizeof(addr_t) != 0)
+			return B_BAD_ADDRESS;
+		memcpy(frame, (void*)fp, sizeof(frame));
+	} else if (!IS_USER_ADDRESS(fp)
+		|| user_memcpy(frame, (void*)fp, sizeof(frame)) != B_OK) {
+		return B_BAD_ADDRESS;
+	}
+
+	*_next = frame[0];
+	*_ip = frame[1];
+	return B_OK;
+}
+
+
 int32
 arch_get_stack_trace(addr_t* returnAddresses, int32 maxCount,
 	int32 skipIframes, int32 skipFrames, uint32 flags)
 {
-	return 0;
+	// Keep skipping normal stack frames until we've skipped the iframes we're
+	// supposed to skip.
+	if (skipIframes > 0)
+		skipFrames = INT_MAX;
+
+	Thread* thread = thread_get_current_thread();
+	int32 count = 0;
+	addr_t fp = arm64_get_fp();
+	bool onKernelStack = true;
+
+	if ((flags & (STACK_TRACE_KERNEL | STACK_TRACE_USER)) == STACK_TRACE_USER) {
+		// start at the iframe of the entry from user mode
+		if (thread == NULL || thread->arch_info.iframes.index == 0)
+			return 0;
+		iframe* frame = thread->arch_info.iframes.frames[0];
+		if ((frame->spsr & PSR_M_MASK) != PSR_M_EL0t)
+			return 0;
+		fp = (addr_t)frame;
+	}
+
+	while (fp != 0 && count < maxCount) {
+		onKernelStack = onKernelStack && is_kernel_stack_address(thread, fp);
+		if (!onKernelStack && (flags & STACK_TRACE_USER) == 0)
+			break;
+
+		addr_t ip;
+		addr_t next;
+		iframe* frame = onKernelStack ? find_iframe(thread, fp) : NULL;
+		if (frame != NULL) {
+			ip = frame->elr;
+			next = frame->fp;
+
+			if (skipIframes > 0) {
+				if (--skipIframes == 0)
+					skipFrames = 0;
+			}
+			if ((frame->spsr & PSR_M_MASK) == PSR_M_EL0t) {
+				// what follows is on the user stack
+				onKernelStack = false;
+				if ((flags & STACK_TRACE_USER) == 0)
+					break;
+			}
+		} else if (get_next_frame_no_debugger(fp, &next, &ip, onKernelStack)
+				!= B_OK) {
+			break;
+		}
+
+		if (ip == 0)
+			break;
+
+		if (skipFrames > 0)
+			skipFrames--;
+		else
+			returnAddresses[count++] = ip;
+
+		fp = next;
+	}
+
+	return count;
 }
 
 
+/*!	The PC the innermost interrupt (exception) interrupted, and whether that
+	was a system call.
+*/
 void*
 arch_debug_get_interrupt_pc(bool* _isSyscall)
 {
-	return NULL;
+	Thread* thread = thread_get_current_thread();
+	if (thread == NULL || thread->arch_info.iframes.index == 0)
+		return NULL;
+
+	iframe* frame
+		= thread->arch_info.iframes.frames[thread->arch_info.iframes.index - 1];
+	if (_isSyscall != NULL)
+		*_isSyscall = ESR_ELx_EXCEPTION(frame->esr) == EXCP_SVC64;
+	return (void*)frame->elr;
 }
 
 
