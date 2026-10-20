@@ -1062,6 +1062,11 @@ free_vnode(struct vnode* vnode, bool reenter)
 static status_t
 dec_vnode_ref_count(struct vnode* vnode, bool alwaysFree, bool reenter)
 {
+	// (without KDEBUG, GCC's -Wstringop-overflow takes some inlined caller's
+	// vnode for NULL)
+	if (vnode == NULL)
+		return B_BAD_VALUE;
+
 	ReadLocker locker(sVnodeLock);
 	AutoLocker<Vnode> nodeLocker(vnode);
 

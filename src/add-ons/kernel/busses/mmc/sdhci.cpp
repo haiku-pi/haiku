@@ -18,6 +18,7 @@
 #include <ACPI.h>
 #include "acpi.h"
 
+#include <cpu.h>
 #include <util/AutoLock.h>
 #include <vm/vm.h>
 
