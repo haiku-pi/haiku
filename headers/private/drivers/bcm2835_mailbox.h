@@ -73,6 +73,7 @@ typedef struct bcm2835_mailbox_module_info {
 #define BCM2835_CLOCK_ARM		3
 #define BCM2835_CLOCK_CORE		4
 #define BCM2835_CLOCK_V3D		5
+#define BCM2835_CLOCK_HEVC		11
 #define BCM2835_CLOCK_EMMC2		12
 
 // Power domain IDs for SET_DOMAIN_STATE

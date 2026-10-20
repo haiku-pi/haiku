@@ -1,0 +1,9 @@
+SubDir HAIKU_TOP src add-ons kernel drivers video rpivid ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+
+KernelAddon rpivid :
+	decode.cpp
+	rpivid.cpp
+	;

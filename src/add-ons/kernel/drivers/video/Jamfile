@@ -1,3 +1,4 @@
 SubDir HAIKU_TOP src add-ons kernel drivers video ; 
 
+SubInclude HAIKU_TOP src add-ons kernel drivers video rpivid ;
 SubInclude HAIKU_TOP src add-ons kernel drivers video usb_vision ;
