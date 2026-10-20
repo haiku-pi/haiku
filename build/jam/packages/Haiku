@@ -191,6 +191,7 @@ AddDriversToPackage bus :
 	;
 AddDriversToPackage disk virtual :
 	nbd
+	remote_disk@arm64
 	;
 AddDriversToPackage dvb :
 	cx23882
@@ -373,6 +374,10 @@ AddBootModuleSymlinksToPackage
 	virtio_mmio@arm,arm64,riscv64
 	virtio_pci
 	virtio_scsi
+	# haiku-pi: network boot from a remote disk (the EFI loader finds one when
+	# its load options have "ip="; the network modules below)
+	remote_disk@arm64
+	genet@arm64
 ;
 
 # add-ons
@@ -458,6 +463,16 @@ AddFilesToPackage add-ons kernel network ppp
 	: $(SYSTEM_NETWORK_PPP) ;
 AddFilesToPackage add-ons kernel network protocols
 	: $(SYSTEM_NETWORK_PROTOCOLS) ;
+# haiku-pi: the network for booting from a remote disk, all of it: the kernel
+# keeps it loaded then (vfs_net_boot.cpp), as reading a network module from the
+# remote disk can deadlock. Boot module links may only name what is in the
+# package already.
+AddBootModuleSymlinksToPackage
+	stack@arm64
+	$(SYSTEM_NETWORK_DEVICES)@arm64
+	$(SYSTEM_NETWORK_DATALINK_PROTOCOLS)@arm64
+	$(SYSTEM_NETWORK_PROTOCOLS)@arm64
+;
 
 AddFilesToPackage add-ons Screen\ Savers : $(SYSTEM_ADD_ONS_SCREENSAVERS) ;
 
