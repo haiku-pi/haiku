@@ -58,8 +58,8 @@ RemotePackageRepository HaikuPorts
 	libffi_devel-3.4.6_bootstrap-1
 	libogg-1.3.6-1
 	libogg_devel-1.3.6-1
-	libsdl2-2.32.10-1
-	libsdl2_devel-2.32.10-1
+	libsdl2-2.32.10-2
+	libsdl2_devel-2.32.10-2
 	libvorbis-1.3.7-1
 	libvorbis_devel-1.3.7-1
 	m4-1.4.19_bootstrap-1
