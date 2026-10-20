@@ -4,22 +4,34 @@
  */
 
 
-/*!	Decoding one picture.
+/*!	Decoding pictures: a two-stage pipeline.
 
 	Phase 1 (entropy decode) executes the client's command buffer and writes
-	prediction units and coefficients into two scratch buffers the driver
-	owns, a stride per CTB row; when one is too small, the block stops with
-	an "exhausted" status bit and phase 1 runs again with a larger one.
+	prediction units and coefficients into a scratch set the driver owns, a
+	stride per CTB row; when a buffer of the set is too small, the block stops
+	with an "exhausted" status bit and phase 1 runs again with a larger one.
 	Phase 2 (reconstruction) is programmed with direct register writes: the
-	scratch buffers, the output and reference pictures, the collocated motion
+	scratch set, the output and reference pictures, the collocated motion
 	vectors. Each phase ends with an interrupt from the block's interrupt
 	controller.
+
+	The phases are separate engines of the block: phase 1 of a picture runs
+	while phase 2 reconstructs the picture before it (as Linux's driver does),
+	each with its own scratch set. RPIVID_SUBMIT checks a picture and queues
+	it; the decode thread starts each phase as soon as its engine and a scratch
+	set are free, and handles completions, reruns and timeouts; RPIVID_WAIT
+	returns a picture's result. Phase 1 takes the pictures in submission order
+	and phase 2 in phase-1 order, so a picture's references - pictures
+	submitted before it - are complete before its phase 2 reads them, and a
+	picture buffer that becomes the output of a later picture is written only
+	after every earlier picture is done with it.
 
 	The command entries are checked before the block sees them: they may
 	only set phase-1 parameters, the bitstream addresses in them are offsets
 	into the client's bitstream buffer (rebased here), and the bit depth and
 	CTB size they program must be the pictures' - so the block reads and
-	writes only memory the client was given.
+	writes only memory the client was given. A job holds a reference to every
+	buffer it names: a buffer the client deletes stays until no job needs it.
 */
 
 
@@ -34,16 +46,19 @@ static const uint32 kMaxCommands = 1 << 18;
 static const uint32 kMaxPhase1Runs = 5;
 static const bigtime_t kPhase1Timeout = 1000000;
 static const bigtime_t kPhase2Timeout = 2000000;
-// A wait re-checks the interrupt controller this often, so a lost
-// interrupt costs this, not the picture.
+// While a phase runs, the decode thread re-checks the interrupt controller
+// this often, so a lost interrupt costs this, not the picture.
 static const bigtime_t kPollInterval = 10000;
+// The zero motion vectors read for a collocated picture the client does not
+// have: for the largest picture (4096 x 4096), allocated once
+static const size_t kZeroMvSize = 4096 * (4096 / 16);
 
 
 //	#pragma mark - completion
 
 
 /*!	The block's interrupt line is level triggered: the completion bits are
-	acknowledged here, and recorded for the waiter.
+	acknowledged here, and recorded for the decode thread.
 */
 int32
 rpivid_interrupt(void* data)
@@ -70,11 +85,11 @@ rpivid_interrupt(void* data)
 }
 
 
-/*!	A completion can be seen twice, by the handler and by a waiter that
-	polls: the handler's mark may land after the waiter took the completion.
-	Left there, it would end the next wait for that phase at once, before
-	the block finished. So before a phase starts, a pending completion of it
-	is forgotten.
+/*!	A completion can be seen twice, by the handler and by the decode thread
+	polling the controller: the handler's mark may land after the thread took
+	the completion. Left there, it would end the next run of that phase at
+	once, before the block finished. So before a phase starts, a pending
+	completion of it is forgotten (the other phase's is left alone).
 */
 static void
 clear_completion(rpivid_device* device, uint32 bit)
@@ -104,25 +119,6 @@ take_completion(rpivid_device* device, uint32 bit)
 		return true;
 	}
 	return false;
-}
-
-
-static status_t
-wait_for_completion(rpivid_device* device, uint32 bit, bigtime_t timeout)
-{
-	const bigtime_t deadline = system_time() + timeout;
-	while (!take_completion(device, bit)) {
-		const bigtime_t now = system_time();
-		if (now >= deadline)
-			return B_TIMED_OUT;
-		acquire_sem_etc(device->irq_sem, 1, B_RELATIVE_TIMEOUT,
-			min_c(deadline - now, kPollInterval));
-	}
-
-	// The block is a non-coherent bus master: its writes are complete before
-	// anything reads the output.
-	arm64_dsb(sy);
-	return B_OK;
 }
 
 
@@ -162,10 +158,12 @@ void
 rpivid_decode_free_memory(rpivid_device* device)
 {
 	rpivid_dma_free(device->commands);
-	rpivid_dma_free(device->pu);
-	rpivid_dma_free(device->coeff);
+	for (uint32 i = 0; i < kScratchSets; i++) {
+		rpivid_dma_free(device->scratch[i].pu);
+		rpivid_dma_free(device->scratch[i].coeff);
+		device->scratch[i].pu_size = device->scratch[i].coeff_size = 0;
+	}
 	rpivid_dma_free(device->zero_mv);
-	device->pu_size = device->coeff_size = 0;
 }
 
 
@@ -271,17 +269,87 @@ same_geometry(const rpivid_buffer* a, const rpivid_buffer* b)
 }
 
 
-//	#pragma mark - decode
+//	#pragma mark - jobs
+
+
+static void
+job_free(rpivid_job* job)
+{
+	rpivid_buffer* buffers[] = { job->bitstream, job->output, job->collocated };
+	for (uint32 i = 0; i < B_COUNT_OF(buffers); i++) {
+		if (buffers[i] != NULL)
+			rpivid_buffer_release(buffers[i]);
+	}
+	for (uint32 i = 0; i < RPIVID_MAX_REFERENCES; i++) {
+		if (job->references[i] != NULL)
+			rpivid_buffer_release(job->references[i]);
+	}
+	free(job->entries);
+	free(job);
+}
+
+
+static rpivid_buffer*
+job_reference(rpivid_buffer* buffer)
+{
+	if (buffer != NULL)
+		buffer->references++;
+	return buffer;
+}
+
+
+/*!	The job is done: out of the queue and the phases, its scratch set free,
+	its result there for RPIVID_WAIT.
+*/
+static void
+job_finished(rpivid_device* device, rpivid_job* job, status_t result)
+{
+	rpivid_job* previous = NULL;
+	for (rpivid_job* other = device->queue; other != NULL;
+			previous = other, other = other->next) {
+		if (other != job)
+			continue;
+		if (previous != NULL)
+			previous->next = job->next;
+		else
+			device->queue = job->next;
+		if (device->queue_tail == job)
+			device->queue_tail = previous;
+		break;
+	}
+	job->next = NULL;
+
+	if (job->scratch >= 0)
+		device->scratch[job->scratch].owner = NULL;
+	job->scratch = -1;
+	if (device->phase1 == job)
+		device->phase1 = NULL;
+	if (device->phase2 == job)
+		device->phase2 = NULL;
+	free(job->entries);
+	job->entries = NULL;
+
+	job->result = result;
+	job->state = kJobDone;
+	job->file->active_jobs--;
+	if (result == B_OK)
+		device->decoded++;
+	else
+		device->failed++;
+	device->job_done.NotifyAll();
+}
+
+
+//	#pragma mark - the phases
 
 
 /*!	A phase did not finish: the block is not used again. Its interrupts and
 	its clock go off; the memory it was given stays allocated for good, as a
 	block that stopped may still write it (the device memory too: it is not
-	freed once the device is broken).
+	freed once the device is broken). Every job fails.
 */
 static void
-block_stopped(rpivid_device* device, int phase, rpivid_buffer** buffers,
-	uint32 bufferCount)
+block_stopped(rpivid_device* device, int phase)
 {
 	ERROR("phase %d did not finish (CFSTATUS %" B_PRIu32 ", CFNUM %" B_PRIu32
 		", STATUS %#" B_PRIx32 ", interrupt control %#" B_PRIx32 "): the block "
@@ -289,72 +357,154 @@ block_stopped(rpivid_device* device, int phase, rpivid_buffer** buffers,
 		block_read(device, kCommandCount), block_read(device, kStatus),
 		device->intc[0]);
 
-	for (uint32 i = 0; i < bufferCount; i++) {
-		if (buffers[i] != NULL)
-			buffers[i]->pinned = true;
+	rpivid_job* running[] = { device->phase1, device->phase2 };
+	for (uint32 i = 0; i < B_COUNT_OF(running); i++) {
+		rpivid_job* job = running[i];
+		if (job == NULL)
+			continue;
+		rpivid_buffer* buffers[] = { job->bitstream, job->output,
+			job->collocated };
+		for (uint32 j = 0; j < B_COUNT_OF(buffers); j++) {
+			if (buffers[j] != NULL)
+				buffers[j]->pinned = true;
+		}
+		for (uint32 j = 0; j < RPIVID_MAX_REFERENCES; j++)
+			job->references[j]->pinned = true;
 	}
+
 	device->broken = true;
 	rpivid_power_off(device);
+	while (device->queue != NULL)
+		job_finished(device, device->queue, B_IO_ERROR);
 }
 
 
-/*!	Phase 1, run again with a larger scratch buffer when one ran out. */
-static status_t
-run_phase1(rpivid_device* device, rpivid_decode* args, uint32 ctbRows,
-	uint32& puStride, uint32& coeffStride)
+static void
+kick_phase1(rpivid_device* device, rpivid_job* job)
 {
-	for (uint32 run = 1;; run++) {
-		args->phase1_runs = run;
-		puStride = ROUNDDOWN(device->pu_size / ctbRows, 64);
-		coeffStride = ROUNDDOWN(device->coeff_size / ctbRows, 64);
+	const rpivid_scratch& scratch = device->scratch[job->scratch];
+	job->phase1_runs++;
+	job->pu_stride = ROUNDDOWN(scratch.pu_size / job->ctb_rows, 64);
+	job->coeff_stride = ROUNDDOWN(scratch.coeff_size / job->ctb_rows, 64);
 
-		// the command buffer is write-combining: in memory before the kick
-		arm64_dsb(sy);
-		block_write(device, kPuWriteBase,
-			rpivid_bus_address(device, device->pu.physical));
-		block_write(device, kPuWriteStride, (puStride + 63) >> 6);
-		block_write(device, kCoeffWriteBase,
-			rpivid_bus_address(device, device->coeff.physical));
-		block_write(device, kCoeffWriteStride, (coeffStride + 63) >> 6);
-		block_write(device, kCommandCount, args->command_count);
-		clear_completion(device, kActive1Interrupt);
-		block_write(device, kCommandBase,
-			rpivid_bus_address(device, device->commands.physical));
+	// the command buffer is write-combining: in memory before the kick
+	arm64_dsb(sy);
+	block_write(device, kPuWriteBase,
+		rpivid_bus_address(device, scratch.pu.physical));
+	block_write(device, kPuWriteStride, (job->pu_stride + 63) >> 6);
+	block_write(device, kCoeffWriteBase,
+		rpivid_bus_address(device, scratch.coeff.physical));
+	block_write(device, kCoeffWriteStride, (job->coeff_stride + 63) >> 6);
+	block_write(device, kCommandCount, job->command_count);
+	clear_completion(device, kActive1Interrupt);
+	block_write(device, kCommandBase,
+		rpivid_bus_address(device, device->commands.physical));
+}
 
-		status_t status = wait_for_completion(device, kActive1Interrupt,
-			kPhase1Timeout);
-		if (status != B_OK)
-			return status;
 
-		args->command_status = block_read(device, kCommandStatus);
-		args->status = block_read(device, kStatus);
-		if (args->command_status == block_read(device, kCommandCount))
-			return B_OK;
-
-		const uint32 exhausted = args->status
-			& (kStatusPuExhausted | kStatusCoeffExhausted);
-		if (exhausted == 0 || run >= kMaxPhase1Runs)
-			return B_BAD_DATA;
-
-		if ((exhausted & kStatusPuExhausted) != 0) {
-			const size_t size = round_up_size(device->pu_size + 1);
-			if (ensure_memory(device, device->pu, size, 0, "rpivid pu")
-					!= B_OK) {
-				device->pu_size = 0;
-				return B_NO_MEMORY;
-			}
-			device->pu_size = size;
-		}
-		if ((exhausted & kStatusCoeffExhausted) != 0) {
-			const size_t size = round_up_size(device->coeff_size + 1);
-			if (ensure_memory(device, device->coeff, size, 0,
-					"rpivid coefficients") != B_OK) {
-				device->coeff_size = 0;
-				return B_NO_MEMORY;
-			}
-			device->coeff_size = size;
-		}
+/*!	Starts phase 1 of \a job in a free scratch set, sized for its picture.
+	B_BUSY: no set is free (both pictures before it are not done yet).
+*/
+static status_t
+start_phase1(rpivid_device* device, rpivid_job* job)
+{
+	int32 set = -1;
+	for (uint32 i = 0; i < kScratchSets && set < 0; i++) {
+		if (device->scratch[i].owner == NULL)
+			set = i;
 	}
+	if (set < 0)
+		return B_BUSY;
+	rpivid_scratch& scratch = device->scratch[set];
+
+	// Only phase 1 uses the command buffer, and only its job the set: both
+	// may be reallocated here.
+	const size_t pixels = (size_t)job->output->width * job->output->height;
+	status_t status = ensure_memory(device, device->commands,
+		max_c((size_t)job->command_count * 8, (size_t)64 * 1024),
+		B_WRITE_COMBINING_MEMORY, "rpivid commands");
+	if (status == B_OK && scratch.pu_size < round_up_size(pixels / 4)) {
+		scratch.pu_size = 0;
+		status = ensure_memory(device, scratch.pu, round_up_size(pixels / 4), 0,
+			"rpivid pu");
+		if (status == B_OK)
+			scratch.pu_size = round_up_size(pixels / 4);
+	}
+	if (status == B_OK && scratch.coeff_size < round_up_size(pixels)) {
+		scratch.coeff_size = 0;
+		status = ensure_memory(device, scratch.coeff, round_up_size(pixels), 0,
+			"rpivid coefficients");
+		if (status == B_OK)
+			scratch.coeff_size = round_up_size(pixels);
+	}
+	if (status != B_OK)
+		return status;
+
+	memcpy(device->commands.address, job->entries,
+		(size_t)job->command_count * 8);
+	free(job->entries);
+	job->entries = NULL;
+
+	scratch.owner = job;
+	job->scratch = set;
+	job->state = kJobPhase1;
+	job->phase1_start = system_time();
+	job->queue_time = job->phase1_start - job->submitted;
+	device->phase1 = job;
+	device->phase1_deadline = job->phase1_start + kPhase1Timeout;
+	if (device->phase2 != NULL)
+		device->overlaps++;
+	kick_phase1(device, job);
+	return B_OK;
+}
+
+
+/*!	Phase 1 of the running job ended: done, or again with a larger scratch
+	buffer, or failed.
+*/
+static void
+phase1_done(rpivid_device* device)
+{
+	rpivid_job* job = device->phase1;
+	job->command_status = block_read(device, kCommandStatus);
+	job->status = block_read(device, kStatus);
+	if (job->command_status == block_read(device, kCommandCount)) {
+		job->phase1_time = system_time() - job->phase1_start;
+		job->state = kJobPhase1Done;
+		device->phase1 = NULL;
+		return;
+	}
+
+	const uint32 exhausted = job->status
+		& (kStatusPuExhausted | kStatusCoeffExhausted);
+	if (exhausted == 0 || job->phase1_runs >= kMaxPhase1Runs) {
+		job->phase1_time = system_time() - job->phase1_start;
+		job_finished(device, job, B_BAD_DATA);
+		return;
+	}
+
+	rpivid_scratch& scratch = device->scratch[job->scratch];
+	if ((exhausted & kStatusPuExhausted) != 0) {
+		const size_t size = round_up_size(scratch.pu_size + 1);
+		if (ensure_memory(device, scratch.pu, size, 0, "rpivid pu") != B_OK) {
+			scratch.pu_size = 0;
+			job_finished(device, job, B_NO_MEMORY);
+			return;
+		}
+		scratch.pu_size = size;
+	}
+	if ((exhausted & kStatusCoeffExhausted) != 0) {
+		const size_t size = round_up_size(scratch.coeff_size + 1);
+		if (ensure_memory(device, scratch.coeff, size, 0,
+				"rpivid coefficients") != B_OK) {
+			scratch.coeff_size = 0;
+			job_finished(device, job, B_NO_MEMORY);
+			return;
+		}
+		scratch.coeff_size = size;
+	}
+	device->phase1_deadline = system_time() + kPhase1Timeout;
+	kick_phase1(device, job);
 }
 
 
@@ -366,23 +516,168 @@ picture_address(rpivid_device* device, const rpivid_buffer* picture,
 }
 
 
+static void
+start_phase2(rpivid_device* device, rpivid_job* job)
+{
+	const rpivid_scratch& scratch = device->scratch[job->scratch];
+	const rpivid_buffer* output = job->output;
+
+	block_write(device, kPuReadBase,
+		rpivid_bus_address(device, scratch.pu.physical));
+	block_write(device, kPuReadStride, (job->pu_stride + 63) >> 6);
+	block_write(device, kCoeffReadBase,
+		rpivid_bus_address(device, scratch.coeff.physical));
+	block_write(device, kCoeffReadStride, (job->coeff_stride + 63) >> 6);
+
+	block_write(device, kOutLumaBase, picture_address(device, output, 0));
+	block_write(device, kOutChromaBase,
+		picture_address(device, output, output->chroma_offset));
+	block_write(device, kOutLumaStride, output->luma_stride >> 6);
+	block_write(device, kOutChromaStride, output->chroma_stride >> 6);
+	for (uint32 i = 0; i < RPIVID_MAX_REFERENCES; i++) {
+		const rpivid_buffer* reference = job->references[i];
+		const uint32 slot = kReferences + i * kReferenceSize;
+		block_write(device, slot + 0, picture_address(device, reference, 0));
+		block_write(device, slot + 4, output->luma_stride >> 6);
+		block_write(device, slot + 8, picture_address(device, reference,
+			reference->chroma_offset));
+		block_write(device, slot + 12, output->chroma_stride >> 6);
+	}
+
+	block_write(device, kConfig2, job->config2);
+	block_write(device, kFrameSize, (output->height << 16) | output->width);
+	block_write(device, kCurrentPoc, job->current_poc);
+
+	const uint32 mvStride = job->write_mv || job->read_mv
+		? output->mv_stride : 0;
+	block_write(device, kColStride, (mvStride + 63) >> 6);
+	block_write(device, kMvStride, (mvStride + 63) >> 6);
+	block_write(device, kMvBase, job->write_mv
+		? picture_address(device, output, output->mv_offset) : 0);
+	uint32 colBase = 0;
+	if (job->read_mv) {
+		colBase = job->collocated != NULL
+			? picture_address(device, job->collocated,
+				job->collocated->mv_offset)
+			: rpivid_bus_address(device, device->zero_mv.physical);
+	}
+	block_write(device, kColBase, colBase);
+
+	job->state = kJobPhase2;
+	job->phase2_start = system_time();
+	device->phase2 = job;
+	device->phase2_deadline = job->phase2_start + kPhase2Timeout;
+	if (device->phase1 != NULL)
+		device->overlaps++;
+
+	clear_completion(device, kActive2Interrupt);
+	block_write(device, kNumRows, job->ctb_rows);
+}
+
+
+/*!	One step of the pipeline: completions, timeouts, then what can start -
+	phase 2 of the oldest picture whose phase 1 is done, phase 1 of the oldest
+	queued one.
+*/
+static void
+advance(rpivid_device* device)
+{
+	if (device->broken || !device->powered) {
+		while (device->queue != NULL)
+			job_finished(device, device->queue, B_DEVICE_NOT_FOUND);
+		return;
+	}
+
+	if (device->phase1 != NULL && take_completion(device, kActive1Interrupt)) {
+		// the block is a non-coherent bus master: its writes are complete
+		// before the status registers are read
+		arm64_dsb(sy);
+		phase1_done(device);
+	}
+	if (device->phase2 != NULL && take_completion(device, kActive2Interrupt)) {
+		arm64_dsb(sy);
+		rpivid_job* job = device->phase2;
+		job->phase2_time = system_time() - job->phase2_start;
+		job_finished(device, job, B_OK);
+	}
+
+	const bigtime_t now = system_time();
+	if (device->phase1 != NULL && now >= device->phase1_deadline) {
+		block_stopped(device, 1);
+		return;
+	}
+	if (device->phase2 != NULL && now >= device->phase2_deadline) {
+		block_stopped(device, 2);
+		return;
+	}
+
+	// the queue holds, in order: the job in phase 2 or waiting for it, the
+	// job in phase 1, the queued ones
+	if (device->phase2 == NULL && device->queue != NULL
+		&& device->queue->state == kJobPhase1Done) {
+		start_phase2(device, device->queue);
+	}
+	while (device->phase1 == NULL) {
+		rpivid_job* job = device->queue;
+		while (job != NULL && job->state != kJobQueued)
+			job = job->next;
+		if (job == NULL)
+			break;
+		const status_t status = start_phase1(device, job);
+		if (status == B_BUSY)
+			break;
+		if (status != B_OK)
+			job_finished(device, job, status);
+	}
+}
+
+
+/*!	Runs the pipeline: woken by the interrupt handler and by RPIVID_SUBMIT,
+	and every kPollInterval while a phase runs.
+*/
+status_t
+rpivid_decode_thread(void* data)
+{
+	rpivid_device* device = (rpivid_device*)data;
+
+	MutexLocker locker(device->lock);
+	while (!device->quit) {
+		advance(device);
+
+		uint32 flags = 0;
+		bigtime_t timeout = B_INFINITE_TIMEOUT;
+		if (device->phase1 != NULL || device->phase2 != NULL) {
+			flags = B_RELATIVE_TIMEOUT;
+			timeout = kPollInterval;
+		}
+		locker.Unlock();
+		acquire_sem_etc(device->irq_sem, 1, flags, timeout);
+		locker.Lock();
+	}
+	return B_OK;
+}
+
+
+//	#pragma mark - ioctls
+
+
+/*!	Checks a picture and queues it. Takes \a entries on success. */
 static status_t
-decode(rpivid_file* file, rpivid_decode* args, uint64* entries)
+submit(rpivid_file* file, rpivid_decode* args, uint64* entries)
 {
 	rpivid_device* device = file->device;
 	if (device->broken || !device->powered)
 		return B_DEVICE_NOT_FOUND;
+	if (file->job_count >= RPIVID_MAX_JOBS)
+		return B_BUSY;
 
 	// the buffers, all the client's
-	rpivid_buffer* buffers[3 + RPIVID_MAX_REFERENCES] = {};
 	rpivid_buffer* bitstream = rpivid_buffer_lookup(file, args->bitstream,
 		kBitstreamBuffer);
 	rpivid_buffer* output = rpivid_buffer_lookup(file, args->output,
 		kPictureBuffer);
 	if (bitstream == NULL || output == NULL)
 		return B_BAD_VALUE;
-	buffers[0] = bitstream;
-	buffers[1] = output;
 
 	rpivid_buffer* references[RPIVID_MAX_REFERENCES];
 	for (uint32 i = 0; i < RPIVID_MAX_REFERENCES; i++) {
@@ -390,7 +685,6 @@ decode(rpivid_file* file, rpivid_decode* args, uint64* entries)
 			: rpivid_buffer_lookup(file, args->references[i], kPictureBuffer);
 		if (references[i] == NULL || !same_geometry(references[i], output))
 			return B_BAD_VALUE;
-		buffers[3 + i] = references[i];
 	}
 
 	// CONFIG2: bit depths and CTB size as the pictures, motion vectors only
@@ -414,7 +708,6 @@ decode(rpivid_file* file, rpivid_decode* args, uint64* entries)
 			|| (collocated->flags & RPIVID_PICTURE_MOTION_VECTORS) == 0) {
 			return B_BAD_VALUE;
 		}
-		buffers[2] = collocated;
 	}
 
 	status_t status = check_commands(device, entries, args->command_count,
@@ -422,117 +715,58 @@ decode(rpivid_file* file, rpivid_decode* args, uint64* entries)
 	if (status != B_OK)
 		return status;
 
-	// device memory
-	const size_t pixels = (size_t)output->width * output->height;
-	status = ensure_memory(device, device->commands,
-		max_c((size_t)args->command_count * 8, (size_t)64 * 1024),
-		B_WRITE_COMBINING_MEMORY, "rpivid commands");
-	if (status == B_OK && device->pu_size < round_up_size(pixels / 4)) {
-		device->pu_size = 0;
-		status = ensure_memory(device, device->pu, round_up_size(pixels / 4), 0,
-			"rpivid pu");
-		if (status == B_OK)
-			device->pu_size = round_up_size(pixels / 4);
-	}
-	if (status == B_OK && device->coeff_size < round_up_size(pixels)) {
-		device->coeff_size = 0;
-		status = ensure_memory(device, device->coeff, round_up_size(pixels), 0,
-			"rpivid coefficients");
-		if (status == B_OK)
-			device->coeff_size = round_up_size(pixels);
-	}
-	if (status == B_OK && readMv && collocated == NULL) {
+	if (readMv && collocated == NULL && device->zero_mv.area < 0) {
 		// a collocated picture the client does not have: zero motion
-		status = ensure_memory(device, device->zero_mv,
-			(size_t)ROUNDUP(output->width, 64) * (ROUNDUP(output->height, 64)
-				/ 16), 0, "rpivid zero motion vectors");
+		status = rpivid_dma_alloc(device, "rpivid zero motion vectors",
+			kZeroMvSize, 0, device->zero_mv);
+		if (status != B_OK)
+			return status;
 	}
-	if (status != B_OK)
-		return status;
-	memcpy(device->commands.address, entries,
-		(size_t)args->command_count * 8);
 
+	rpivid_job* job = (rpivid_job*)calloc(1, sizeof(rpivid_job));
+	if (job == NULL)
+		return B_NO_MEMORY;
+	job->file = file;
+	job->id = ++file->next_job;
+	job->state = kJobQueued;
+	job->entries = entries;
+	job->command_count = args->command_count;
+	job->bitstream = job_reference(bitstream);
+	job->output = job_reference(output);
+	job->collocated = job_reference(collocated);
+	for (uint32 i = 0; i < RPIVID_MAX_REFERENCES; i++)
+		job->references[i] = job_reference(references[i]);
+	job->config2 = args->config2;
+	job->current_poc = args->current_poc;
 	const uint32 ctbSize = 1 << args->log2_ctb_size;
-	const uint32 ctbRows = (output->height + ctbSize - 1) / ctbSize;
+	job->ctb_rows = (output->height + ctbSize - 1) / ctbSize;
+	job->write_mv = writeMv;
+	job->read_mv = readMv;
+	job->scratch = -1;
+	job->submitted = system_time();
 
-	// phase 1
-	bigtime_t start = system_time();
-	uint32 puStride, coeffStride;
-	status = run_phase1(device, args, ctbRows, puStride, coeffStride);
-	bigtime_t end = system_time();
-	args->phase1_time = end - start;
-	if (status == B_TIMED_OUT) {
-		block_stopped(device, 1, buffers, B_COUNT_OF(buffers));
-		return B_IO_ERROR;
-	}
-	if (status != B_OK)
-		return status;
+	if (device->queue_tail != NULL)
+		device->queue_tail->next = job;
+	else
+		device->queue = job;
+	device->queue_tail = job;
+	job->file_next = file->jobs;
+	file->jobs = job;
+	file->job_count++;
+	file->active_jobs++;
 
-	// phase 2
-	start = end;
-	block_write(device, kPuReadBase,
-		rpivid_bus_address(device, device->pu.physical));
-	block_write(device, kPuReadStride, (puStride + 63) >> 6);
-	block_write(device, kCoeffReadBase,
-		rpivid_bus_address(device, device->coeff.physical));
-	block_write(device, kCoeffReadStride, (coeffStride + 63) >> 6);
-
-	block_write(device, kOutLumaBase, picture_address(device, output, 0));
-	block_write(device, kOutChromaBase,
-		picture_address(device, output, output->chroma_offset));
-	block_write(device, kOutLumaStride, output->luma_stride >> 6);
-	block_write(device, kOutChromaStride, output->chroma_stride >> 6);
-	for (uint32 i = 0; i < RPIVID_MAX_REFERENCES; i++) {
-		const uint32 slot = kReferences + i * kReferenceSize;
-		block_write(device, slot + 0, picture_address(device, references[i], 0));
-		block_write(device, slot + 4, output->luma_stride >> 6);
-		block_write(device, slot + 8, picture_address(device, references[i],
-			references[i]->chroma_offset));
-		block_write(device, slot + 12, output->chroma_stride >> 6);
-	}
-
-	block_write(device, kConfig2, args->config2);
-	block_write(device, kFrameSize, (output->height << 16) | output->width);
-	block_write(device, kCurrentPoc, args->current_poc);
-
-	const uint32 mvStride = writeMv || readMv ? output->mv_stride : 0;
-	block_write(device, kColStride, (mvStride + 63) >> 6);
-	block_write(device, kMvStride, (mvStride + 63) >> 6);
-	block_write(device, kMvBase,
-		writeMv ? picture_address(device, output, output->mv_offset) : 0);
-	uint32 colBase = 0;
-	if (readMv) {
-		colBase = collocated != NULL
-			? picture_address(device, collocated, collocated->mv_offset)
-			: rpivid_bus_address(device, device->zero_mv.physical);
-	}
-	block_write(device, kColBase, colBase);
-
-	clear_completion(device, kActive2Interrupt);
-	block_write(device, kNumRows, ctbRows);
-	status = wait_for_completion(device, kActive2Interrupt, kPhase2Timeout);
-	args->phase2_time = system_time() - start;
-	if (status != B_OK) {
-		block_stopped(device, 2, buffers, B_COUNT_OF(buffers));
-		return B_IO_ERROR;
-	}
-
-	// Drop what the CPU has cached of the picture (clean lines fetched before
-	// or, speculatively, during the decode): the client reads it next.
-	if ((output->flags & RPIVID_PICTURE_UNCACHED) == 0) {
-		arm64_dcache_flush_range((addr_t)output->memory.address,
-			output->planes_size);
-	}
+	args->job = job->id;
 	return B_OK;
 }
 
 
 status_t
-rpivid_decode_ioctl(rpivid_file* file, rpivid_decode* args)
+rpivid_submit_ioctl(rpivid_file* file, rpivid_decode* args)
 {
 	rpivid_device* device = file->device;
+	args->job = 0;
 	args->status = args->command_status = args->phase1_runs = 0;
-	args->phase1_time = args->phase2_time = 0;
+	args->queue_time = args->phase1_time = args->phase2_time = 0;
 	if (args->command_count == 0 || args->command_count > kMaxCommands
 		|| args->log2_ctb_size < 4 || args->log2_ctb_size > 6) {
 		return B_BAD_VALUE;
@@ -551,13 +785,134 @@ rpivid_decode_ioctl(rpivid_file* file, rpivid_decode* args)
 	}
 
 	MutexLocker locker(device->lock);
-	status_t status = decode(file, args, entries);
-	if (status == B_OK)
-		device->decoded++;
-	else
+	status_t status = submit(file, args, entries);
+	if (status != B_OK) {
 		device->failed++;
+		free(entries);
+	}
 	locker.Unlock();
 
-	free(entries);
+	// after unlocking: the decode thread runs at once, and finds the lock free
+	if (status == B_OK)
+		release_sem(device->irq_sem);
 	return status;
+}
+
+
+static rpivid_job*
+find_job(rpivid_file* file, uint64 id, rpivid_job*** _link)
+{
+	for (rpivid_job** link = &file->jobs; *link != NULL;
+			link = &(*link)->file_next) {
+		if ((*link)->id == id) {
+			*_link = link;
+			return *link;
+		}
+	}
+	return NULL;
+}
+
+
+/*!	Waits for a job, returns its result and forgets it. Not interruptible:
+	every job is done within the phase timeouts.
+*/
+status_t
+rpivid_wait_ioctl(rpivid_file* file, rpivid_wait* args)
+{
+	rpivid_device* device = file->device;
+	const bigtime_t deadline = args->timeout > 0
+		? system_time() + args->timeout : 0;
+
+	MutexLocker locker(device->lock);
+	rpivid_job** link;
+	rpivid_job* job;
+	for (;;) {
+		// looked up again after each wait: another thread may have taken it
+		job = find_job(file, args->job, &link);
+		if (job == NULL)
+			return B_BAD_VALUE;
+		if (job->state == kJobDone)
+			break;
+		if (args->timeout == 0)
+			return B_WOULD_BLOCK;
+		status_t status = device->job_done.Wait(&device->lock,
+			args->timeout > 0 ? B_ABSOLUTE_TIMEOUT : 0, deadline);
+		if (status == B_TIMED_OUT) {
+			job = find_job(file, args->job, &link);
+			if (job == NULL || job->state != kJobDone)
+				return B_TIMED_OUT;
+			break;
+		}
+	}
+
+	args->result = job->result;
+	args->status = job->status;
+	args->command_status = job->command_status;
+	args->phase1_runs = job->phase1_runs;
+	args->queue_time = job->queue_time;
+	args->phase1_time = job->phase1_time;
+	args->phase2_time = job->phase2_time;
+
+	*link = job->file_next;
+	file->job_count--;
+	rpivid_buffer* output = NULL;
+	if (job->result == B_OK
+		&& (job->output->flags & RPIVID_PICTURE_UNCACHED) == 0) {
+		output = job_reference(job->output);
+	}
+	job_free(job);
+	locker.Unlock();
+
+	if (output != NULL) {
+		// Drop what the CPU has cached of the picture (clean lines fetched
+		// before or, speculatively, during the decode): the client reads it
+		// next. In the client's time, and without the lock: the block goes on.
+		arm64_dcache_flush_range((addr_t)output->memory.address,
+			output->planes_size);
+		locker.Lock();
+		rpivid_buffer_release(output);
+	}
+	return B_OK;
+}
+
+
+status_t
+rpivid_decode_ioctl(rpivid_file* file, rpivid_decode* args)
+{
+	status_t status = rpivid_submit_ioctl(file, args);
+	if (status != B_OK)
+		return status;
+
+	rpivid_wait wait = {};
+	wait.job = args->job;
+	wait.timeout = -1;
+	status = rpivid_wait_ioctl(file, &wait);
+	if (status != B_OK)
+		return status;
+	args->status = wait.status;
+	args->command_status = wait.command_status;
+	args->phase1_runs = wait.phase1_runs;
+	args->queue_time = wait.queue_time;
+	args->phase1_time = wait.phase1_time;
+	args->phase2_time = wait.phase2_time;
+	return wait.result;
+}
+
+
+/*!	The file is going: waits for its jobs to finish (the block may still
+	use its buffers) and forgets them. Called with the device lock held.
+*/
+void
+rpivid_file_jobs_free(rpivid_file* file)
+{
+	rpivid_device* device = file->device;
+	while (file->active_jobs > 0)
+		device->job_done.Wait(&device->lock);
+
+	while (file->jobs != NULL) {
+		rpivid_job* job = file->jobs;
+		file->jobs = job->file_next;
+		job_free(job);
+	}
+	file->job_count = 0;
 }

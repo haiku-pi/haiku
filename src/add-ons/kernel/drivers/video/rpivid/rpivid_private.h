@@ -13,6 +13,7 @@
 #include <KernelExport.h>
 #include <device_manager.h>
 
+#include <condition_variable.h>
 #include <kernel.h>
 #include <lock.h>
 
@@ -115,6 +116,9 @@ struct rpivid_buffer {
 		// the mapping in the client's team (deleted with the buffer if the
 		// client deletes it by ioctl)
 	team_id			client_team;
+	int32			references;
+		// the file's handle and every job naming it: the memory goes with
+		// the last (under the device lock)
 	bool			pinned;
 		// handed to a block that stopped responding: never freed
 
@@ -134,6 +138,71 @@ struct rpivid_buffer {
 };
 
 
+struct rpivid_file;
+
+enum rpivid_job_state {
+	kJobQueued,
+	kJobPhase1,
+	kJobPhase1Done,		// waits for phase 2
+	kJobPhase2,
+	kJobDone,
+};
+
+// One submitted picture. It holds a reference to each buffer it names until
+// it is waited for (or its file is closed).
+struct rpivid_job {
+	rpivid_job*		next;		// in the device's queue (submission order)
+	rpivid_job*		file_next;	// in the file's jobs
+	rpivid_file*	file;
+	uint64			id;
+	rpivid_job_state state;
+
+	uint64*			entries;	// until phase 1 starts
+	uint32			command_count;
+	rpivid_buffer*	bitstream;
+	rpivid_buffer*	output;
+	rpivid_buffer*	collocated;
+	rpivid_buffer*	references[RPIVID_MAX_REFERENCES];
+	uint32			config2;
+	uint32			current_poc;
+	uint32			ctb_rows;
+	bool			write_mv;
+	bool			read_mv;
+
+	int32			scratch;	// the scratch set from phase 1 to phase 2 end
+	uint32			pu_stride;
+	uint32			coeff_stride;
+
+	bigtime_t		submitted;
+	bigtime_t		phase1_start;
+	bigtime_t		phase2_start;
+
+	// results
+	status_t		result;
+	uint32			status;
+	uint32			command_status;
+	uint32			phase1_runs;
+	bigtime_t		queue_time;
+	bigtime_t		phase1_time;
+	bigtime_t		phase2_time;
+};
+
+
+// Phase 1 of a picture writes a scratch set that phase 2 of the picture
+// reads: with two, phase 1 of a picture runs during phase 2 of the one
+// before it.
+static const uint32 kScratchSets = 2;
+
+struct rpivid_scratch {
+	dma_memory		pu;
+	dma_memory		coeff;
+	size_t			pu_size;
+		// the logical sizes the strides derive from
+	size_t			coeff_size;
+	rpivid_job*		owner;
+};
+
+
 struct rpivid_device {
 	device_node*	node;
 	phys_addr_t		block_physical;
@@ -146,7 +215,7 @@ struct rpivid_device {
 		// the block reaches physical memory below this
 
 	mutex			lock;
-		// open count, power, buffers of the device, decodes
+		// open count, power, buffers, jobs, the block's registers
 	int32			open_count;
 	bool			powered;
 	bool			broken;
@@ -161,19 +230,29 @@ struct rpivid_device {
 	uint32			pending;
 		// completions the interrupt handler saw (kActive*Interrupt)
 	sem_id			irq_sem;
+		// released by the interrupt handler and by RPIVID_SUBMIT: wakes the
+		// decode thread
 	uint32			interrupts;
+
+	// the pipeline, run by the decode thread
+	thread_id		thread;
+	bool			quit;
+	rpivid_job*		queue;		// jobs not done, in submission order
+	rpivid_job*		queue_tail;
+	rpivid_job*		phase1;		// the job in phase 1
+	rpivid_job*		phase2;		// the job in phase 2
+	bigtime_t		phase1_deadline;
+	bigtime_t		phase2_deadline;
+	ConditionVariable job_done;
 
 	// device memory: the block's alone
 	dma_memory		commands;
-	dma_memory		pu;
-	dma_memory		coeff;
+	rpivid_scratch	scratch[kScratchSets];
 	dma_memory		zero_mv;
-	size_t			pu_size;
-		// the logical sizes the strides derive from
-	size_t			coeff_size;
 
 	uint64			decoded;
 	uint64			failed;
+	uint64			overlaps;
 };
 
 
@@ -181,6 +260,10 @@ struct rpivid_file {
 	rpivid_device*	device;
 	rpivid_buffer**	buffers;
 	uint32			buffer_slots;
+	rpivid_job*		jobs;		// submitted, not yet waited for
+	uint32			job_count;
+	uint32			active_jobs;	// of these, not done
+	uint64			next_job;
 };
 
 
@@ -205,11 +288,16 @@ void		rpivid_dma_free(dma_memory& memory);
 uint32		rpivid_bus_address(rpivid_device* device, phys_addr_t physical);
 rpivid_buffer* rpivid_buffer_lookup(rpivid_file* file, uint32 handle,
 				rpivid_buffer_type type);
+void		rpivid_buffer_release(rpivid_buffer* buffer);
 void		rpivid_power_off(rpivid_device* device);
 
 // decode.cpp
 int32		rpivid_interrupt(void* data);
+status_t	rpivid_decode_thread(void* data);
+status_t	rpivid_submit_ioctl(rpivid_file* file, rpivid_decode* args);
+status_t	rpivid_wait_ioctl(rpivid_file* file, rpivid_wait* args);
 status_t	rpivid_decode_ioctl(rpivid_file* file, rpivid_decode* args);
+void		rpivid_file_jobs_free(rpivid_file* file);
 void		rpivid_decode_free_memory(rpivid_device* device);
 
 

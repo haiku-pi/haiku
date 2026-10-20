@@ -8,7 +8,8 @@
 
 	A stateless, register-driven decoder: the client parses the stream and
 	hands over each picture as a phase-1 command buffer (see <rpivid.h> and
-	decode.cpp); this driver owns the memory the block reads and writes, its
+	decode.cpp, which runs the block's two phases as a pipeline in a thread of
+	its own); this driver owns the memory the block reads and writes, its
 	clock and its interrupt. It publishes /dev/video/rpivid/0; reading the
 	device returns the block's identification.
 
@@ -172,6 +173,17 @@ buffer_free(rpivid_buffer* buffer)
 }
 
 
+/*!	Drops a reference to \a buffer (the file's handle or a job's); the last
+	one frees it. Called with the device lock held.
+*/
+void
+rpivid_buffer_release(rpivid_buffer* buffer)
+{
+	if (--buffer->references == 0)
+		buffer_free(buffer);
+}
+
+
 rpivid_buffer*
 rpivid_buffer_lookup(rpivid_file* file, uint32 handle, rpivid_buffer_type type)
 {
@@ -261,6 +273,7 @@ create_buffer(rpivid_file* file, rpivid_create_buffer* args)
 	if (buffer == NULL)
 		return B_NO_MEMORY;
 	buffer->type = kBitstreamBuffer;
+	buffer->references = 1;
 
 	status_t status = rpivid_dma_alloc(device, "rpivid bitstream", args->size,
 		B_WRITE_COMBINING_MEMORY, buffer->memory);
@@ -301,6 +314,7 @@ create_picture(rpivid_file* file, rpivid_create_picture* args)
 	if (picture == NULL)
 		return B_NO_MEMORY;
 	picture->type = kPictureBuffer;
+	picture->references = 1;
 	picture->width = args->width;
 	picture->height = args->height;
 	picture->bit_depth = args->bit_depth;
@@ -354,7 +368,10 @@ delete_buffer(rpivid_file* file, rpivid_delete_buffer* args)
 
 	if (buffer->client_team == team_get_current_team_id())
 		vm_delete_area(buffer->client_team, buffer->client_area, true);
-	buffer_free(buffer);
+
+	// queued pictures may still use it: it goes with the last of them
+	locker.Lock();
+	rpivid_buffer_release(buffer);
 	return B_OK;
 }
 
@@ -570,8 +587,9 @@ rpivid_close(void* cookie)
 }
 
 
-/*!	The file's buffers go (the client's mappings of them were areas of its
-	team), and with the last file the block's clock.
+/*!	The file's pictures in the pipeline finish, its buffers go (the
+	client's mappings of them were areas of its team), and with the last file
+	the block's clock.
 */
 static status_t
 rpivid_free(void* cookie)
@@ -580,9 +598,10 @@ rpivid_free(void* cookie)
 	rpivid_device* device = file->device;
 
 	MutexLocker locker(device->lock);
+	rpivid_file_jobs_free(file);
 	for (uint32 i = 0; i < file->buffer_slots; i++) {
 		if (file->buffers[i] != NULL)
-			buffer_free(file->buffers[i]);
+			rpivid_buffer_release(file->buffers[i]);
 	}
 	free(file->buffers);
 	free(file);
@@ -600,16 +619,18 @@ rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
 {
 	rpivid_device* device = ((rpivid_file*)cookie)->device;
 
-	char report[256];
+	char report[320];
 	MutexLocker locker(device->lock);
 	int length = snprintf(report, sizeof(report),
 		"rpivid: version %#" B_PRIx32 ", clock %" B_PRIu32 " MHz (id %" B_PRIu32
 		"), registers %#" B_PRIxPHYSADDR "/%#" B_PRIxPHYSADDR ", interrupt %"
 		B_PRIu64 " (%" B_PRIu32 " taken), DMA below %#" B_PRIxPHYSADDR
-		", %" B_PRIu64 " pictures decoded, %" B_PRIu64 " failed%s\n",
+		", %" B_PRIu64 " pictures decoded, %" B_PRIu64 " failed, %" B_PRIu64
+		" phase overlaps%s\n",
 		device->version, device->clock_rate / 1000000, device->clock_id,
 		device->block_physical, device->intc_physical, device->interrupt,
 		device->interrupts, device->dma_end, device->decoded, device->failed,
+		device->overlaps,
 		device->broken ? ", BROKEN (stopped responding)" : "");
 	locker.Unlock();
 	length = min_c(length, (int)sizeof(report) - 1);
@@ -645,6 +666,7 @@ get_info(rpivid_device* device, rpivid_info* info)
 	info->flags = device->broken ? RPIVID_INFO_BROKEN : 0;
 	info->pictures_decoded = device->decoded;
 	info->pictures_failed = device->failed;
+	info->overlaps = device->overlaps;
 	return B_OK;
 }
 
@@ -669,7 +691,11 @@ rpivid_control(void* cookie, uint32 op, void* arg, size_t length)
 			size = sizeof(rpivid_delete_buffer);
 			break;
 		case RPIVID_DECODE:
+		case RPIVID_SUBMIT:
 			size = sizeof(rpivid_decode);
+			break;
+		case RPIVID_WAIT:
+			size = sizeof(rpivid_wait);
 			break;
 		default:
 			return B_DEV_INVALID_IOCTL;
@@ -683,6 +709,7 @@ rpivid_control(void* cookie, uint32 op, void* arg, size_t length)
 		rpivid_create_picture	create_picture;
 		rpivid_delete_buffer	delete_buffer;
 		rpivid_decode			decode;
+		rpivid_wait				wait;
 	} data;
 	if (!IS_USER_ADDRESS(arg) || user_memcpy(&data, arg, size) != B_OK)
 		return B_BAD_ADDRESS;
@@ -702,8 +729,14 @@ rpivid_control(void* cookie, uint32 op, void* arg, size_t length)
 			status = delete_buffer(file, &data.delete_buffer);
 			break;
 		case RPIVID_DECODE:
-		default:
 			status = rpivid_decode_ioctl(file, &data.decode);
+			break;
+		case RPIVID_SUBMIT:
+			status = rpivid_submit_ioctl(file, &data.decode);
+			break;
+		case RPIVID_WAIT:
+		default:
+			status = rpivid_wait_ioctl(file, &data.wait);
 			break;
 	}
 
@@ -805,17 +838,27 @@ rpivid_init_driver(device_node* node, void** _driverCookie)
 	device->bus_offset = busOffset;
 	device->dma_end = dmaEnd;
 	device->block_area = device->intc_area = -1;
-	device->commands.area = device->pu.area = device->coeff.area
-		= device->zero_mv.area = -1;
+	device->commands.area = device->zero_mv.area = -1;
+	for (uint32 i = 0; i < kScratchSets; i++)
+		device->scratch[i].pu.area = device->scratch[i].coeff.area = -1;
 	mutex_init(&device->lock, "rpivid");
 	B_INITIALIZE_SPINLOCK(&device->irq_lock);
+	device->job_done.Init(device, "rpivid job");
 	device->irq_sem = create_sem(0, "rpivid completion");
-	if (device->irq_sem < 0) {
-		status = device->irq_sem;
+	device->thread = -1;
+	if (device->irq_sem >= 0) {
+		device->thread = spawn_kernel_thread(&rpivid_decode_thread,
+			"rpivid decode", B_URGENT_DISPLAY_PRIORITY, device);
+	}
+	if (device->irq_sem < 0 || device->thread < 0) {
+		status = device->irq_sem < 0 ? device->irq_sem : device->thread;
+		if (device->irq_sem >= 0)
+			delete_sem(device->irq_sem);
 		mutex_destroy(&device->lock);
 		free(device);
 		return status;
 	}
+	resume_thread(device->thread);
 
 	TRACE_ALWAYS("block %#" B_PRIxPHYSADDR ", interrupts %#" B_PRIxPHYSADDR
 		", interrupt %" B_PRIu64 ", clock %" B_PRIu32 ", DMA offset %" B_PRId64
@@ -832,6 +875,14 @@ static void
 rpivid_uninit_driver(void* driverCookie)
 {
 	rpivid_device* device = (rpivid_device*)driverCookie;
+
+	// no file is open: the queue is empty
+	mutex_lock(&device->lock);
+	device->quit = true;
+	mutex_unlock(&device->lock);
+	release_sem(device->irq_sem);
+	status_t result;
+	wait_for_thread(device->thread, &result);
 
 	mutex_lock(&device->lock);
 	if (!device->broken) {

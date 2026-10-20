@@ -34,8 +34,8 @@ RemotePackageRepository HaikuPorts
 	coreutils-9.9_bootstrap-1
 	expat-2.5.0_bootstrap-1
 	expat_devel-2.5.0_bootstrap-1
-	ffmpeg6-6.1.6-2
-	ffmpeg6_devel-6.1.6-2
+	ffmpeg6-6.1.6-3
+	ffmpeg6_devel-6.1.6-3
 	findutils-4.9.0_bootstrap-1
 	flex-2.5.35_bootstrap-1
 	fluidlite-1.0.9-1
