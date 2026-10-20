@@ -49,6 +49,7 @@ AddFilesToPackage add-ons kernel busses pci :
 	<pci>x86@x86,x86_64
 	;
 AddFilesToPackage add-ons kernel busses random :
+	bcm2711_rng200@arm64
 	ccp_rng@x86,x86_64
 	virtio_rng
 	;

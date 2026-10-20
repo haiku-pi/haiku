@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src add-ons kernel busses random bcm2711_rng200 ;
+
+UsePrivateHeaders drivers ;
+UsePrivateKernelHeaders ;
+
+KernelAddon bcm2711_rng200 :
+	bcm2711_rng200.cpp
+;
