@@ -11,6 +11,8 @@ RemotePackageRepository HaikuPorts
 	# architecture "any" packages
 	# haiku-pi: makes the icu74 bootstrap package's data directory exist (scripts/make-icu-shim.sh)
 	icu74_bootstrap-74.1-1
+	# haiku-pi: makes the ncurses6 bootstrap package's terminfo directory exist (scripts/make-bootstrap-shim.sh)
+	ncurses6_bootstrap-6.6-1
 	ca_root_certificates-2025_12_02-1
 	haiku_userguide-2026_08_11-1
 	haiku_userguide_en-2026_08_11-1
@@ -119,9 +121,11 @@ RemotePackageRepository HaikuPorts
 	# haiku-pi: the free games (scripts/package-games.sh; images: -sHAIKU_PI_GAMES=1)
 	openarena-0.8.8-1
 	supertuxkart-1.5-1
-	# haiku-pi: CPython (scripts/build-python.sh)
-	python3.14-3.14.8-1
-	python3.14_devel-3.14.8-1
+	# haiku-pi: CPython (scripts/build-python.sh), its readline module on libedit
+	libedit-20260512_3.1-1
+	libedit_devel-20260512_3.1-1
+	python3.14-3.14.8-2
+	python3.14_devel-3.14.8-2
 	# haiku-pi: HaikuWebKit (WebPositive) and its dependencies (scripts/build-webkit.sh)
 	brotli-1.2.0-1
 	brotli_devel-1.2.0-1
