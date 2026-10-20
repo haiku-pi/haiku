@@ -406,8 +406,9 @@ clock_on(rpivid_device* device)
 		status = firmware_call(BCM2835_TAG_SET_CLOCK_STATE, device->clock_id,
 			1, 2, NULL);
 	if (status == B_OK && maxRate != 0) {
-		// clock ID, rate, skip setting turbo
-		uint32 values[3] = { device->clock_id, maxRate, 0 };
+		// clock ID, rate, skip setting turbo (turbo would hold the ARM clock at its
+		// maximum: bcm2835_cpufreq sets that)
+		uint32 values[3] = { device->clock_id, maxRate, 1 };
 		status = sMailbox->property_tag(BCM2835_TAG_SET_CLOCK_RATE, values,
 			sizeof(values), sizeof(values), NULL);
 	}

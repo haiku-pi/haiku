@@ -174,8 +174,9 @@ set_core_clock_max()
 	if (status != B_OK || maxRate == 0)
 		return status != B_OK ? status : B_ERROR;
 
-	// clock ID, rate, skip setting turbo
-	uint32 values[3] = { kCoreClock, maxRate, 0 };
+	// clock ID, rate, skip setting turbo (turbo would hold the ARM clock at its
+	// maximum: bcm2835_cpufreq sets that)
+	uint32 values[3] = { kCoreClock, maxRate, 1 };
 	return sMailbox->property_tag(BCM2835_TAG_SET_CLOCK_RATE, values,
 		sizeof(values), sizeof(values), NULL);
 }
