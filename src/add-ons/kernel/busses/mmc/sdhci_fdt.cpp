@@ -315,11 +315,13 @@ register_child_devices_fdt(void* cookie)
 			{ .string = MMC_BUS_MODULE_NAME } },
 		{ B_DEVICE_BUS, B_STRING_TYPE, { .string = "mmc" } },
 
-		// DMA properties, see register_child_devices_pci()
+		// DMA properties, see register_child_devices_pci(); but several
+		// segments per transfer: with ADMA2 one command moves them all (one
+		// descriptor table), without it they go one after the other
 		{ B_DMA_ALIGNMENT, B_UINT32_TYPE, { .ui32 = 511 } },
 		{ B_DMA_HIGH_ADDRESS, B_UINT64_TYPE, { .ui64 = dmaHighAddress } },
 		{ B_DMA_BOUNDARY, B_UINT32_TYPE, { .ui32 = (1 << 19) - 1 } },
-		{ B_DMA_MAX_SEGMENT_COUNT, B_UINT32_TYPE, { .ui32 = 1 } },
+		{ B_DMA_MAX_SEGMENT_COUNT, B_UINT32_TYPE, { .ui32 = 32 } },
 		{ B_DMA_MAX_SEGMENT_BLOCKS, B_UINT32_TYPE, { .ui32 = (1 << 10) - 1 } },
 		{ NULL }
 	};

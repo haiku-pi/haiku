@@ -661,24 +661,36 @@ SdhciBus::_InitAdma()
 }
 
 
-/*!	Describes [address, address + length) to the ADMA2 engine. Chunks stay
-	below 64 KiB, so that no length has to be encoded as 0.
+/*!	Describes \a length bytes of the I/O vectors \a vecs, from \a vecOffset into
+	the first one, to the ADMA2 engine: one command then moves them all.
+	Chunks stay below 64 KiB, so that no length has to be encoded as 0.
+	Returns how many bytes the table holds: less than \a length when it is
+	full (the rest goes in another command).
 */
-void
-SdhciBus::_SetupAdma(phys_addr_t address, size_t length)
+generic_size_t
+SdhciBus::_SetupAdma(const generic_io_vec* vecs, generic_size_t vecOffset,
+	generic_size_t length)
 {
 	static const size_t kMaxChunk = 32 * 1024;
 	static const size_t kMaxDescriptors
 		= B_PAGE_SIZE / sizeof(struct adma2_descriptor);
 
 	size_t count = 0;
-	for (size_t done = 0; done < length; count++) {
-		ASSERT(count < kMaxDescriptors);
-		const size_t chunk = min_c(length - done, kMaxChunk);
+	generic_size_t described = 0;
+	while (described < length && count < kMaxDescriptors) {
+		const generic_size_t inVec
+			= min_c(vecs->length - vecOffset, length - described);
+		const size_t chunk = min_c(inVec, kMaxChunk);
 		fAdmaTable[count].attributes = ADMA2_VALID | ADMA2_TRANSFER;
 		fAdmaTable[count].length = chunk;
-		fAdmaTable[count].address = address + done + fDmaBusOffset;
-		done += chunk;
+		fAdmaTable[count].address = vecs->base + vecOffset + fDmaBusOffset;
+		count++;
+		described += chunk;
+		vecOffset += chunk;
+		if (vecOffset == vecs->length) {
+			vecs++;
+			vecOffset = 0;
+		}
 	}
 	fAdmaTable[count - 1].attributes |= ADMA2_END;
 
@@ -689,6 +701,24 @@ SdhciBus::_SetupAdma(phys_addr_t address, size_t length)
 	fRegisters->host_control.SetDMAMode(HostControl::kAdma32);
 	fRegisters->adma_system_address = fAdmaTablePhysical + fDmaBusOffset;
 	fRegisters->adma_system_address_high = 0;
+	return described;
+}
+
+
+/*!	_SyncForDevice() for \a length bytes of the I/O vectors \a vecs, from
+	\a vecOffset into the first one.
+*/
+void
+SdhciBus::_SyncVecsForDevice(const generic_io_vec* vecs,
+	generic_size_t vecOffset, generic_size_t length)
+{
+	while (length > 0) {
+		const generic_size_t inVec = min_c(vecs->length - vecOffset, length);
+		_SyncForDevice(vecs->base + vecOffset, inVec);
+		length -= inVec;
+		vecs++;
+		vecOffset = 0;
+	}
 }
 
 
@@ -924,6 +954,7 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 	status_t result = B_OK;
 
 	while (length > 0) {
+		// one vec at a time, but with ADMA2 as much as its table holds
 		size_t toCopy = std::min((generic_size_t)length,
 			vecs->length - vecOffset);
 
@@ -943,8 +974,8 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 		// Step 1: set system address (or the ADMA2 descriptor table)
 		const phys_addr_t address = vecs->base + vecOffset;
 		if (fUseAdma) {
-			_SetupAdma(address, toCopy);
-			_SyncForDevice(address, toCopy);
+			toCopy = _SetupAdma(vecs, vecOffset, length);
+			_SyncVecsForDevice(vecs, vecOffset, toCopy);
 		} else if (fUseDma) {
 			fRegisters->system_address = address + fDmaBusOffset;
 			_SyncForDevice(address, toCopy);
@@ -1020,15 +1051,21 @@ SdhciBus::DoIO(uint8_t command, IOOperation* operation, bool offsetAsSectors)
 			return B_IO_ERROR;
 		}
 
-		if (fUseDma && !isWrite)
+		// drop lines the CPU fetched while the device wrote memory
+		if (fUseAdma && !isWrite)
+			_SyncVecsForDevice(vecs, vecOffset, toCopy);
+		else if (fUseDma && !isWrite)
 			_SyncForDevice(address, toCopy);
-				// drop lines the CPU fetched while the device wrote memory
 
 		TRACE("transfer complete OK.\n");
 
 		length -= toCopy;
-		vecOffset += toCopy;
 		offset += toCopy;
+		vecOffset += toCopy;
+		while (length > 0 && vecOffset >= vecs->length) {
+			vecOffset -= vecs->length;
+			vecs++;
+		}
 	}
 
 	return result;

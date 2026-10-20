@@ -15,6 +15,7 @@
 #include <device_manager.h>
 
 #include <KernelExport.h>
+#include <util/iovec_support.h>
 
 #include "mmc.h"
 
@@ -83,7 +84,12 @@ class SdhciBus {
 									uint32_t argument, uint32_t* response,
 									uint32_t replyType, uint16 transferMode);
 			bool				_InitAdma();
-			void				_SetupAdma(phys_addr_t address, size_t length);
+			generic_size_t		_SetupAdma(const generic_io_vec* vecs,
+									generic_size_t vecOffset,
+									generic_size_t length);
+			void				_SyncVecsForDevice(const generic_io_vec* vecs,
+									generic_size_t vecOffset,
+									generic_size_t length);
 			void				_SyncForDevice(phys_addr_t address, size_t length);
 	static	status_t			_WorkerThread(void*);
 
