@@ -115,10 +115,19 @@ RemotePackageRepository HaikuPorts
 	openssl3-3.5.9-1
 	openssl3_devel-3.5.9-1
 	# haiku-pi: Firefox (scripts/build-firefox.sh)
-	firefox-157.0.1-3
-	# haiku-pi: the free games (scripts/package-games.sh; images: -sHAIKU_PI_GAMES=1)
-	openarena-0.8.8-1
-	supertuxkart-1.5-1
+	firefox-157.0.1-4
+	# haiku-pi: the free games (scripts/package-games.sh; images: -sHAIKU_PI_GAMES=1), their data split
+	# into packages under GitHub's file size limit
+	openarena-0.8.8-2
+	openarena_data_1-0.8.8-2
+	openarena_data_2-0.8.8-2
+	openarena_data_3-0.8.8-2
+	openarena_data_4-0.8.8-2
+	openarena_data_5-0.8.8-2
+	supertuxkart-1.5-2
+	supertuxkart_data_1-1.5-2
+	supertuxkart_data_2-1.5-2
+	supertuxkart_data_3-1.5-2
 	# haiku-pi: CPython (scripts/build-python.sh), its readline module on libedit
 	libedit-20260512_3.1-1
 	libedit_devel-20260512_3.1-1
