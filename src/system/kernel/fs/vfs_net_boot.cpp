@@ -20,6 +20,7 @@
 #include <disk_device_manager/KDiskDevice.h>
 
 #include <KPath.h>
+#include <kmodule.h>
 
 
 static bool
@@ -54,6 +55,40 @@ compare_partitions_net_devices(const void *_a, const void *_b)
 		return compare;
 
 	return compare_image_boot(_a, _b);
+}
+
+
+/*!	Keeps the network modules, all preloaded by the boot loader, in memory:
+	unused boot modules are unloaded once the boot volume is mounted, and one
+	needed later would have to be read from the boot volume - through the
+	network stack, possibly while it holds a lock the read needs (an
+	interface's, when a domain is first used on it), which deadlocks.
+*/
+static void
+keep_network_modules_loaded()
+{
+	static const char* const kPrefixes[] = {
+		"network/devices",
+		"network/datalink_protocols",
+		"network/protocols",
+	};
+
+	for (size_t i = 0; i < B_COUNT_OF(kPrefixes); i++) {
+		void* cookie = open_module_list(kPrefixes[i]);
+		if (cookie == NULL)
+			continue;
+
+		// (the references are never put back)
+		char name[B_PATH_NAME_LENGTH];
+		size_t length = sizeof(name);
+		while (read_next_module_name(cookie, name, &length) == B_OK) {
+			module_info* module;
+			if (get_module(name, &module) != B_OK)
+				dprintf("NetBootMethod: could not load %s\n", name);
+			length = sizeof(name);
+		}
+		close_module_list(cookie);
+	}
 }
 
 
@@ -285,6 +320,32 @@ private:
 
 		dprintf("NetStackInitializer: successfully configured boot network "
 			"interface\n");
+
+		_WaitForLink(request);
+	}
+
+	void _WaitForLink(ifreq& request)
+	{
+		// The device may only now have started negotiating its link (an
+		// Ethernet PHY takes a few seconds); until the link is up, no route
+		// leads through it, and the boot volume's server can't be reached.
+		const bigtime_t kLinkTimeout = 20000000;
+		bigtime_t start = system_time();
+		while (true) {
+			if (ioctl(fSocket, SIOCGIFFLAGS, &request, sizeof(request)) < 0)
+				return;
+			if ((request.ifr_flags & IFF_LINK) != 0) {
+				dprintf("NetStackInitializer: link up after %" B_PRIdBIGTIME
+					" ms\n", (system_time() - start) / 1000);
+				return;
+			}
+			if (system_time() - start > kLinkTimeout) {
+				dprintf("NetStackInitializer: no link after %" B_PRIdBIGTIME
+					" s\n", kLinkTimeout / 1000000);
+				return;
+			}
+			snooze(100000);
+		}
 	}
 
 private:
@@ -346,6 +407,8 @@ NetBootMethod::Init()
 	status = initializer.Init();
 	if (status != B_OK)
 		return status;
+
+	keep_network_modules_loaded();
 
 	// TODO: "net root path" should be used for finding the boot device/FS,
 	// but ATM neither the remote_disk nor the nbd driver are configurable
