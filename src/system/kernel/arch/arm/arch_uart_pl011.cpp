@@ -148,7 +148,8 @@
 
 ArchUARTPL011::ArchUARTPL011(addr_t base, int64 clock)
 	:
-	DebugUART(base, clock)
+	DebugUART(base, clock),
+	fTxStuck(false)
 {
 	Barrier();
 
@@ -286,9 +287,21 @@ int
 ArchUARTPL011::PutChar(char c)
 {
 	if (Enabled() == true) {
-		// Wait until there is room in fifo
-		while ((In32(PL01x_FR) & PL01x_FR_TXFF) != 0)
+		// Wait until there is room in the FIFO, for a while: a UART that
+		// stopped sending (its clock, say) must not stop the system with
+		// it, as every CPU that prints would wait here (holding the debug
+		// output's lock). The characters are then dropped, and until the FIFO
+		// drains again there is no more waiting for it.
+		const int32 kMaxReads = fTxStuck ? 1 : 200000;
+		int32 reads = 0;
+		while ((In32(PL01x_FR) & PL01x_FR_TXFF) != 0) {
+			if (++reads >= kMaxReads) {
+				fTxStuck = true;
+				return -1;
+			}
 			Barrier();
+		}
+		fTxStuck = false;
 
 		Out32(PL01x_DR, c);
 		return 0;

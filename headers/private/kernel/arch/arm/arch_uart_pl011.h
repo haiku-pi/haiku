@@ -42,6 +42,8 @@ private:
 			void			Out32(int reg, uint32 value);
 			uint32			In32(int reg);
 	virtual	void			Barrier();
+
+			bool			fTxStuck;
 };
 
 
