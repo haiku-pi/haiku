@@ -18,6 +18,7 @@
 #include <boot_item.h>
 #include <vm/vm.h>
 #include <fs/devfs.h>
+#include <smp.h>
 #include <boot/kernel_args.h>
 
 #ifndef _BOOT_MODE
@@ -100,6 +101,11 @@ static uint32 sPalette30[] = {
 };
 
 static struct console_info sConsole;
+
+// DIAGNOSTIC: the frame buffer mapped write-combining (the console's own mapping
+// is cacheable: a stopped CPU's last marks could stay in its cache)
+static addr_t sHeartbeatBase;
+static int32 sHeartbeatBytesPerRow;
 
 #ifndef _BOOT_MODE
 static struct frame_buffer_boot_info sBootInfo;
@@ -472,6 +478,19 @@ frame_buffer_console_init(kernel_args* args)
 	frame_buffer_update((addr_t)frameBuffer, args->frame_buffer.width,
 		args->frame_buffer.height, args->frame_buffer.depth,
 		args->frame_buffer.bytes_per_row);
+
+	if (args->frame_buffer.depth == 32) {
+		void* heartbeat;
+		if (map_physical_memory("frame buffer heartbeat",
+				args->frame_buffer.physical_buffer.start,
+				args->frame_buffer.bytes_per_row * 128,
+				B_ANY_KERNEL_ADDRESS,
+				B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_WRITE_COMBINING_MEMORY,
+				&heartbeat) >= 0) {
+			sHeartbeatBytesPerRow = args->frame_buffer.bytes_per_row;
+			sHeartbeatBase = (addr_t)heartbeat;
+		}
+	}
 	return B_OK;
 #else
 	return B_NO_INIT;
@@ -565,3 +584,59 @@ _user_frame_buffer_update(addr_t baseAddress, int32 width, int32 height,
 }
 #endif
 
+
+
+//	#pragma mark - DIAGNOSTIC: screen heartbeat
+
+
+static const int32 kHeartbeatSize = 10;
+static const int32 kHeartbeatPitch = 14;
+
+
+static void
+heartbeat_fill(int32 x, int32 y, int32 size, uint32 color)
+{
+	addr_t row = sHeartbeatBase + y * sHeartbeatBytesPerRow + x * 4;
+	for (int32 i = 0; i < size; i++, row += sHeartbeatBytesPerRow) {
+		uint32* pixel = (uint32*)row;
+		for (int32 j = 0; j < size; j++)
+			pixel[j] = color;
+	}
+}
+
+
+uint32
+debug_heartbeat_hash(uint32 value)
+{
+	value *= 0x9e3779b1;
+	return (value ^ (value >> 15)) | 0x404040;
+}
+
+
+void
+debug_heartbeat(int32 slot, uint32 color)
+{
+	if (sHeartbeatBase == 0)
+		return;
+	int32 cpu = smp_get_current_cpu();
+	heartbeat_fill(4 + slot * kHeartbeatPitch, 4 + cpu * kHeartbeatPitch,
+		kHeartbeatSize, color);
+	asm volatile("dsb st" ::: "memory");
+}
+
+
+/*!	A bar code: \a bits squares of 4 pixels, white for 1, dark blue for 0,
+	most significant first, in this CPU's row from \a slot's square on.
+*/
+void
+debug_heartbeat_bits(int32 slot, uint64 value, int32 bits)
+{
+	if (sHeartbeatBase == 0)
+		return;
+	int32 cpu = smp_get_current_cpu();
+	int32 x = 4 + slot * kHeartbeatPitch;
+	int32 y = 4 + cpu * kHeartbeatPitch + 2;
+	for (int32 i = bits - 1; i >= 0; i--, x += 5)
+		heartbeat_fill(x, y, 4, ((value >> i) & 1) != 0 ? 0xffffff : 0x000060);
+	asm volatile("dsb st" ::: "memory");
+}

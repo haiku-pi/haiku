@@ -2,6 +2,8 @@
  * Copyright 2019-2026 Haiku, Inc. All Rights Reserved.
  * Distributed under the terms of the MIT License.
  */
+#include <frame_buffer_console.h>
+#include <smp.h>
 #include <boot/stage2.h>
 #include <debug.h>
 #include <interrupts.h>
@@ -77,10 +79,14 @@ arch_timer_clear_hardware_timer()
 }
 
 
+static uint32 sTickCount[SMP_MAX_CPUS];
+
+
 int32
 arch_timer_interrupt(void *data)
 {
 	write_timer_control(TIMER_DISABLED);
+	debug_heartbeat(0, debug_heartbeat_hash(++sTickCount[smp_get_current_cpu()]));
 	return timer_interrupt();
 }
 

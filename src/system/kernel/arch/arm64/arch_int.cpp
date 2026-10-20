@@ -11,6 +11,7 @@
 #include <ksyscalls.h>
 #include <interrupt_controller.h>
 #include <smp.h>
+#include <frame_buffer_console.h>
 #include <thread.h>
 #include <timer.h>
 #include <util/AutoLock.h>
@@ -258,6 +259,20 @@ private:
 };
 
 
+// DIAGNOSTIC (network-boot wedge): screen marks, see frame_buffer_console.h.
+// Slots: 0 timer ticks, 1 interrupts, 2 spinning, 3 deadlock timeout, 4 in the
+// UART, 5 in a synchronous exception, 6 the lock spun on (bar code), 7 in an
+// interrupt handler, 8 in an SError.
+struct HeartbeatScope {
+	HeartbeatScope(int32 slot, uint32 color) : fSlot(slot)
+		{ debug_heartbeat(slot, color); }
+	~HeartbeatScope()
+		{ debug_heartbeat(fSlot, 0x303030); }
+	int32 fSlot;
+};
+static uint32 sIrqCount[SMP_MAX_CPUS];
+
+
 extern "C" void
 do_sync_handler(iframe * frame)
 {
@@ -266,6 +281,7 @@ do_sync_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
+	HeartbeatScope heartbeat(5, 0xff00ff);
 	// What a user thread gets for an exception that is not handled below
 	debug_exception_type exceptionType = B_GENERAL_PROTECTION_FAULT;
 	uint32 signalNumber = SIGILL;
@@ -444,6 +460,7 @@ do_error_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
+	debug_heartbeat(8, 0xff0000);
 
 	panic("unhandled error! FAR=%lx ELR=%lx ESR=%lx", frame->far, frame->elr, frame->esr);
 }
@@ -457,10 +474,15 @@ do_irq_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
+	{
+		const int32 cpu = smp_get_current_cpu();
+		debug_heartbeat(1, debug_heartbeat_hash(++sIrqCount[cpu]));
+		HeartbeatScope heartbeat(7, 0xffff00);
 
-	InterruptController *ic = InterruptController::Get();
-	if (ic != NULL)
-		ic->HandleInterrupt();
+		InterruptController *ic = InterruptController::Get();
+		if (ic != NULL)
+			ic->HandleInterrupt();
+	}
 
 	after_exception();
 }

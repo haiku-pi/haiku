@@ -7,6 +7,12 @@
  */
 
 
+#ifndef _BOOT_MODE
+#include <frame_buffer_console.h>
+#define HEARTBEAT(slot, color) debug_heartbeat(slot, color)
+#else
+#define HEARTBEAT(slot, color)
+#endif
 #include <debug.h>
 #include <arch/arm/reg.h>
 #include <arch/generic/debug_uart.h>
@@ -287,6 +293,7 @@ int
 ArchUARTPL011::PutChar(char c)
 {
 	if (Enabled() == true) {
+		HEARTBEAT(4, 0xffff00);
 		// Wait until there is room in the FIFO, for a while: a UART that
 		// stopped sending (its clock, say) must not stop the system with
 		// it, as every CPU that prints would wait here (holding the debug
@@ -297,6 +304,7 @@ ArchUARTPL011::PutChar(char c)
 		while ((In32(PL01x_FR) & PL01x_FR_TXFF) != 0) {
 			if (++reads >= kMaxReads) {
 				fTxStuck = true;
+				HEARTBEAT(4, 0xff0000);
 				return -1;
 			}
 			Barrier();
@@ -304,6 +312,7 @@ ArchUARTPL011::PutChar(char c)
 		fTxStuck = false;
 
 		Out32(PL01x_DR, c);
+		HEARTBEAT(4, 0x303030);
 		return 0;
 	}
 

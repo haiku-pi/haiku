@@ -13,6 +13,7 @@
 /*! Functionality for symmetrical multi-processors */
 
 
+#include <frame_buffer_console.h>
 #include <smp.h>
 
 #include <stdlib.h>
@@ -87,7 +88,7 @@ public:
 	{
 	}
 
-	bool Expired(bigtime_t timeout)
+	bool Expired(bigtime_t timeout, const void* object = NULL)
 	{
 		if ((++fCount & 1023) != 0)
 			return false;
@@ -96,9 +97,15 @@ public:
 		if (fStart == 0 || now - fLast > 1000000)
 			fStart = now;
 		fLast = now;
+		if (now - fStart > 200000) {
+			// DIAGNOSTIC: spinning for a while: what on
+			debug_heartbeat(2, debug_heartbeat_hash((uint32)(now >> 16)));
+			debug_heartbeat_bits(6, (addr_t)object, 32);
+		}
 		if (now - fStart < timeout)
 			return false;
 
+		debug_heartbeat(3, 0xff0000);
 		fStart = now;
 		return true;
 	}
@@ -339,7 +346,7 @@ acquire_spinlock(spinlock* lock)
 		DeadlockTimer deadlockTimer;
 		while (1) {
 			while (lock->lock != 0) {
-				if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT)) {
+				if (deadlockTimer.Expired(SPINLOCK_DEADLOCK_TIMEOUT, lock)) {
 					panic("acquire_spinlock(): Failed to acquire spinlock %p "
 						"for a long time (value: %" B_PRIx32 ")", lock,
 						lock->lock);

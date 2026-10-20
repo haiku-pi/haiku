@@ -37,6 +37,12 @@ status_t	frame_buffer_console_init(struct kernel_args* args);
 status_t	frame_buffer_console_init_post_vm(struct kernel_args* args);
 status_t	frame_buffer_console_init_post_modules(struct kernel_args* args);
 
+// DIAGNOSTIC (network-boot wedge): lock-free marks in the boot frame buffer's
+// top-left corner, one row per CPU, one square per slot
+void		debug_heartbeat(int32 slot, uint32 color);
+void		debug_heartbeat_bits(int32 slot, uint64 value, int32 bits);
+uint32		debug_heartbeat_hash(uint32 value);
+
 status_t	_user_frame_buffer_update(addr_t baseAddress, int32 width,
 				int32 height, int32 depth, int32 bytesPerRow);
 
