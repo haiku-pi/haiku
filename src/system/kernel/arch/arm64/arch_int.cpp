@@ -293,6 +293,15 @@ do_sync_handler(iframe * frame)
 			bool write = (frame->esr & ISS_DATA_WnR) != 0;
 			bool known = false;
 
+			// A user fault at address 0 reaches the program as a fault at 0 (SIGSEGV's si_addr): when FAR
+			// does not hold the faulting address (ESR's FnV bit, an external abort), that is wrong, and
+			// only ESR tells
+			if (isUser && frame->far == 0) {
+				dprintf("arm64: thread %" B_PRId32 ": user %s abort with FAR 0, ESR %#lx, ELR %#lx\n",
+					thread_get_current_thread_id(), isExec ? "instruction" : "data", frame->esr,
+					frame->elr);
+			}
+
 			int initialLevel = VMSAv8TranslationMap::CalcStartLevel(48, 12);
 			phys_addr_t ptPa;
 			bool addrType = (frame->far & (1UL << 63)) != 0;
