@@ -457,11 +457,15 @@ do_irq_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
+	// DIAGNOSTIC A/B (network-boot wedge): a full barrier around interrupt
+	// handling, nothing else
+	asm volatile("dsb sy" ::: "memory");
 
 	InterruptController *ic = InterruptController::Get();
 	if (ic != NULL)
 		ic->HandleInterrupt();
 
+	asm volatile("dsb sy" ::: "memory");
 	after_exception();
 }
 
