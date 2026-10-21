@@ -529,8 +529,12 @@ VMSAv8TranslationMap::GetMemoryAttr(uint32 attributes, uint32 memoryType, bool i
 	// All page permissions begin life in RO state.
 	attr |= kAttrAPReadOnly;
 
-	// User-Execute implies User-Read, because it would break PAN otherwise
-	if ((attributes & B_READ_AREA) != 0 || (attributes & B_EXECUTE_AREA) != 0)
+	// User-Execute implies User-Read, because it would break PAN otherwise.
+	// User-Write implies it too: the access permissions cannot express
+	// write-only, and without user access a write-only mapping
+	// (mmap(PROT_WRITE)) would fault forever, the fault handler finding
+	// the write allowed (as Linux, arm64 maps it read-write).
+	if ((attributes & (B_READ_AREA | B_WRITE_AREA | B_EXECUTE_AREA)) != 0)
 		attr |= kAttrAPUserAccess; // Allow user reads
 
 	if ((attributes & B_WRITE_AREA) != 0 || (attributes & B_KERNEL_WRITE_AREA) != 0)
