@@ -350,6 +350,7 @@ kick_render(v3d_device* device, v3d_job* job)
 	drain_stale(device, kRenderDone);
 
 	job->stage = V3D_JOB_RENDER;
+	job->render_started = system_time();
 	start_watchdog(job, job->rcl_start, 0);
 	core_write(device, kCle1QueuedBase, job->rcl_start);
 	core_write(device, kCle1QueuedEnd, job->rcl_end);
@@ -477,6 +478,10 @@ account_job(v3d_device* device, v3d_job* job)
 	switch (job->type) {
 		case V3D_JOB_TYPE_CL:
 			stats.cl_jobs++;
+			if (job->render_started != 0) {
+				stats.bin_time += job->render_started - job->started;
+				stats.render_time += now - job->render_started;
+			}
 			break;
 		case V3D_JOB_TYPE_TFU:
 			stats.tfu_jobs++;
@@ -504,6 +509,12 @@ account_job(v3d_device* device, v3d_job* job)
 		" ms\n", (now - stats.window_start) / 1000, stats.cl_jobs, stats.tfu_jobs,
 		stats.csd_jobs, stats.cpu_jobs, stats.gpu_time / jobs, stats.latency / jobs,
 		stats.max_latency, stats.waits, stats.wait_time / 1000);
+	if (stats.cl_jobs > 0) {
+		TRACE_ALWAYS("stats: control lists bin %" B_PRId64 " + render %" B_PRId64
+			" us/job; GPU busy %" B_PRId64 "%%\n", stats.bin_time / stats.cl_jobs,
+			stats.render_time / stats.cl_jobs,
+			stats.gpu_time * 100 / (now - stats.window_start));
+	}
 	const bool enabled = stats.enabled;
 	memset(&stats, 0, sizeof(stats));
 	stats.enabled = enabled;

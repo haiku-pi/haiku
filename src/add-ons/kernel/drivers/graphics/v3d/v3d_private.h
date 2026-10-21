@@ -311,6 +311,8 @@ struct v3d_job {
 	bigtime_t			started;
 		// queued, and first kicked (for the statistics)
 	bigtime_t			kicked;
+	bigtime_t			render_started;
+		// a control list's render stage kicked (its bin stage ends there)
 	bigtime_t			last_progress;
 	bigtime_t			next_check;
 	uint32				current_address;
@@ -392,6 +394,9 @@ struct v3d_device {
 		uint32			cpu_jobs;
 		bigtime_t		gpu_time;
 			// first kick to completion
+		bigtime_t		bin_time;
+		bigtime_t		render_time;
+			// of the control lists: the two stages apart
 		bigtime_t		latency;
 		bigtime_t		max_latency;
 			// submission to completion
