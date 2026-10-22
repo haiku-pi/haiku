@@ -32,7 +32,7 @@ DeviceDiscovered(RemoteDevice* btDevice, DeviceClass cod)
 	BString classString;
 
 	printf("\t%s: Device %s discovered.\n",__FUNCTION__, 
-		bdaddrUtils::ToString(btDevice->GetBluetoothAddress()));
+		bdaddrUtils::ToString(btDevice->GetBluetoothAddress()).String());
 
 	cod.GetServiceClass(classString);
 	classString << " |";
@@ -74,7 +74,7 @@ DumpInfo(LocalDevice* device)
 
 	printf("Discovering for  [LocalDevice] %s\t%s\n\n",
 		(device->GetFriendlyName()).String(),
-		bdaddrUtils::ToString(device->GetBluetoothAddress()));
+		bdaddrUtils::ToString(device->GetBluetoothAddress()).String());
 
 	SimpleDiscoveryListener* dListener = new SimpleDiscoveryListener();
 
@@ -89,7 +89,7 @@ DumpInfo(LocalDevice* device)
 
 		RemoteDevice* rDevice = dAgent->RetrieveDevices(0).ItemAt(index);
 		printf("\t%s \t@ %s ...\n", rDevice->GetFriendlyName(true).String(),
-			bdaddrUtils::ToString(rDevice->GetBluetoothAddress()));
+			bdaddrUtils::ToString(rDevice->GetBluetoothAddress()).String());
 
     }
 
@@ -112,7 +112,7 @@ main(int argc, char *argv[])
 
 	if (argc == 2) {
 		// device specified
-		LocalDevice* device = LocalDevice::GetLocalDevice(atoi(argv[0]));
+		LocalDevice* device = LocalDevice::GetLocalDevice(atoi(argv[1]));
 		if (device == NULL)
 			return LocalDeviceError(ENODEV);
 
@@ -122,7 +122,7 @@ main(int argc, char *argv[])
 		// show all devices
 		LocalDevice* device = NULL;
 
-		printf("Performing discovery for %ld Bluetooth Local Devices ...\n",
+		printf("Performing discovery for %" B_PRIu32 " Bluetooth Local Devices ...\n",
 			LocalDevice::GetLocalDeviceCount());
 
 		for (uint32 index = 0 ; index < LocalDevice::GetLocalDeviceCount() ; index++) {

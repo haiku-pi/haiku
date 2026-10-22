@@ -14,7 +14,7 @@ static void
 DumpInfo(LocalDevice* device)
 {
 	printf("[LocalDevice] %s\t%s\n", (device->GetFriendlyName()).String(),
-		bdaddrUtils::ToString(device->GetBluetoothAddress()));
+		bdaddrUtils::ToString(device->GetBluetoothAddress()).String());
 
 	BString classString;
 	DeviceClass cod = device->GetDeviceClass();
@@ -43,7 +43,7 @@ main(int argc, char *argv[])
 {
 	if (argc == 2) {
 		// device specified
-		LocalDevice* ld = LocalDevice::GetLocalDevice(atoi(argv[0]));
+		LocalDevice* ld = LocalDevice::GetLocalDevice(atoi(argv[1]));
 		if (ld == NULL)
 			return LocalDeviceError(ENODEV);
 
@@ -53,7 +53,7 @@ main(int argc, char *argv[])
 		// show all devices
 		LocalDevice* ld = NULL;
 
-		printf("Listing %ld Bluetooth Local Devices ...\n",
+		printf("Listing %" B_PRIu32 " Bluetooth Local Devices ...\n",
 			LocalDevice::GetLocalDeviceCount());
 		for (uint32 index = 0 ; index < LocalDevice::GetLocalDeviceCount() ; index++) {
 
