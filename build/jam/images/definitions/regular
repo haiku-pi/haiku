@@ -8,6 +8,8 @@ SEARCH on [ FGristFiles userguide quicktour welcome ]
 SYSTEM_BIN += userguide quicktour welcome ;
 
 SYSTEM_BIN += [ FFilterByBuildFeatures
+	bt_dev_info
+	bt_discovery
 	cddb_lookup
 	clipboard
 	CortexAddOnHost
