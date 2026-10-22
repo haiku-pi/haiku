@@ -516,7 +516,7 @@ do_sync_handler(iframe * frame)
 			Signal signal(signalNumber, signalCode, B_ERROR,
 				thread->team->id);
 			signal.SetAddress((void*)signalAddress);
-			send_signal_to_thread(thread, signal, 0);
+			send_fault_signal(thread, signal);
 		}
 	} else {
 		panic("unhandled exception! FAR=%lx ELR=%lx ESR=%lx (EC=%lx)",

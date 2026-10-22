@@ -1576,6 +1576,38 @@ send_signal_to_thread(Thread* thread, const Signal& signal, uint32 flags)
 }
 
 
+/*!	Sends the signal of a fault (SIGSEGV, SIGBUS, SIGILL, SIGFPE) to the thread
+	that caused it.
+
+	The thread returns to the faulting instruction: when it blocks or ignores the
+	signal, the signal can never be delivered and the thread faults again at once,
+	forever -- a fault inside a signal handler, which runs with its own signal
+	blocked, did that (millions of faults a second, the team never ending). As on
+	Linux, such a signal is unblocked and its action reset to the default first,
+	so that the fault ends the team (or reaches the debugger).
+*/
+status_t
+send_fault_signal(Thread* thread, const Signal& signal)
+{
+	uint32 number = signal.Number();
+	Team* team = thread->team;
+
+	TeamLocker teamLocker(team);
+	struct sigaction& action = team->SignalActionFor(number);
+
+	InterruptsSpinLocker locker(team->signal_lock);
+	if ((thread->sig_block_mask & SIGNAL_TO_MASK(number)) != 0
+		|| action.sa_handler == SIG_IGN) {
+		thread->sig_block_mask &= ~SIGNAL_TO_MASK(number);
+		action.sa_handler = SIG_DFL;
+	}
+	locker.Unlock();
+	teamLocker.Unlock();
+
+	return send_signal_to_thread(thread, signal, 0);
+}
+
+
 /*!	Sends the given signal to the thread with the given ID.
 
 	\param threadID The ID of the thread the signal shall be sent to.
