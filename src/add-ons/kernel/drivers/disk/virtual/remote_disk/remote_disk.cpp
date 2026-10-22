@@ -8,6 +8,8 @@
 #include <KernelExport.h>
 #include <Drivers.h>
 
+#include <boot_item.h>
+#include <boot/kernel_args.h>
 #include <lock.h>
 #include <util/AutoLock.h>
 #include <util/kernel_cpp.h>
@@ -339,6 +341,12 @@ status_t
 init_hardware(void)
 {
 	TRACE(("remote_disk: init_hardware()\n"));
+
+	// Only a network-booted system has a remote disk: otherwise the driver would look for a server on
+	// every boot (with one on the LAN, an SD-booted system would show that disk too)
+	int32* bootMethod = (int32*)get_boot_item(BOOT_METHOD, NULL);
+	if (bootMethod != NULL && *bootMethod != BOOT_METHOD_NET)
+		return B_ERROR;
 
 	return B_OK;
 }

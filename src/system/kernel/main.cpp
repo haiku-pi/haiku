@@ -60,6 +60,7 @@
 #include <vfs.h>
 #include <vm/vm.h>
 #include <boot/kernel_args.h>
+#include <util/KMessage.h>
 
 #include "vm/VMAnonymousCache.h"
 
@@ -150,6 +151,15 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
 			// Before vm_init_post_sem() is called, we have to make sure that
 			// the boot loader allocated region is not used anymore
 		boot_item_init();
+		{
+			// how the system booted (BOOT_METHOD_*), for drivers that serve one boot method only:
+			// the kernel arguments are gone once the boot is done, the boot item stays
+			static int32 sBootMethod;
+			KMessage bootVolume;
+			bootVolume.SetTo(sKernelArgs.boot_volume, sKernelArgs.boot_volume_size);
+			sBootMethod = bootVolume.GetInt32(BOOT_METHOD, BOOT_METHOD_DEFAULT);
+			add_boot_item(BOOT_METHOD, &sBootMethod, sizeof(sBootMethod));
+		}
 		debug_init_post_vm(&sKernelArgs);
 		low_resource_manager_init();
 
