@@ -258,6 +258,75 @@ private:
 };
 
 
+/*!	Emulates a user read (MRS) of a register of the ID space (op0 3, op1 0,
+	CRn 0), so that programs can read the CPU's features as on Linux: MIDR_EL1
+	and the AArch64 feature registers are passed on, MPIDR_EL1 reads as on a
+	uniprocessor, every other register of the space as 0. An ARMv8.0 CPU makes
+	such a read an undefined instruction; with FEAT_IDST it is trapped (EC
+	0x18). Returns whether the instruction was emulated.
+*/
+static bool
+emulate_user_id_register_read(iframe* frame)
+{
+	uint32 crm, op2, rt;
+	if (ESR_ELx_EXCEPTION(frame->esr) == EXCP_MSR) {
+		uint64 iss = frame->esr & ESR_ELx_ISS_MASK;
+		bool read = (iss & 1) != 0;
+		if (!read || ((iss >> 20) & 0x3) != 3 || ((iss >> 14) & 0x7) != 0
+			|| ((iss >> 10) & 0xf) != 0) {
+			return false;
+		}
+		op2 = (iss >> 17) & 0x7;
+		rt = (iss >> 5) & 0x1f;
+		crm = (iss >> 1) & 0xf;
+	} else {
+		// reading the instruction may fault, as user page faults do with
+		// interrupts on (the user context had them on)
+		enable_interrupts();
+		uint32 instruction;
+		if (!IS_USER_ADDRESS(frame->elr)
+			|| user_memcpy(&instruction, (void*)frame->elr, sizeof(instruction)) != B_OK
+			|| (instruction & 0xfffff000) != 0xd5380000) {
+			// not MRS Xt, S3_0_C0_Cm_op2
+			return false;
+		}
+		crm = (instruction >> 8) & 0xf;
+		op2 = (instruction >> 5) & 0x7;
+		rt = instruction & 0x1f;
+	}
+
+	// unallocated encodings of the space read as zero (RAZ), so all of these
+	// can be read on any ARMv8 CPU
+	uint64 value = 0;
+	switch ((crm << 3) | op2) {
+		case (0 << 3) | 0: value = READ_SPECIALREG(MIDR_EL1); break;
+		case (0 << 3) | 5: value = 1UL << 31; break;
+			// MPIDR_EL1: its RES1 bit, affinity 0
+		case (4 << 3) | 0: value = READ_SPECIALREG(s3_0_c0_c4_0); break;
+		case (4 << 3) | 1: value = READ_SPECIALREG(s3_0_c0_c4_1); break;
+		case (4 << 3) | 4: value = READ_SPECIALREG(s3_0_c0_c4_4); break;
+		case (5 << 3) | 0: value = READ_SPECIALREG(s3_0_c0_c5_0); break;
+		case (5 << 3) | 1: value = READ_SPECIALREG(s3_0_c0_c5_1); break;
+		case (6 << 3) | 0: value = READ_SPECIALREG(s3_0_c0_c6_0); break;
+		case (6 << 3) | 1: value = READ_SPECIALREG(s3_0_c0_c6_1); break;
+		case (6 << 3) | 2: value = READ_SPECIALREG(s3_0_c0_c6_2); break;
+		case (7 << 3) | 0: value = READ_SPECIALREG(s3_0_c0_c7_0); break;
+		case (7 << 3) | 1: value = READ_SPECIALREG(s3_0_c0_c7_1); break;
+		case (7 << 3) | 2: value = READ_SPECIALREG(s3_0_c0_c7_2); break;
+	}
+
+	if (rt < 29)
+		frame->x[rt] = value;
+	else if (rt == 29)
+		frame->fp = value;
+	else if (rt == 30)
+		frame->lr = value;
+	// rt 31: xzr
+	frame->elr += 4;
+	return true;
+}
+
+
 extern "C" void
 do_sync_handler(iframe * frame)
 {
@@ -276,6 +345,13 @@ do_sync_handler(iframe * frame)
 	bool isExec = false;
 	switch (ESR_ELx_EXCEPTION(frame->esr)) {
 		case EXCP_UNKNOWN:
+			if (isUser && emulate_user_id_register_read(frame))
+				return;
+			exceptionType = B_INVALID_OPCODE_EXCEPTION;
+			break;
+		case EXCP_MSR:
+			if (isUser && emulate_user_id_register_read(frame))
+				return;
 			exceptionType = B_INVALID_OPCODE_EXCEPTION;
 			break;
 		case EXCP_PC_ALIGN:
