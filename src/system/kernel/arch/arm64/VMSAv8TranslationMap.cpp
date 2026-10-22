@@ -151,6 +151,11 @@ VMSAv8TranslationMap::~VMSAv8TranslationMap()
 		}
 	}
 
+	// a user map gets its page table with its first mapping (Map()): an
+	// address space that never had one (a fork() that failed early) has none
+	if (fPageTable == 0)
+		return;
+
 	vm_page_reservation reservation = {};
 	FreeTable(fPageTable, 0, fInitialLevel, &reservation);
 	vm_page_unreserve_pages(&reservation);

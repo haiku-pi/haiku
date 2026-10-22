@@ -498,17 +498,21 @@ do_sync_handler(iframe * frame)
 		struct sigaction action;
 		Thread* thread = thread_get_current_thread();
 
-		dprintf("arm64: thread %" B_PRId32 " (%s): exception ESR %#lx (EC %#lx) "
-			"FAR %#lx ELR %#lx -> signal %" B_PRIu32 "\n", thread->id, thread->name,
-			frame->esr, (frame->esr >> 26) & 0x3f, frame->far, frame->elr,
-			signalNumber);
-
 		enable_interrupts();
 
-		if ((sigaction(signalNumber, NULL, &action) == 0
-				&& action.sa_handler != SIG_DFL
-				&& action.sa_handler != SIG_IGN)
-			|| user_debug_exception_occurred(exceptionType, signalNumber)) {
+		bool handled = sigaction(signalNumber, NULL, &action) == 0
+			&& action.sa_handler != SIG_DFL && action.sa_handler != SIG_IGN;
+		// only the exceptions that end the program: one that handles the
+		// signal may take thousands (an x86 emulator's misaligned accesses,
+		// Wine's write watches), and each line costs the serial line's time
+		if (!handled) {
+			dprintf("arm64: thread %" B_PRId32 " (%s): exception ESR %#lx (EC %#lx) "
+				"FAR %#lx ELR %#lx -> signal %" B_PRIu32 "\n", thread->id, thread->name,
+				frame->esr, (frame->esr >> 26) & 0x3f, frame->far, frame->elr,
+				signalNumber);
+		}
+
+		if (handled || user_debug_exception_occurred(exceptionType, signalNumber)) {
 			Signal signal(signalNumber, signalCode, B_ERROR,
 				thread->team->id);
 			signal.SetAddress((void*)signalAddress);
