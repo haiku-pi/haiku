@@ -27,6 +27,11 @@
 	// Usable from userland according to its protection flags, but the area
 	// itself is not deletable, resizable, etc from userland.
 
+// The flags saying how an area was created, which changing its protection
+// keeps.
+#define B_AREA_CREATION_FLAGS \
+	(B_OVERCOMMITTING_AREA | B_SHARED_AREA | B_KERNEL_AREA)
+
 #define B_USER_AREA_FLAGS		\
 	(B_USER_PROTECTION | B_OVERCOMMITTING_AREA | B_CLONEABLE_AREA)
 #define B_KERNEL_AREA_FLAGS \

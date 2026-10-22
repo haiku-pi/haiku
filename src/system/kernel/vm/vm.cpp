@@ -3121,6 +3121,22 @@ vm_copy_area(team_id team, const char* name, void** _address,
 }
 
 
+/*!	Whether making an area of \a cache writable, or changing the protection of
+	one, has to insert a copy-on-write cache above \a cache, so that the caches
+	consuming it (private copies made by fork() or a private mapping) keep the
+	pages they see.
+	A file's cache is never made copy-on-write: its areas are shared mappings
+	of the file, and vm_copy_on_write_area() would move all of them onto an
+	anonymous cache, so that their writes would no longer reach the file.
+	Private mappings of a file see its changes anyway, as they do on write().
+*/
+static bool
+protection_change_needs_copy_on_write(VMCache* cache)
+{
+	return !cache->consumers.IsEmpty() && cache->type != CACHE_TYPE_VNODE;
+}
+
+
 status_t
 vm_set_area_protection(area_id areaID, uint32 newProtection,
 	bool kernel)
@@ -3184,6 +3200,9 @@ vm_set_area_protection(area_id areaID, uint32 newProtection,
 			return B_NOT_ALLOWED;
 		}
 
+		// The flags saying how the area was created are not part of its
+		// protection.
+		newProtection |= area->protection & B_AREA_CREATION_FLAGS;
 		if (area->protection == newProtection)
 			return B_OK;
 
@@ -3251,13 +3270,14 @@ vm_set_area_protection(area_id areaID, uint32 newProtection,
 	} else if (!isWritable && becomesWritable) {
 		// !writable -> writable
 
-		if (!cache->consumers.IsEmpty()) {
+		if (protection_change_needs_copy_on_write(cache)) {
 			// There are consumers -- we have to insert a new cache. Fortunately
 			// vm_copy_on_write_area() does everything that's needed.
 			changePageProtection = false;
 			status = vm_copy_on_write_area(cache, NULL);
 		} else {
-			// No consumers, so we don't need to insert a new one.
+			// No consumers (or a file's cache), so we don't need to insert a
+			// new one.
 			if (cache->temporary) {
 				// the cache's commitment must contain all possible pages
 				status = cache->Commit(cache->virtual_end - cache->virtual_base,
@@ -6058,7 +6078,7 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 			AreaCacheLocker cacheLocker(area);
 			VMCache* cache = cacheLocker.Get();
 
-			if (!cache->consumers.IsEmpty()) {
+			if (protection_change_needs_copy_on_write(cache)) {
 				// We need to make the area copy-on-write.
 				// Unlock, then reacquire locks using MultiLocker.
 				area_id areaId = area->id;
@@ -6126,8 +6146,10 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 		sizeLeft -= rangeSize;
 
 		if (area->page_protections == NULL) {
-			if (area->protection == protection)
+			if ((area->protection & ~(B_AREA_CREATION_FLAGS | B_CLONEABLE_AREA))
+					== protection) {
 				continue;
+			}
 
 			if (offset == 0 && rangeSize == area->Size()) {
 				// The whole area is covered: don't allocate page_protections.
@@ -6187,8 +6209,10 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 			}
 		}
 
-		if (area->page_protections == NULL)
-			area->protection = protection;
+		if (area->page_protections == NULL) {
+			area->protection = protection
+				| (area->protection & (B_AREA_CREATION_FLAGS | B_CLONEABLE_AREA));
+		}
 
 		map->Lock();
 		for (addr_t pageAddress = area->Base() + offset;
