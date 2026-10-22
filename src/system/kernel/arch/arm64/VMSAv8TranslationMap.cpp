@@ -442,7 +442,12 @@ VMSAv8TranslationMap::ProcessRange(phys_addr_t ptPa, int level, addr_t va, size_
     vm_page_reservation* reservation, UpdatePte&& updatePte)
 {
 	ASSERT(level < 4);
-	ASSERT(ptPa != 0);
+
+	// A user map gets its top-level table only at its first Map(): before that nothing is mapped, and
+	// walking from physical address 0 faulted in the kernel -- a fork() that failed under memory pressure
+	// deleted the child's areas through UnmapPages() and panicked. (A sub-table is never 0.)
+	if (ptPa == 0)
+		return;
 
 	uint64_t pageMask = (1UL << fPageBits) - 1;
 	uint64_t vaMask = (1UL << fVaBits) - 1;
