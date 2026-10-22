@@ -2,7 +2,9 @@
 #define _BLUETOOTH_DEBUG_SERVER_H_
 
 #ifndef DEBUG
-  #define DEBUG 3
+  // errors only: with 3, every libbluetooth call printed "CALLED ..." on the
+  // standard output of the program using it (bt_dev_info, Bluetooth preferences)
+  #define DEBUG 1
 #endif
 
 #include <Debug.h>
