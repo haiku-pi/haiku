@@ -27,7 +27,7 @@ SimpleDiscoveryListener()
 
 
 void
-DeviceDiscovered(RemoteDevice* btDevice, DeviceClass cod)
+DeviceDiscovered(RemoteDevice* btDevice, DeviceClass cod) override
 {
 	BString classString;
 
@@ -45,7 +45,7 @@ DeviceDiscovered(RemoteDevice* btDevice, DeviceClass cod)
 
 
 void
-InquiryCompleted(int discType)
+InquiryResponse(int discType) override
 {
 	printf("\t%s: Inquiry process has finished ...\n",__FUNCTION__);
 	(void)send_data(mainThread, discType, NULL, 0);
@@ -53,7 +53,7 @@ InquiryCompleted(int discType)
 
 
 void
-InquiryStarted(status_t status)
+InquiryStarted(status_t status) override
 {
 	printf("\t%s: Inquiry process has started ...\n",__FUNCTION__);
 }
