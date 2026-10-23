@@ -1478,7 +1478,8 @@ PCI::_GetBarInfo(PCIDev *dev, uint8 offset, uint32 &_ramAddress,
 
 	uint32 mask = PCI_address_memory_32_mask;
 	bool is64bit = false;
-	if ((pciAddress & PCI_address_space) != 0)
+	const bool isIOPort = (pciAddress & PCI_address_space) != 0;
+	if (isIOPort)
 		mask = PCI_address_io_mask;
 	else {
 		is64bit = (pciAddress & PCI_address_type) == PCI_address_type_64;
@@ -1503,7 +1504,13 @@ PCI::_GetBarInfo(PCIDev *dev, uint8 offset, uint32 &_ramAddress,
 	size &= ((uint64)0xffffffff << 32) | mask;
 
 	size = _BarSize(size);
-	uint64 ramAddress = pci_ram_address(pciAddress);
+	// An I/O port BAR's "host" address is the port: the read_io/write_io
+	// accessors take ports in PCI I/O space and map them themselves (on x86
+	// the two are the same). pci_ram_address() only knows memory ranges and
+	// gave 0 for every I/O BAR on other architectures, so drivers of two
+	// devices with I/O BARs (legacy virtio on QEMU's arm64 virt) both used
+	// port 0, and the second one's reset stopped the first.
+	uint64 ramAddress = isIOPort ? pciAddress : pci_ram_address(pciAddress);
 
 	_ramAddress = ramAddress;
 	_pciAddress = pciAddress;
