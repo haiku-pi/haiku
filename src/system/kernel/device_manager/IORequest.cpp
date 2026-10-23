@@ -804,6 +804,8 @@ IORequest::Init(off_t offset, generic_size_t firstVecOffset,
 	fIsWrite = write;
 	fPartialTransfer = false;
 	fSuppressChildNotifications = false;
+	fIterating = false;
+	fIterationFinished = false;
 
 	// these are for iteration
 	fVecIndex = 0;
@@ -947,23 +949,40 @@ IORequest::NotifyFinished()
 	MutexLocker locker(fLock);
 	ASSERT(fStatus != 1);
 
-	if (fStatus == B_OK && !fPartialTransfer && RemainingBytes() > 0) {
-		// The request is not really done yet. If it has an iteration callback,
-		// call it.
-		if (fIterationCallback != NULL) {
-			ResetStatus();
-			locker.Unlock();
-			bool partialTransfer = false;
-			status_t error = fIterationCallback(fIterationCookie, this,
-				&partialTransfer);
-			if (error == B_OK && !partialTransfer)
-				return;
+	if (fIterating) {
+		// What the running iteration callback scheduled has finished already
+		// (synchronous I/O does so before the callback returns). The loop
+		// below, in the callback's caller, goes on: iterating from here would
+		// nest one level per few file vecs, and a fragmented file overflowed
+		// the kernel stack.
+		fIterationFinished = true;
+		return;
+	}
 
+	while (fStatus == B_OK && !fPartialTransfer && RemainingBytes() > 0
+		&& fIterationCallback != NULL) {
+		// The request is not really done yet: call the iteration callback.
+		ResetStatus();
+		fIterating = true;
+		fIterationFinished = false;
+		locker.Unlock();
+		bool partialTransfer = false;
+		status_t error = fIterationCallback(fIterationCookie, this,
+			&partialTransfer);
+		locker.Lock();
+		fIterating = false;
+
+		if (error != B_OK || partialTransfer) {
 			// Iteration failed, which means we're responsible for notifying the
 			// requests finished.
-			locker.Lock();
 			fStatus = error;
 			fPartialTransfer = true;
+			break;
+		}
+
+		if (!fIterationFinished) {
+			// still in progress: the last of it notifies us
+			return;
 		}
 	}
 

@@ -343,6 +343,10 @@ private:
 			bool				fPartialTransfer;
 			bool				fSuppressChildNotifications;
 			bool				fIsNotified;
+			bool				fIterating;
+									// the iteration callback is running
+			bool				fIterationFinished;
+									// what it scheduled finished meanwhile
 
 			io_request_finished_callback	fFinishedCallback;
 			void*				fFinishedCookie;
