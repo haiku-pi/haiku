@@ -44,8 +44,8 @@ RemotePackageRepository HaikuPorts
 	gcc-13.3.0_2026_03_29_bootstrap-1
 	gcc_syslibs-13.3.0_2026_03_29_bootstrap-1
 	gcc_syslibs_devel-13.3.0_2026_03_29_bootstrap-1
-	glu-9.0.3-5
-	glu_devel-9.0.3-5
+	glu-9.0.3-6
+	glu_devel-9.0.3-6
 	grep-3.11_bootstrap-1
 	gzip-1.9-1
 	# haiku-pi: ICU 74.1 with its data in libicudata (scripts/build-icu.sh; tools in the runtime package)
@@ -62,8 +62,8 @@ RemotePackageRepository HaikuPorts
 	libvorbis_devel-1.3.7-1
 	m4-1.4.19_bootstrap-1
 	make-4.4.1_bootstrap-1
-	mesa-26.2.0-5
-	mesa_devel-26.2.0-5
+	mesa-26.2.0-6
+	mesa_devel-26.2.0-6
 	# haiku-pi: ncurses 6.6, its terminfo database in data/terminfo (scripts/build-ncurses.sh)
 	ncurses6-6.6-1
 	ncurses6_devel-6.6-1
@@ -117,7 +117,7 @@ RemotePackageRepository HaikuPorts
 	firefox-157.0.1-4
 	# haiku-pi: the free games (scripts/package-games.sh; images: -sHAIKU_PI_GAMES=1), their data split
 	# into packages under GitHub's file size limit
-	openarena-0.8.8-2
+	openarena-0.8.8-4
 	openarena_data_1-0.8.8-2
 	openarena_data_2-0.8.8-2
 	openarena_data_3-0.8.8-2
