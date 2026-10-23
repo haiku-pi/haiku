@@ -9,8 +9,6 @@ RemotePackageRepository HaikuPorts
 	: https://eu.hpkg.haiku-os.org/haikuports/master/build-packages
 	:
 	# architecture "any" packages
-	# haiku-pi: makes the ncurses6 bootstrap package's terminfo directory exist (scripts/make-bootstrap-shim.sh)
-	ncurses6_bootstrap-6.6-1
 	ca_root_certificates-2025_12_02-1
 	haiku_userguide-2026_08_11-1
 	haiku_userguide_en-2026_08_11-1
@@ -66,8 +64,9 @@ RemotePackageRepository HaikuPorts
 	make-4.4.1_bootstrap-1
 	mesa-26.2.0-5
 	mesa_devel-26.2.0-5
-	ncurses6-6.6_bootstrap-1
-	ncurses6_devel-6.6_bootstrap-1
+	# haiku-pi: ncurses 6.6, its terminfo database in data/terminfo (scripts/build-ncurses.sh)
+	ncurses6-6.6-1
+	ncurses6_devel-6.6-1
 	python3.10-3.10.19_bootstrap-1
 	sed-4.9_bootstrap-1
 	tar-1.35-1
