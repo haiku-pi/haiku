@@ -46,7 +46,25 @@ protected:
 									iovec* scratchBuffer = NULL);
 
 private:
+#ifdef _BOOT_MODE
+			bool				_ReadCachedChunk(size_t chunkIndex,
+									void* buffer, size_t size);
+			void				_CacheChunk(size_t chunkIndex,
+									const void* buffer, size_t size);
+#endif
+
 			OffsetArray			fOffsets;
+#ifdef _BOOT_MODE
+	// The boot loader has no file cache and reads a file in many small pieces
+	// (ELF headers, segments, symbols), each of which would otherwise read and
+	// decompress its whole chunk again: keep the last few chunks.
+	static	const int			kCachedChunkCount = 8;
+
+			uint8*				fChunkCache;
+			size_t				fCachedChunkIndex[kCachedChunkCount];
+			uint32				fCachedChunkLastUse[kCachedChunkCount];
+			uint32				fChunkCacheUseCounter;
+#endif
 };
 
 

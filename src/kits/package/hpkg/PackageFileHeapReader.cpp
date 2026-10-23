@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <new>
+#include <stdlib.h>
+#include <string.h>
 
 #include <package/hpkg/ErrorOutput.h>
 #include <package/hpkg/HPKGDefs.h>
@@ -34,11 +36,23 @@ PackageFileHeapReader::PackageFileHeapReader(BErrorOutput* errorOutput,
 {
 	fCompressedHeapSize = compressedHeapSize;
 	fUncompressedHeapSize = uncompressedHeapSize;
+
+#ifdef _BOOT_MODE
+	fChunkCache = NULL;
+	for (int i = 0; i < kCachedChunkCount; i++) {
+		fCachedChunkIndex[i] = (size_t)-1;
+		fCachedChunkLastUse[i] = 0;
+	}
+	fChunkCacheUseCounter = 0;
+#endif
 }
 
 
 PackageFileHeapReader::~PackageFileHeapReader()
 {
+#ifdef _BOOT_MODE
+	free(fChunkCache);
+#endif
 }
 
 
@@ -166,9 +180,70 @@ PackageFileHeapReader::ReadAndDecompressChunk(size_t chunkIndex,
 		? fUncompressedHeapSize - (uint64)chunkIndex * kChunkSize
 		: kChunkSize;
 
-	return ReadAndDecompressChunkData(offset, compressedSize, uncompressedSize,
-		compressedDataBuffer, uncompressedDataBuffer, scratchBuffer);
+#ifdef _BOOT_MODE
+	if (_ReadCachedChunk(chunkIndex, uncompressedDataBuffer, uncompressedSize))
+		return B_OK;
+#endif
+
+	status_t error = ReadAndDecompressChunkData(offset, compressedSize,
+		uncompressedSize, compressedDataBuffer, uncompressedDataBuffer,
+		scratchBuffer);
+
+#ifdef _BOOT_MODE
+	if (error == B_OK)
+		_CacheChunk(chunkIndex, uncompressedDataBuffer, uncompressedSize);
+#endif
+
+	return error;
 }
+
+
+#ifdef _BOOT_MODE
+
+
+bool
+PackageFileHeapReader::_ReadCachedChunk(size_t chunkIndex, void* buffer,
+	size_t size)
+{
+	if (fChunkCache == NULL)
+		return false;
+
+	for (int i = 0; i < kCachedChunkCount; i++) {
+		if (fCachedChunkIndex[i] == chunkIndex) {
+			memcpy(buffer, fChunkCache + i * kChunkSize, size);
+			fCachedChunkLastUse[i] = ++fChunkCacheUseCounter;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+void
+PackageFileHeapReader::_CacheChunk(size_t chunkIndex, const void* buffer,
+	size_t size)
+{
+	if (fChunkCache == NULL) {
+		fChunkCache = (uint8*)malloc(kCachedChunkCount * kChunkSize);
+		if (fChunkCache == NULL)
+			return;
+	}
+
+	// replace the least recently used chunk
+	int slot = 0;
+	for (int i = 1; i < kCachedChunkCount; i++) {
+		if (fCachedChunkLastUse[i] < fCachedChunkLastUse[slot])
+			slot = i;
+	}
+
+	memcpy(fChunkCache + slot * kChunkSize, buffer, size);
+	fCachedChunkIndex[slot] = chunkIndex;
+	fCachedChunkLastUse[slot] = ++fChunkCacheUseCounter;
+}
+
+
+#endif	// _BOOT_MODE
 
 
 }	// namespace BPrivate
