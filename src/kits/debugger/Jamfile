@@ -37,6 +37,7 @@ LINKFLAGS += -Wl,--exclude-libs,ALL ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) arch ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) arch x86 ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) arch x86_64 ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) arch arm64 ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) controllers ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) debug_info ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) debug_info loading_state_handlers ] ;
@@ -99,6 +100,10 @@ local sources =
 	# arch/x86_64
 	ArchitectureX8664.cpp
 	CpuStateX8664.cpp
+
+	# arch/arm64
+	ArchitectureArm64.cpp
+	CpuStateArm64.cpp
 
 	# controllers
 	DebugReportGenerator.cpp

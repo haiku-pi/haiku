@@ -23,6 +23,7 @@
 
 #include "ArchitectureX86.h"
 #include "ArchitectureX8664.h"
+#include "ArchitectureArm64.h"
 #include "AreaInfo.h"
 #include "AutoDeleter.h"
 #include "CpuState.h"
@@ -266,6 +267,8 @@ LocalDebuggerInterface::Init()
 	fArchitecture = new(std::nothrow) ArchitectureX86(this);
 #elif defined(ARCH_x86_64)
 	fArchitecture = new(std::nothrow) ArchitectureX8664(this);
+#elif defined(ARCH_arm64)
+	fArchitecture = new(std::nothrow) ArchitectureArm64(this);
 #else
 	return B_UNSUPPORTED;
 #endif

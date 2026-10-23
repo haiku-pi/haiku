@@ -15,6 +15,7 @@
 
 #include "ArchitectureX86.h"
 #include "ArchitectureX8664.h"
+#include "ArchitectureArm64.h"
 #include "CoreFile.h"
 #include "ElfSymbolLookup.h"
 #include "ImageInfo.h"
@@ -51,6 +52,9 @@ CoreFileDebuggerInterface::Init()
 			break;
 		case EM_X86_64:
 			fArchitecture = new(std::nothrow) ArchitectureX8664(this);
+			break;
+		case EM_AARCH64:
+			fArchitecture = new(std::nothrow) ArchitectureArm64(this);
 			break;
 		default:
 			WARNING("Unsupported core file machine (%u)\n", machine);
