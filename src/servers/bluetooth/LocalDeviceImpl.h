@@ -5,6 +5,7 @@
 #ifndef _LOCALDEVICE_IMPL_H_
 #define _LOCALDEVICE_IMPL_H_
 
+#include <Messenger.h>
 #include <String.h>
 
 #include <bluetooth/bluetooth.h>
@@ -12,6 +13,8 @@
 #include <bluetoothserver_p.h>
 #include <bluetooth/RemoteDevice.h>
 #include <ObjectList.h>
+
+#include <map>
 
 #include "LocalDeviceHandler.h"
 
@@ -128,6 +131,10 @@ private:
 	void AuthComplete(struct hci_ev_auth_complete* eventData, BMessage* request);
 
 	void EncryptChange(struct hci_ev_encrypt_change* eventData);
+
+	// The open PIN code windows, by remote address: one per device, closed when its pairing is over
+	void ClosePincodeWindow(const bdaddr_t& address);
+	std::map<BString, BMessenger> fPincodeWindows;
 };
 
 #endif

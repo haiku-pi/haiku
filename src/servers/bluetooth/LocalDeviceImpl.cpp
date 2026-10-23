@@ -1600,11 +1600,15 @@ LocalDeviceImpl::DisconnectionComplete(hci_ev_disconnection_complete_reply* even
 	BMessage reply(BT_MSG_DISCONN_COMPLETED);
 	reply.AddUInt8("status", event->status);
 
-	if (rd != NULL)
+	if (rd != NULL) {
 		reply.AddData("bdaddr", B_ANY_TYPE, &rd->bdaddr, sizeof(bdaddr_t));
 
-	if (event->status == BT_OK || event->status == BT_NO_CONNECTION)
-		rd->conn_state = RemoteDevice::DISCONNECTED;
+		if (event->status == BT_OK || event->status == BT_NO_CONNECTION)
+			rd->conn_state = RemoteDevice::DISCONNECTED;
+
+		// a pairing that did not finish is over with the link
+		ClosePincodeWindow(rd->bdaddr);
+	}
 
 
 	((BluetoothServer*)be_app)->NotifyWatchers(&reply);
@@ -1615,9 +1619,33 @@ void
 LocalDeviceImpl::PinCodeRequest(struct hci_ev_pin_code_req* event,
 	BMessage* request)
 {
+	// one window per device: a repeated request goes to the window already open
+	BString address = bdaddrUtils::ToString(event->bdaddr);
+	std::map<BString, BMessenger>::iterator open = fPincodeWindows.find(address);
+	if (open != fPincodeWindows.end() && open->second.IsValid()) {
+		TRACE_BT("LocalDeviceImpl: PincodeWindow for %s already open\n", address.String());
+		return;
+	}
+
 	TRACE_BT("LocalDeviceImpl: Opening PincodeWindow...");
 	PincodeWindow* iPincode = new PincodeWindow(event->bdaddr, GetID());
+	fPincodeWindows[address] = BMessenger(iPincode);
 	iPincode->Show();
+}
+
+
+void
+LocalDeviceImpl::ClosePincodeWindow(const bdaddr_t& address)
+{
+	std::map<BString, BMessenger>::iterator open
+		= fPincodeWindows.find(bdaddrUtils::ToString(address));
+	if (open == fPincodeWindows.end())
+		return;
+
+	// a window closed by its own buttons leaves an invalid messenger
+	if (open->second.IsValid())
+		open->second.SendMessage(B_QUIT_REQUESTED);
+	fPincodeWindows.erase(open);
 }
 
 
@@ -1650,6 +1678,9 @@ LocalDeviceImpl::LinkKeyNotify(hci_ev_link_key_notify* event,
 
 	if (request != NULL)
 		ClearWantedEvent(request);
+
+	// the pairing is done
+	ClosePincodeWindow(event->bdaddr);
 
 	ServerRemoteDevice* rd = RemoteDeviceByAddr(event->bdaddr);
 	if (rd == NULL)
