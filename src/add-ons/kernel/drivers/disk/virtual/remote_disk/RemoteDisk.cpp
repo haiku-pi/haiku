@@ -16,6 +16,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <AutoDeleter.h>
 #include <KernelExport.h>
 #include <OS.h>
 
@@ -357,6 +358,146 @@ RemoteDisk::_ReadPipelined(off_t pos, uint8* buffer, size_t bufferSize)
 }
 
 
+/*!	Writes \a bufferSize bytes at \a pos the way _ReadPipelined() reads: up to
+	kPipelineDepth requests of a block each in flight, matched to their replies
+	by the request ID, each resent while its reply is overdue (a write at a given
+	offset can be repeated). One request at a time wrote at the network's
+	latency: ~2.9 MB/s on a Raspberry Pi 4's gigabit link.
+	Returns B_NO_MEMORY without writing anything when it has no packet buffers;
+	the caller then writes one block at a time.
+*/
+ssize_t
+RemoteDisk::_WritePipelined(off_t pos, const uint8* buffer, size_t bufferSize)
+{
+	static const int kPipelineDepth = 16;
+	static const bigtime_t kResendTimeout = 500000;
+	static const size_t kPacketSize
+		= sizeof(remote_disk_header) + REMOTE_DISK_BLOCK_SIZE;
+
+	struct Slot {
+		remote_disk_header* packet;
+		size_t		packetSize;
+		uint64		requestID;
+		off_t		offset;
+		uint32		size;
+		bigtime_t	firstSentAt;
+		bigtime_t	sentAt;
+		bool		inFlight;
+	} slots[kPipelineDepth];
+
+	uint8* packets = (uint8*)malloc(kPipelineDepth * kPacketSize);
+	if (packets == NULL)
+		return B_NO_MEMORY;
+	MemoryDeleter packetsDeleter(packets);
+
+	const uint32 blockCount
+		= (bufferSize + REMOTE_DISK_BLOCK_SIZE - 1) / REMOTE_DISK_BLOCK_SIZE;
+	uint32 nextBlock = 0;
+	uint32 doneCount = 0;
+	fPacketSize = 0;
+		// fPacket serves as the receive buffer here
+
+	auto send = [&](Slot& slot) -> status_t {
+		ssize_t sent;
+		do {
+			sent = sendto(fSocket, slot.packet, slot.packetSize, 0,
+				(sockaddr*)&fServerAddress, sizeof(fServerAddress));
+		} while (sent < 0 && errno == B_INTERRUPTED);
+		if (sent != (ssize_t)slot.packetSize)
+			return sent < 0 ? errno : B_ERROR;
+		slot.sentAt = system_time();
+		return B_OK;
+	};
+
+	for (int i = 0; i < kPipelineDepth; i++) {
+		slots[i].packet = (remote_disk_header*)(packets + i * kPacketSize);
+		slots[i].inFlight = false;
+	}
+
+	while (doneCount < blockCount) {
+		// fill the free slots
+		for (int i = 0; i < kPipelineDepth && nextBlock < blockCount; i++) {
+			if (slots[i].inFlight)
+				continue;
+			Slot& slot = slots[i];
+			slot.requestID = fRequestID++;
+			slot.offset = pos + (off_t)nextBlock * REMOTE_DISK_BLOCK_SIZE;
+			slot.size = min_c(REMOTE_DISK_BLOCK_SIZE,
+				bufferSize - (size_t)nextBlock * REMOTE_DISK_BLOCK_SIZE);
+
+			remote_disk_header* request = slot.packet;
+			request->offset = htonll(slot.offset);
+			request->size = htons(slot.size);
+			request->command = REMOTE_DISK_WRITE_REQUEST;
+			request->request_id = slot.requestID;
+			request->port = fSocketAddress.sin_port;
+			const uint8* data = buffer + (slot.offset - pos);
+			if (IS_USER_ADDRESS(data)) {
+				status_t error = user_memcpy(request->data, data, slot.size);
+				if (error != B_OK)
+					return error;
+			} else
+				memcpy(request->data, data, slot.size);
+			slot.packetSize = sizeof(remote_disk_header) + slot.size;
+
+			slot.inFlight = true;
+			nextBlock++;
+			status_t error = send(slot);
+			if (error != B_OK)
+				return error;
+			slot.firstSentAt = slot.sentAt;
+		}
+
+		// a reply (the socket's receive timeout bounds the wait)
+		ssize_t received = recvfrom(fSocket, fPacket, BUFFER_SIZE, 0, NULL,
+			NULL);
+		if (received < 0) {
+			status_t error = errno;
+			if (error != B_TIMED_OUT && error != B_WOULD_BLOCK
+				&& error != B_INTERRUPTED) {
+				return error;
+			}
+		} else if (received >= (ssize_t)sizeof(remote_disk_header)) {
+			remote_disk_header* reply = (remote_disk_header*)fPacket;
+			for (int i = 0; i < kPipelineDepth; i++) {
+				Slot& slot = slots[i];
+				if (!slot.inFlight || reply->request_id != slot.requestID
+					|| reply->command != REMOTE_DISK_WRITE_REPLY) {
+					continue;
+				}
+				int16 size = ntohs(reply->size);
+				if (size < 0)
+					return size == REMOTE_DISK_BAD_REQUEST ? B_BAD_VALUE : B_IO_ERROR;
+				if ((size_t)size < slot.size)
+					return B_IO_ERROR;
+				slot.inFlight = false;
+				doneCount++;
+				break;
+			}
+		}
+
+		// resend what is overdue
+		const bigtime_t now = system_time();
+		for (int i = 0; i < kPipelineDepth; i++) {
+			Slot& slot = slots[i];
+			if (!slot.inFlight || now - slot.sentAt < kResendTimeout)
+				continue;
+			if (now - slot.firstSentAt
+					> kMaxRequestResendCount * kRequestTimeout) {
+				dprintf("RemoteDisk: no reply for the write at %" B_PRIdOFF
+					"\n", slot.offset);
+				return B_TIMED_OUT;
+			}
+			status_t error = send(slot);
+			if (error != B_OK)
+				return error;
+		}
+	}
+
+	return bufferSize;
+}
+
+
 // WriteAt
 ssize_t
 RemoteDisk::WriteAt(off_t pos, const void *_buffer, size_t bufferSize)
@@ -370,6 +511,12 @@ RemoteDisk::WriteAt(off_t pos, const void *_buffer, size_t bufferSize)
 
 	if (bufferSize == 0)
 		return 0;
+
+	if (bufferSize > REMOTE_DISK_BLOCK_SIZE) {
+		ssize_t pipelined = _WritePipelined(pos, buffer, bufferSize);
+		if (pipelined != B_NO_MEMORY)
+			return pipelined;
+	}
 
 	status_t error = B_OK;
 	size_t bytesWritten = 0;

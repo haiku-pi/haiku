@@ -45,6 +45,8 @@ private:
 									size_t& bufferSize);
 			ssize_t				_ReadPipelined(off_t pos, uint8* buffer,
 									size_t bufferSize);
+			ssize_t				_WritePipelined(off_t pos, const uint8* buffer,
+								size_t bufferSize);
 	
 			status_t			_SendRequest(remote_disk_header *request,
 									size_t size, uint8 expectedReply,
