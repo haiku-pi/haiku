@@ -426,6 +426,15 @@ rule SharedLibraryFromObjects
 	MainFromObjects $(_lib) : $(2) ;
 	LINKFLAGS on $(_lib) = [ on $(_lib) return $(LINKFLAGS) ]
 		-shared -Xlinker -soname=\"$(soname)\" ;
+
+	# Calls between a library's own functions are bound inside it, so they
+	# need no symbol lookup when the library is loaded: most relocations of a
+	# C++ library are its vtables' references to its own methods. Data stays
+	# interposable. A library whose functions applications may replace
+	# (libroot: malloc() & co.) sets KEEP_FUNCTIONS_INTERPOSABLE.
+	if ! [ on $(_lib) return $(KEEP_FUNCTIONS_INTERPOSABLE) ] {
+		LINKFLAGS on $(_lib) += -Xlinker -Bsymbolic-functions ;
+	}
 	LinkAgainst $(_lib) : $(3) ;
 
 	AddSharedObjectGlueCode $(_lib) : false ;
