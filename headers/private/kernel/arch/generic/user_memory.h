@@ -15,6 +15,15 @@
 #include <thread.h>
 
 
+#ifdef __aarch64__
+// a faster copy than the kernel's memcpy(), for normal memory only
+extern "C" void* arch_user_memcpy(void* to, const void* from, size_t size);
+#	define USER_MEMORY_COPY arch_user_memcpy
+#else
+#	define USER_MEMORY_COPY memcpy
+#endif
+
+
 namespace {
 
 
@@ -78,7 +87,7 @@ bool user_access(Function function)
 inline status_t
 arch_cpu_user_memcpy(void* src, const void* dst, size_t n)
 {
-	return user_access([=] { memcpy(src, dst, n); }) ? B_OK : B_ERROR;
+	return user_access([=] { USER_MEMORY_COPY(src, dst, n); }) ? B_OK : B_ERROR;
 }
 
 
