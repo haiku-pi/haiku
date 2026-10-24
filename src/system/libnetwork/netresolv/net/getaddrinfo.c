@@ -2451,6 +2451,25 @@ _getht(FILE** hostf, const char* name, const struct addrinfo* pai, struct addrin
 	return cur;
 }
 
+#ifdef __HAIKU__
+/*
+ * Whether name is this machine's own host name. When the hosts file does not
+ * list it, it is answered with the hosts file's "localhost" entries, as
+ * systemd's nss-myhostname does: programs look up their own host name (e.g.
+ * Firefox's profile lock, at every start), which otherwise goes to the name
+ * servers, or waits for their time-outs on a machine without a network.
+ */
+static int
+is_own_hostname(const char *name)
+{
+	char hostname[MAXHOSTNAMELEN + 1];
+
+	if (gethostname(hostname, sizeof(hostname)) != 0 || hostname[0] == '\0')
+		return 0;
+	return strcasecmp(name, hostname) == 0;
+}
+#endif
+
 /*ARGSUSED*/
 static int
 _files_getaddrinfo(void *rv, void *cb_data, va_list ap)
@@ -2469,6 +2488,9 @@ _files_getaddrinfo(void *rv, void *cb_data, va_list ap)
 	memset(&sentinel, 0, sizeof(sentinel));
 	cur = &sentinel;
 
+#ifdef __HAIKU__
+again:
+#endif
 	_sethtent(&hostf);
 	if (pai->ai_family == AF_INET6 && (pai->ai_flags & (AI_ALL | AI_V4MAPPED)) == AI_V4MAPPED) {
 		struct addrinfo ai0 = *pai;
@@ -2484,6 +2506,14 @@ _files_getaddrinfo(void *rv, void *cb_data, va_list ap)
 		cur = _getht(&hostf, name, pai, cur);
 	}
 	_endhtent(&hostf);
+
+#ifdef __HAIKU__
+	if (sentinel.ai_next == NULL && strcmp(name, "localhost") != 0
+		&& is_own_hostname(name)) {
+		name = "localhost";
+		goto again;
+	}
+#endif
 
 	*((struct addrinfo **)rv) = sentinel.ai_next;
 	if (sentinel.ai_next == NULL)

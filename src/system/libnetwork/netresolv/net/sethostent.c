@@ -51,6 +51,7 @@ __RCSID("$NetBSD: sethostent.c,v 1.20 2014/03/17 13:24:23 christos Exp $");
 #include <resolv.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "hostent.h"
 
@@ -119,6 +120,25 @@ endhostent_r(FILE **hf)
 	}
 }
 
+#ifdef __HAIKU__
+/*
+ * Whether name is this machine's own host name. When the hosts file does not
+ * list it, it is answered with the hosts file's "localhost" entries, as
+ * systemd's nss-myhostname does: programs look up their own host name (e.g.
+ * Firefox's profile lock, at every start), which otherwise goes to the name
+ * servers, or waits for their time-outs on a machine without a network.
+ */
+static int
+is_own_hostname(const char *name)
+{
+	char hostname[MAXHOSTNAMELEN + 1];
+
+	if (gethostname(hostname, sizeof(hostname)) != 0 || hostname[0] == '\0')
+		return 0;
+	return strcasecmp(name, hostname) == 0;
+}
+#endif
+
 /*ARGSUSED*/
 int
 _hf_gethtbyname(void *rv, void *cb_data, va_list ap)
@@ -149,6 +169,10 @@ _hf_gethtbyname(void *rv, void *cb_data, va_list ap)
 	}
 #else
 	hp = _hf_gethtbyname2(name, af, info);
+#endif
+#ifdef __HAIKU__
+	if (hp == NULL && is_own_hostname(name))
+		hp = _hf_gethtbyname2("localhost", af, info);
 #endif
 	if (hp == NULL) {
 		*info->he = HOST_NOT_FOUND;
