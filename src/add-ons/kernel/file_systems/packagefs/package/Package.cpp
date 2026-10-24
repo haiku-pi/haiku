@@ -396,13 +396,22 @@ struct Package::HeapReaderV2 : public HeapReader, public CachedDataReader,
 public:
 	HeapReaderV2()
 		:
-		fHeapReader(NULL)
+		fHeapReader(NULL),
+		fNextPosition(-1),
+		fSequentialReads(0),
+		fReadAhead(NULL),
+		fReadAheadOffset(0),
+		fReadAheadSize(0),
+		fReadAheadBusy(false)
 	{
+		mutex_init(&fReadAheadLock, "packagefs read-ahead");
 	}
 
 	~HeapReaderV2()
 	{
 		delete fHeapReader;
+		free(fReadAhead);
+		mutex_destroy(&fReadAheadLock);
 	}
 
 	status_t Init(const PackageFileHeapReader* heapReader, int fd)
@@ -437,6 +446,78 @@ public:
 	}
 
 private:
+	// BPositionIO
+
+	/*!	A heap read is one compressed chunk (~20 KiB for 64 KiB of data), and
+		the package file is opened O_NOCACHE, so every read is a request to the
+		disk. When reads come in order -- a file read from start to end -- one
+		request of kReadAheadSize brings the next chunks too. Reads elsewhere
+		go to the disk as they are and end the read-ahead: a program's pages
+		are read scattered, and reading more than asked for there costs time.
+	*/
+	virtual ssize_t ReadAt(off_t position, void* buffer, size_t size)
+	{
+		MutexLocker locker(fReadAheadLock);
+
+		if (fReadAheadSize > 0 && position >= fReadAheadOffset
+			&& position + (off_t)size
+				<= fReadAheadOffset + (off_t)fReadAheadSize) {
+			memcpy(buffer, fReadAhead + (position - fReadAheadOffset), size);
+			fNextPosition = position + size;
+			return size;
+		}
+
+		if (position == fNextPosition)
+			fSequentialReads++;
+		else {
+			fSequentialReads = 0;
+			if (!fReadAheadBusy) {
+				free(fReadAhead);
+				fReadAhead = NULL;
+				fReadAheadSize = 0;
+			}
+		}
+		fNextPosition = position + size;
+
+		if (fSequentialReads < kSequentialReadsBeforeReadAhead
+			|| size >= kReadAheadSize || fReadAheadBusy) {
+			locker.Unlock();
+			return BFdIO::ReadAt(position, buffer, size);
+		}
+
+		if (fReadAhead == NULL) {
+			fReadAhead = (uint8*)malloc(kReadAheadSize);
+			if (fReadAhead == NULL) {
+				locker.Unlock();
+				return BFdIO::ReadAt(position, buffer, size);
+			}
+		}
+
+		// fill the window from the page this read starts in (an uncached read
+		// at an unaligned offset costs more than twice as much), without the
+		// lock; it is not freed while busy
+		fReadAheadBusy = true;
+		fReadAheadSize = 0;
+		uint8* window = fReadAhead;
+		const off_t windowOffset = ROUNDDOWN(position, B_PAGE_SIZE);
+		locker.Unlock();
+
+		ssize_t bytesRead = BFdIO::ReadAt(windowOffset, window, kReadAheadSize);
+
+		locker.Lock();
+		fReadAheadBusy = false;
+		if (bytesRead < (ssize_t)(position - windowOffset + size)) {
+			// an error, or the end of the file within the request
+			locker.Unlock();
+			return BFdIO::ReadAt(position, buffer, size);
+		}
+
+		memcpy(buffer, window + (position - windowOffset), size);
+		fReadAheadOffset = windowOffset;
+		fReadAheadSize = bytesRead;
+		return size;
+	}
+
 	// BErrorOutput
 
 	virtual void PrintErrorVarArgs(const char* format, va_list args)
@@ -445,7 +526,18 @@ private:
 	}
 
 private:
+	static const size_t		kReadAheadSize = 256 * 1024;
+	static const int32		kSequentialReadsBeforeReadAhead = 2;
+
 	PackageFileHeapReader*	fHeapReader;
+
+	mutex					fReadAheadLock;
+	off_t					fNextPosition;
+	int32					fSequentialReads;
+	uint8*					fReadAhead;
+	off_t					fReadAheadOffset;
+	size_t					fReadAheadSize;
+	bool					fReadAheadBusy;
 };
 
 
