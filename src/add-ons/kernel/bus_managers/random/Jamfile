@@ -2,8 +2,10 @@ SubDir HAIKU_TOP src add-ons kernel bus_managers random ;
 
 UsePrivateHeaders drivers ;
 UsePrivateKernelHeaders ;
+SubDirHdrs $(HAIKU_TOP) src libs bsd ;
 
 KernelAddon random :
+	chacha_stream.c
 	driver.cpp
 	yarrow_rng.cpp
 ;

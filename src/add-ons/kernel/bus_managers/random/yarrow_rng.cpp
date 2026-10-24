@@ -9,7 +9,10 @@
 #include "yarrow_rng.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <thread.h>
+
+#include "chacha_stream.h"
 
 
 //#define TRACE_DRIVER
@@ -51,7 +54,6 @@ typedef struct _ch_randgen {
 
 
 static ch_randgen *sRandomEnv;
-static uint32 sRandomCount = 0;
 
 extern void hash_block(const unsigned char *block, const unsigned int block_byte_size, unsigned char *md);
 
@@ -285,6 +287,71 @@ kill_chrand(ch_randgen *randgen)
 }
 
 
+//	#pragma mark - output
+
+
+/*!	The pool above collects entropy (the hardware generators' words, writes to
+	the device, timing jitter at each reseed). What is read is a ChaCha20
+	keystream, keyed from the pool, as OpenBSD's arc4random: every 1 KiB block
+	of keystream starts with the next key, and what has been handed out is
+	erased (so earlier output cannot be recomputed from the state); the key is
+	mixed with fresh
+	pool output ("stirred") after kStirBytes of output, after kStirInterval,
+	after a write, and once kStirEnqueued bytes have been queued since the
+	last stir.
+*/
+static const size_t kSeedSize = CHACHA_KEY_SIZE + CHACHA_IV_SIZE;
+static const size_t kStirBytes = 1024 * 1024;
+static const bigtime_t kStirInterval = 60000000;
+static const size_t kStirEnqueued = 64;
+
+static chacha_stream sStream;
+static uint8 sKeystream[16 * 64];
+static size_t sKeystreamLeft;
+	// unused bytes at the end of sKeystream
+static size_t sOutputUntilStir;
+static bigtime_t sLastStir;
+static size_t sEnqueuedSinceStir;
+
+
+static void
+rekey(const uint8* seed)
+{
+	// the next keystream block becomes the new key, mixed with the seed
+	chacha_stream_generate(&sStream, sKeystream, sizeof(sKeystream));
+	if (seed != NULL) {
+		for (size_t i = 0; i < kSeedSize; i++)
+			sKeystream[i] ^= seed[i];
+	}
+	chacha_stream_init(&sStream, sKeystream);
+	memset(sKeystream, 0, kSeedSize);
+	sKeystreamLeft = sizeof(sKeystream) - kSeedSize;
+}
+
+
+static void
+stir()
+{
+	reseed(sRandomEnv, 1);
+
+	uint8 seed[kSeedSize];
+	for (size_t i = 0; i < kSeedSize; i += sizeof(uint64)) {
+		uint64 value = chrand(sRandomEnv);
+		memcpy(seed + i, &value, sizeof(value));
+	}
+	rekey(seed);
+	memset(seed, 0, sizeof(seed));
+
+	// what was left of the keystream came from the old key
+	memset(sKeystream, 0, sizeof(sKeystream));
+	sKeystreamLeft = 0;
+
+	sOutputUntilStir = kStirBytes;
+	sLastStir = system_time();
+	sEnqueuedSinceStir = 0;
+}
+
+
 //	#pragma mark -
 
 
@@ -295,6 +362,15 @@ yarrow_init()
 	sRandomEnv = new_chrand(8);
 	if (sRandomEnv == NULL)
 		return B_NO_MEMORY;
+
+	uint8 seed[kSeedSize];
+	for (size_t i = 0; i < kSeedSize; i += sizeof(uint64)) {
+		uint64 value = chrand(sRandomEnv);
+		memcpy(seed + i, &value, sizeof(value));
+	}
+	chacha_stream_init(&sStream, seed);
+	memset(seed, 0, sizeof(seed));
+	stir();
 	return B_OK;
 }
 
@@ -303,6 +379,8 @@ void
 yarrow_uninit()
 {
 	CALLED();
+	memset(&sStream, 0, sizeof(sStream));
+	memset(sKeystream, 0, sizeof(sKeystream));
 	kill_chrand(sRandomEnv);
 }
 
@@ -313,29 +391,30 @@ yarrow_rng_read(void* cookie, void *_buffer, size_t *_numBytes)
 	if (!IS_USER_ADDRESS(_buffer))
 		return B_BAD_ADDRESS;
 
-	sRandomCount += *_numBytes;
+	size_t length = *_numBytes;
+	if (sOutputUntilStir <= length || sEnqueuedSinceStir >= kStirEnqueued
+		|| system_time() - sLastStir >= kStirInterval) {
+		stir();
+	} else
+		sOutputUntilStir -= length;
 
-	/* Reseed if we have or are gonna use up > 1/16th the entropy around */
-	if (sRandomCount >= NK/8) {
-		sRandomCount = 0;
-		reseed(sRandomEnv, 1);
-	}
-
-	/* ToDo: Yes, i know this is not the way we should do it. What we really should do is
-	 * take the md5 or sha1 hash of the state of the pool, and return that. Someday.
-	 */
-	int32 *buffer = (int32 *)_buffer;
-	uint32 i;
-	for (i = 0; i < *_numBytes / 4; i++) {
-		int32 data = chrand32(sRandomEnv);
-		if (user_memcpy(&buffer[i], &data, sizeof(data)) < B_OK)
-			return B_BAD_ADDRESS;
-	}
-	uint8 *buffer8 = (uint8 *)_buffer;
-	for (uint32 j = 0; j < *_numBytes % 4; j++) {
-		int8 data = chrand8(sRandomEnv);
-		if (user_memcpy(&buffer8[(i * 4) + j], &data, sizeof(data)) < B_OK)
-			return B_BAD_ADDRESS;
+	uint8* buffer = (uint8*)_buffer;
+	while (length > 0) {
+		if (sKeystreamLeft > 0) {
+			size_t chunk = min_c(length, sKeystreamLeft);
+			uint8* keystream = sKeystream + sizeof(sKeystream) - sKeystreamLeft;
+			status_t status = user_memcpy(buffer, keystream, chunk);
+			memset(keystream, 0, chunk);
+			sKeystreamLeft -= chunk;
+			if (status != B_OK) {
+				rekey(NULL);
+				return B_BAD_ADDRESS;
+			}
+			buffer += chunk;
+			length -= chunk;
+		}
+		if (sKeystreamLeft == 0)
+			rekey(NULL);
 	}
 	return B_OK;
 }
@@ -356,6 +435,9 @@ yarrow_rng_write(void* cookie, const void *_buffer, size_t *_numBytes)
 		chseed(sRandomEnv, data.Q[0]);
 		buffer++;
 	}
+
+	// the next read is keyed with what was written
+	sOutputUntilStir = 0;
 	return B_OK;
 }
 
@@ -365,4 +447,5 @@ yarrow_enqueue_randomness(const uint64 value)
 {
 	CALLED();
 	chseed(sRandomEnv, value);
+	sEnqueuedSinceStir += sizeof(value);
 }
