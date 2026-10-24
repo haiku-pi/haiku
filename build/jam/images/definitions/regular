@@ -291,6 +291,7 @@ SYSTEM_ADD_ONS_DRIVERS_AUDIO +=
 ;
 
 SYSTEM_ADD_ONS_DRIVERS_AUDIO += [ FFilterByBuildFeatures
+	bcm2711_hdmi_audio@arm64
 	bcm2711_pwm@arm64
 ] ;
 
