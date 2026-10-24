@@ -182,6 +182,8 @@ public:
 		const char *					TypeName() const { return "stack"; }
 
 		void							Explore();
+		void							ScheduleExplore()
+											{ release_sem(fExploreSem); }
 
 private:
 static	int32							ExploreThread(void *data);

@@ -260,7 +260,10 @@ BusManager::Start()
 {
 	fStack->AddBusManager(this);
 	fStackIndex = fStack->IndexOfBusManager(this);
-	fStack->Explore();
+	// The explore thread finds the devices (port resets and enumeration take
+	// up to seconds) while the boot goes on: a USB boot disk published late is
+	// waited for (get_boot_partitions()), and the rest are hot-plugged.
+	fStack->ScheduleExplore();
 	return B_OK;
 }
 
