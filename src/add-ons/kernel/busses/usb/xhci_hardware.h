@@ -18,12 +18,17 @@
 #define	PCI_DEVICE_INTEL_BAYTRAIL_XHCI			0x0f35
 #define	PCI_DEVICE_INTEL_WILDCAT_POINT_XHCI		0x8cb1
 #define	PCI_DEVICE_INTEL_WILDCAT_POINT_LP_XHCI	0x9cb1
+#define	PCI_VENDOR_VIA							0x1106
+#define	PCI_DEVICE_VIA_VL805					0x3483
 
 // Intel quirks registers in PCI config
 #define	XHCI_INTEL_USB3PRM				0xdc	// USB 3.0 Port Routing Mask
 #define	XHCI_INTEL_USB3_PSSEN			0xd8	// USB 3.0 Port SuperSpeed Enable
 #define	XHCI_INTEL_USB2PRM				0xd4	// USB 2.0 Port Routing Mask
 #define	XHCI_INTEL_XUSB2PR				0xd0	// USB 2.0 Port Routing
+
+// VIA VL805 registers in PCI config
+#define	XHCI_VL805_FIRMWARE_VERSION		0x50
 
 // Host Controller Capability Registers
 #define XHCI_HCI_CAPLENGTH	0x00		// HCI Capability Register Length

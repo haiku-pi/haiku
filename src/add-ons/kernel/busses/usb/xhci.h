@@ -31,12 +31,24 @@ class XHCIRootHub;
  * (one for the link TRB, and one for the Event Data TRB). */
 #define XHCI_ENDPOINT_RING_SIZE	(XHCI_MAX_TRANSFERS * 2)
 
+/* Some controllers read up to four TRBs past a Link TRB, into whatever memory
+ * follows, and may later use those copies without reading them again, so that
+ * a ring placed there stays idle on a stale cycle bit (the VIA VL805 of the
+ * Raspberry Pi 4; Linux: XHCI_TRB_OVERFETCH). Every endpoint ring and every
+ * TD's TRBs are therefore followed by this many TRBs that are never used. */
+#define XHCI_TRB_OVERFETCH		4
+#define XHCI_ENDPOINT_RING_STRIDE	(XHCI_ENDPOINT_RING_SIZE + XHCI_TRB_OVERFETCH)
+
 
 struct xhci_td : public DoublyLinkedListLinkImpl<xhci_td> {
 	xhci_trb*	trbs;
 	phys_addr_t	trb_addr;
 	uint32		trb_count;
 	uint32		trb_used;
+
+	// the endpoint ring's Link and Event Data TRBs for this TD
+	uint8		ring_link;
+	uint8		ring_event_data;
 
 	void**		buffers;
 	phys_addr_t* buffer_addrs;
@@ -73,7 +85,7 @@ struct xhci_device {
 	uint8 address;
 	area_id trb_area;
 	phys_addr_t trb_addr;
-	struct xhci_trb *trbs; // [XHCI_MAX_ENDPOINTS - 1][XHCI_ENDPOINT_RING_SIZE]
+	struct xhci_trb *trbs; // [XHCI_MAX_ENDPOINTS - 1][XHCI_ENDPOINT_RING_STRIDE]
 
 	area_id input_ctx_area;
 	phys_addr_t input_ctx_addr;
@@ -167,6 +179,8 @@ private:
 									generic_io_vec *vector, size_t vectorCount, bool physical);
 
 			status_t			_LinkDescriptorForPipe(xhci_td *descriptor,
+									xhci_endpoint *endpoint);
+			void				_ClearRingEntries(xhci_td *descriptor,
 									xhci_endpoint *endpoint);
 			status_t			_UnlinkDescriptorForPipe(xhci_td *descriptor,
 									xhci_endpoint *endpoint);

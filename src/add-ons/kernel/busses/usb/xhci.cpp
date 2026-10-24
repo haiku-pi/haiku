@@ -433,6 +433,13 @@ XHCI::XHCI(pci_info* info, pci_device_module_info* pci, pci_device* device,
 		return;
 	TRACE_ALWAYS("capability parameters: 0x%08" B_PRIx32 "\n", cparams);
 
+	if (fPCIInfo->vendor_id == PCI_VENDOR_VIA
+		&& fPCIInfo->device_id == PCI_DEVICE_VIA_VL805) {
+		// the Raspberry Pi 4's controller; its errata depend on the firmware
+		TRACE_ALWAYS("VL805 firmware version: 0x%06" B_PRIx32 "\n",
+			fPci->read_pci_config(fDevice, XHCI_VL805_FIRMWARE_VERSION, 4));
+	}
+
 	// if 64 bytes context structures, then 1
 	fContextSizeShift = HCC_CSZ(cparams);
 
@@ -1372,14 +1379,16 @@ XHCI::CreateDescriptor(uint32 trbCount, uint32 bufferCount, size_t bufferSize)
 	}
 
 	// We always allocate 1 more TRB than requested, so that
-	// _LinkDescriptorForPipe() has room to insert a link TRB.
+	// _LinkDescriptorForPipe() has room to insert a link TRB, and the TRBs
+	// a controller may read past it (XHCI_TRB_OVERFETCH).
 	trbCount++;
 	if (fStack->AllocateChunk((void**)&result->trbs, &result->trb_addr,
-			(trbCount * sizeof(xhci_trb))) < B_OK) {
+			((trbCount + XHCI_TRB_OVERFETCH) * sizeof(xhci_trb))) < B_OK) {
 		TRACE_ERROR("failed to allocate TRBs\n");
 		FreeDescriptor(result);
 		return NULL;
 	}
+	memset(result->trbs + trbCount, 0, XHCI_TRB_OVERFETCH * sizeof(xhci_trb));
 	result->trb_count = trbCount;
 	result->trb_used = 0;
 
@@ -1464,7 +1473,7 @@ XHCI::FreeDescriptor(xhci_td* descriptor)
 
 	if (descriptor->trbs != NULL) {
 		fStack->FreeChunk(descriptor->trbs, descriptor->trb_addr,
-			(descriptor->trb_count * sizeof(xhci_trb)));
+			((descriptor->trb_count + XHCI_TRB_OVERFETCH) * sizeof(xhci_trb)));
 	}
 	if (descriptor->buffers != NULL) {
 		size_t totalSize = descriptor->buffer_size * descriptor->buffer_count;
@@ -1713,7 +1722,7 @@ XHCI::AllocateDevice(Hub* parent, int8 hubAddress, uint8 hubPort, usb_speed spee
 
 	device->trb_area = fStack->AllocateArea((void**)&device->trbs,
 		&device->trb_addr, sizeof(xhci_trb) * (XHCI_MAX_ENDPOINTS - 1)
-			* XHCI_ENDPOINT_RING_SIZE, "XHCI endpoint trbs");
+			* XHCI_ENDPOINT_RING_STRIDE, "XHCI endpoint trbs");
 	if (device->trb_area < B_OK) {
 		TRACE_ERROR("unable to create a device trbs area\n");
 		CleanupDevice(device);
@@ -1983,9 +1992,9 @@ XHCI::_InsertEndpointForPipe(Pipe* pipe)
 		endpoint->used = 0;
 		endpoint->next = 0;
 
-		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_SIZE;
+		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_STRIDE;
 		endpoint->trb_addr = device->trb_addr
-			+ id * XHCI_ENDPOINT_RING_SIZE * sizeof(xhci_trb);
+			+ id * XHCI_ENDPOINT_RING_STRIDE * sizeof(xhci_trb);
 		memset(endpoint->trbs, 0,
 			sizeof(xhci_trb) * XHCI_ENDPOINT_RING_SIZE);
 
@@ -2161,6 +2170,9 @@ XHCI::_LinkDescriptorForPipe(xhci_td* descriptor, xhci_endpoint* endpoint)
 	endpoint->trbs[next].status = 0;
 	endpoint->trbs[next].flags = 0;
 
+	descriptor->ring_link = link;
+	descriptor->ring_event_data = eventdata;
+
 	memory_write_barrier();
 
 	// Everything is ready, so write the cycle bit.
@@ -2188,6 +2200,20 @@ XHCI::_LinkDescriptorForPipe(xhci_td* descriptor, xhci_endpoint* endpoint)
 		_ReadContext(&endpoint->device->device_ctx->endpoints[endpoint->id].qwendpoint2));
 
 	return B_OK;
+}
+
+
+void
+XHCI::_ClearRingEntries(xhci_td* descriptor, xhci_endpoint* endpoint)
+{
+	ASSERT_LOCKED_MUTEX(&endpoint->lock);
+
+	const uint8 entries[] = { descriptor->ring_link, descriptor->ring_event_data };
+	for (uint8 entry : entries) {
+		endpoint->trbs[entry].address = 0;
+		endpoint->trbs[entry].status = 0;
+		endpoint->trbs[entry].flags = 0;
+	}
 }
 
 
@@ -2822,6 +2848,16 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 		// But if we have an unsuccessful completion code, the transfer
 		// likely failed midway; so just accept it anyway.
 		if (offset == (td->trb_used - 1) || completionCode != COMP_SUCCESS) {
+			if ((flags & TRB_3_EVENT_DATA_BIT) != 0) {
+				// The event comes from the Event Data TRB (whatever the
+				// completion code, e.g. a short packet), so the controller is
+				// past this TD's ring entries: clear them.
+				// The ring never toggles its cycle bit, so they would still
+				// look valid a lap later, and some controllers (the VL805)
+				// may then execute stale copies they prefetched instead of
+				// stopping at the cleared TRB after the last queued TD.
+				_ClearRingEntries(td, endpoint);
+			}
 			_UnlinkDescriptorForPipe(td, endpoint);
 			endpointLocker.Unlock();
 
