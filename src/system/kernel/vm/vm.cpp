@@ -2400,9 +2400,13 @@ _vm_map_file(team_id team, const char* name, void** _address,
 		// TODO: this probably deserves a smarter solution, e.g. probably
 		// trigger prefetch somewhere else.
 
-		// Prefetch at most 10MB starting from "offset", but only if the cache
-		// doesn't already contain more pages than the prefetch size.
-		const size_t prefetch = min_c(size, 10LL * 1024 * 1024);
+		// Prefetch at most 1 MB starting from "offset", but only if the cache
+		// doesn't already contain more pages than the prefetch size. That
+		// covers the headers and tables at the start of most libraries; more
+		// was mostly data nobody reads: mapping ICU's 30 MB data library read
+		// and decompressed 10 MB of it at every boot, in the way of the first
+		// program's page faults (the launch_daemon started 0.6 s later).
+		const size_t prefetch = min_c(size, 1LL * 1024 * 1024);
 		if (cache->page_count < (prefetch / B_PAGE_SIZE))
 			cache_prefetch_vnode(vnode, offset, prefetch);
 	}
