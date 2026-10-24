@@ -1768,6 +1768,55 @@ device_node::_GetNextDriverPath(void*& cookie, KPath& _path)
 }
 
 
+/*!	When the device manager probes all nodes after the boot volume is mounted,
+	every node tries the same driver modules, and each would be loaded, asked,
+	and, with its last reference gone, unloaded again, once per node. While
+	that probe runs, the modules it loads keep a reference until it is done.
+*/
+struct ProbeModuleReference : DoublyLinkedListLinkImpl<ProbeModuleReference> {
+	char	name[B_FILE_NAME_LENGTH];
+};
+typedef DoublyLinkedList<ProbeModuleReference> ProbeModuleReferenceList;
+static ProbeModuleReferenceList* sProbeModuleReferences = NULL;
+	// set while device_manager_init_post_modules() reprobes (with sLock held)
+
+
+static void
+keep_probe_module(const char* name)
+{
+	if (sProbeModuleReferences == NULL)
+		return;
+
+	ProbeModuleReferenceList::Iterator iterator
+		= sProbeModuleReferences->GetIterator();
+	while (ProbeModuleReference* reference = iterator.Next()) {
+		if (strcmp(reference->name, name) == 0)
+			return;
+	}
+
+	ProbeModuleReference* reference = new(std::nothrow) ProbeModuleReference;
+	if (reference == NULL)
+		return;
+	module_info* module;
+	if (get_module(name, &module) != B_OK) {
+		delete reference;
+		return;
+	}
+	strlcpy(reference->name, name, sizeof(reference->name));
+	sProbeModuleReferences->Add(reference);
+}
+
+
+static void
+release_probe_modules(ProbeModuleReferenceList& list)
+{
+	while (ProbeModuleReference* reference = list.RemoveHead()) {
+		put_module(reference->name);
+		delete reference;
+	}
+}
+
+
 status_t
 device_node::_GetNextDriver(void* list, driver_module_info*& driver)
 {
@@ -1784,6 +1833,7 @@ device_node::_GetNextDriver(void* list, driver_module_info*& driver)
 
 		if (get_module(name, (module_info**)&driver) != B_OK)
 			continue;
+		keep_probe_module(name);
 
 		if (driver->supports_device == NULL
 			|| driver->register_device == NULL) {
@@ -2450,7 +2500,14 @@ status_t
 device_manager_init_post_modules(struct kernel_args* args)
 {
 	RecursiveLocker _(sLock);
-	return sRootNode->Reprobe();
+
+	ProbeModuleReferenceList probeModules;
+	sProbeModuleReferences = &probeModules;
+	status_t status = sRootNode->Reprobe();
+	sProbeModuleReferences = NULL;
+	release_probe_modules(probeModules);
+
+	return status;
 }
 
 
