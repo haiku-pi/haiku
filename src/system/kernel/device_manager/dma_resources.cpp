@@ -26,7 +26,12 @@
 
 extern device_manager_info gDeviceManagerModule;
 
-const phys_size_t kMaxBounceBufferSize = 4 * B_PAGE_SIZE;
+// A transfer that needs bouncing (a buffer outside the device's DMA window, as
+// any above 1 GB for the Raspberry Pi 4's SD controller, or a disk offset not
+// aligned to the block size) is done in operations of at most one bounce buffer
+// each. At 16 kB, a 256 kB read from an SD card took 16 commands, and ran at a
+// third of the card's speed.
+const phys_size_t kMaxBounceBufferSize = 32 * B_PAGE_SIZE;
 
 
 DMABuffer*
