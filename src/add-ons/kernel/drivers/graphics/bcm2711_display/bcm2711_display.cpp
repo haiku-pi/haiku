@@ -342,12 +342,18 @@ start_vertical_blank(display_info& info)
 	}
 
 	if (status == B_OK) {
-		snooze(kVblankProbeTime);
-		int64 count = atomic_get64(&info.shared_info->vblank_count);
+		// three vertical blanks show that the interrupt works: ~50 ms at
+		// 60 Hz; give up after kVblankProbeTime
+		bigtime_t deadline = system_time() + kVblankProbeTime;
+		int64 count = 0;
+		while ((count = atomic_get64(&info.shared_info->vblank_count)) < 3
+			&& system_time() < deadline) {
+			snooze(5000);
+		}
 		if (count >= 3) {
 			info.shared_info->vblank_from_interrupt = true;
 			TRACE_ALWAYS("vertical blank: SMI interrupt %" B_PRId32 ", %"
-				B_PRId64 " in %" B_PRId64 " ms\n", interrupt, count,
+				B_PRId64 " within %" B_PRId64 " ms\n", interrupt, count,
 				kVblankProbeTime / 1000);
 			return;
 		}
