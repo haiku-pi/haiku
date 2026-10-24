@@ -114,7 +114,7 @@ RemotePackageRepository HaikuPorts
 	openssl3-3.5.9-1
 	openssl3_devel-3.5.9-1
 	# haiku-pi: Firefox (scripts/build-firefox.sh)
-	firefox-157.0.1-4
+	firefox-157.0.1-5
 	# haiku-pi: the free games (scripts/package-games.sh; images: -sHAIKU_PI_GAMES=1), their data split
 	# into packages under GitHub's file size limit
 	openarena-0.8.8-4
