@@ -290,8 +290,10 @@ scheduler_new_thread_entry(Thread* thread)
 static inline void
 switch_thread(Thread* fromThread, Thread* toThread)
 {
-	// notify the user debugger code
-	if ((fromThread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0)
+	// notify the user debugger code (also when the team lost its debugger
+	// while the thread ran: its profiling timer must not stay on this CPU)
+	if ((fromThread->flags & THREAD_FLAGS_DEBUGGER_INSTALLED) != 0
+		|| fromThread->debug_info.profile.installed_timer != NULL)
 		user_debug_thread_unscheduled(fromThread);
 
 	// stop CPU time based user timers

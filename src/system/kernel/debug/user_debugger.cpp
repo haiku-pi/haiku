@@ -1199,6 +1199,15 @@ user_debug_thread_exiting(Thread* thread)
 	threadDebugInfo.profile.sample_area = -1;
 	threadDebugInfo.profile.samples = NULL;
 	threadDebugInfo.profile.flush_needed = false;
+	// The profiling timer must not outlive the samples: once this thread no
+	// longer counts as debugged, nothing unlinks it when the thread is
+	// unscheduled, and it stays in this CPU's timer list. (We are on the
+	// timer's CPU, so this does not wait for its hook.)
+	if (threadDebugInfo.profile.installed_timer != NULL) {
+		cancel_timer(threadDebugInfo.profile.installed_timer);
+		threadDebugInfo.profile.installed_timer->hook = NULL;
+		threadDebugInfo.profile.installed_timer = NULL;
+	}
 	bigtime_t lastCPUTime; {
 		SpinLocker threadTimeLocker(thread->time_lock);
 		lastCPUTime = thread->CPUTime(false);
@@ -1327,8 +1336,15 @@ static void
 schedule_profiling_timer(Thread* thread, bigtime_t interval)
 {
 	struct timer* timer = &sProfilingTimers[thread->cpu->cpu_num];
-	// Use the "hook" field to sanity-check that this timer is not scheduled.
-	ASSERT(timer->hook == NULL);
+	// The timer is this CPU's, shared by the profiled threads that run here,
+	// and it may still be scheduled for another thread (see
+	// profiling_event()). Adding it while it is still in
+	// the CPU's timer list linked it to itself, and the next walk of the list
+	// spun for ever with interrupts disabled (profiling Wine with
+	// "profile -f -k" hung the system). Unlink it first; for a timer that is
+	// not scheduled, or whose hook is running (we may be called from it),
+	// this does nothing.
+	cancel_timer(timer);
 	thread->debug_info.profile.installed_timer = timer;
 	thread->debug_info.profile.timer_end = system_time() + interval;
 	add_timer(timer, &profiling_event, interval, B_ONE_SHOT_RELATIVE_TIMER);
@@ -1497,12 +1513,21 @@ profiling_flush(void*)
 	Called with interrupts disabled.
 */
 static int32
-profiling_event(timer* /*unused*/)
+profiling_event(timer* timer)
 {
 	Thread* thread = thread_get_current_thread();
 	thread_debug_info& debugInfo = thread->debug_info;
 
 	SpinLocker threadDebugInfoLocker(debugInfo.lock);
+	if (debugInfo.profile.installed_timer != timer) {
+		// Not the running thread's timer, left behind by a thread that was
+		// unscheduled without cancelling it. That happened when the thread's
+		// team lost its debugger while the thread ran (switch_thread() now
+		// checks for an installed timer too); never sample the wrong thread.
+		timer->hook = NULL;
+		return B_HANDLED_INTERRUPT;
+	}
+
 	debugInfo.profile.installed_timer->hook = NULL;
 	debugInfo.profile.installed_timer = NULL;
 
