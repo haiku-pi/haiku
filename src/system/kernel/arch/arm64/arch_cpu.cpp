@@ -88,23 +88,30 @@ arch_cpu_sync_icache(void *address, size_t len)
 	uint64_t ctr_el0 = 0;
 	asm volatile ("mrs\t%0, ctr_el0":"=r" (ctr_el0));
 
-	uint64_t icache_line_size = 4 << (ctr_el0 << 0xF);
+	// CTR_EL0: IminLine (bits 3:0) and DminLine (bits 19:16) are log2 of the
+	// smallest line size in words; IDC (bit 28) and DIC (bit 29) say that the
+	// data cache clean and the instruction cache invalidation are not needed.
+	uint64_t icache_line_size = 4 << (ctr_el0 & 0xF);
 	uint64_t dcache_line_size = 4 << ((ctr_el0 >> 16) & 0xF);
 	uint64_t addr = (uint64_t)address;
 	uint64_t end = addr + len;
 
-	for (uint64_t address_dcache = ROUNDDOWN(addr, dcache_line_size);
-	     address_dcache < end; address_dcache += dcache_line_size) {
-		asm volatile ("dc cvau, %0" : : "r"(address_dcache) : "memory");
+	if ((ctr_el0 & (1 << 28)) == 0) {
+		for (uint64_t address_dcache = ROUNDDOWN(addr, dcache_line_size);
+			address_dcache < end; address_dcache += dcache_line_size) {
+			asm volatile ("dc cvau, %0" : : "r"(address_dcache) : "memory");
+		}
 	}
 
 	asm("dsb ish");
 
-	for (uint64_t address_icache = ROUNDDOWN(addr, icache_line_size);
-         address_icache < end; address_icache += icache_line_size) {
-		asm volatile ("ic ivau, %0" : : "r"(address_icache) : "memory");
+	if ((ctr_el0 & (1 << 29)) == 0) {
+		for (uint64_t address_icache = ROUNDDOWN(addr, icache_line_size);
+			address_icache < end; address_icache += icache_line_size) {
+			asm volatile ("ic ivau, %0" : : "r"(address_icache) : "memory");
+		}
+		asm("dsb ish");
 	}
-	asm("dsb ish");
 	asm("isb");
 }
 
