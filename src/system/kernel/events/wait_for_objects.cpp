@@ -576,9 +576,10 @@ common_poll(struct pollfd *fds, nfds_t numFDs, bigtime_t timeout,
 	for (uint32 i = 0; i < numFDs; i++) {
 		int fd = fds[i].fd;
 
-		// initialize events masks
-		fds[i].events |= POLLNVAL | POLLERR | POLLHUP;
-		sync->set[i].selected_events = fds[i].events;
+		// initialize events masks (the error events are always reported;
+		// the caller's events field is input only and stays unchanged)
+		sync->set[i].selected_events
+			= fds[i].events | POLLNVAL | POLLERR | POLLHUP;
 		sync->set[i].events = 0;
 		fds[i].revents = 0;
 
@@ -631,7 +632,8 @@ common_poll(struct pollfd *fds, nfds_t numFDs, bigtime_t timeout,
 					continue;
 
 				// POLLxxx flags and B_SELECT_xxx flags are compatible
-				fds[i].revents = sync->set[i].events & fds[i].events;
+				fds[i].revents = sync->set[i].events
+					& (fds[i].events | POLLNVAL | POLLERR | POLLHUP);
 				if (fds[i].revents != 0)
 					count++;
 			}
