@@ -16,6 +16,9 @@
 
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
+#include <netinet/ip6.h>
+
+#include <algorithm>
 #include <new>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +46,25 @@ static net_error
 icmp6_to_net_error(uint8 type, uint8 code)
 {
 	switch (type) {
+		case ICMP6_DST_UNREACH:
+			switch (code) {
+				case ICMP6_DST_UNREACH_NOROUTE:
+					return B_NET_ERROR_UNREACH_NET;
+				case ICMP6_DST_UNREACH_ADMIN:
+					return B_NET_ERROR_UNREACH_HOST_PROHIBITED;
+				case ICMP6_DST_UNREACH_BEYONDSCOPE:
+				case ICMP6_DST_UNREACH_ADDR:
+					return B_NET_ERROR_UNREACH_HOST;
+				case ICMP6_DST_UNREACH_NOPORT:
+					return B_NET_ERROR_UNREACH_PORT;
+			}
+			break;
+
+		case ICMP6_TIME_EXCEEDED:
+			if (code == ICMP6_TIME_EXCEED_REASSEMBLY)
+				return B_NET_ERROR_REASSEMBLY_TIME_EXCEEDED;
+			return B_NET_ERROR_TRANSIT_TIME_EXCEEDED;
+
 		case ICMP6_PARAM_PROB:
 			return B_NET_ERROR_PARAMETER_PROBLEM;
 
@@ -54,6 +76,52 @@ icmp6_to_net_error(uint8 type, uint8 code)
 	}
 
 	return (net_error)0;
+}
+
+
+static bool
+net_error_to_icmp6(net_error error, uint8& type, uint8& code)
+{
+	code = 0;
+
+	switch (error) {
+		case B_NET_ERROR_UNREACH_NET:
+			type = ICMP6_DST_UNREACH;
+			code = ICMP6_DST_UNREACH_NOROUTE;
+			return true;
+		case B_NET_ERROR_UNREACH_HOST:
+			type = ICMP6_DST_UNREACH;
+			code = ICMP6_DST_UNREACH_ADDR;
+			return true;
+		case B_NET_ERROR_UNREACH_PORT:
+			type = ICMP6_DST_UNREACH;
+			code = ICMP6_DST_UNREACH_NOPORT;
+			return true;
+		case B_NET_ERROR_UNREACH_NET_PROHIBITED:
+		case B_NET_ERROR_UNREACH_HOST_PROHIBITED:
+		case B_NET_ERROR_UNREACH_FILTER_PROHIBITED:
+			type = ICMP6_DST_UNREACH;
+			code = ICMP6_DST_UNREACH_ADMIN;
+			return true;
+		case B_NET_ERROR_MESSAGE_SIZE:
+			type = ICMP6_PACKET_TOO_BIG;
+			return true;
+		case B_NET_ERROR_TRANSIT_TIME_EXCEEDED:
+			type = ICMP6_TIME_EXCEEDED;
+			code = ICMP6_TIME_EXCEED_TRANSIT;
+			return true;
+		case B_NET_ERROR_REASSEMBLY_TIME_EXCEEDED:
+			type = ICMP6_TIME_EXCEEDED;
+			code = ICMP6_TIME_EXCEED_REASSEMBLY;
+			return true;
+		case B_NET_ERROR_PARAMETER_PROBLEM:
+			type = ICMP6_PARAM_PROB;
+			code = ICMP6_PARAMPROB_HEADER;
+			return true;
+
+		default:
+			return false;
+	}
 }
 
 
@@ -347,11 +415,97 @@ icmp6_error_received(net_error code, net_error_data* errorData, net_buffer* data
 }
 
 
+/*!	Sends an ICMPv6 error message (RFC 4443) about \a buffer, a received
+	datagram whose IPv6 header is still stored in it: back to its source, with
+	its IPv6 header and the first 8 bytes of what follows (enough for the
+	sender to find the socket).
+*/
 status_t
 icmp6_error_reply(net_protocol* protocol, net_buffer* buffer, net_error error,
 	net_error_data* errorData)
 {
-	return B_ERROR;
+	uint8 icmpType;
+	uint8 icmpCode;
+	if (!net_error_to_icmp6(error, icmpType, icmpCode))
+		return B_BAD_VALUE;
+
+	ip6_hdr header;
+	if (gBufferModule->restore_header(buffer, 0, &header, sizeof(ip6_hdr))
+			!= B_OK
+		|| (header.ip6_vfc & IPV6_VERSION_MASK) != IPV6_VERSION)
+		return B_BAD_VALUE;
+
+	// RFC 4443 2.4 (e): no error message in reply to an ICMPv6 error message,
+	if (header.ip6_nxt == IPPROTO_ICMPV6) {
+		uint8 type;
+		if (gBufferModule->restore_header(buffer, sizeof(ip6_hdr), &type, 1)
+				!= B_OK
+			|| (type & ICMP6_INFOMSG_MASK) == 0)
+			return B_ERROR;
+	}
+
+	// to a multicast destination (except Packet Too Big),
+	if ((buffer->msg_flags & MSG_MCAST) != 0
+		&& icmpType != ICMP6_PACKET_TOO_BIG)
+		return B_ERROR;
+
+	// or to a source that does not identify a single node.
+	// (IN6_IS_ADDR_UNSPECIFIED() needs in6addr_any, which is not here)
+	static const in6_addr kUnspecified = {};
+	if (memcmp(&header.ip6_src, &kUnspecified, sizeof(in6_addr)) == 0
+		|| IN6_IS_ADDR_MULTICAST(&header.ip6_src))
+		return B_ERROR;
+
+	net_domain* domain = get_domain(buffer);
+	if (domain == NULL)
+		return B_ERROR;
+
+	net_buffer* reply = gBufferModule->create(256);
+	if (reply == NULL)
+		return B_NO_MEMORY;
+
+	sockaddr_in6* source = (sockaddr_in6*)reply->source;
+	sockaddr_in6* destination = (sockaddr_in6*)reply->destination;
+	memset(source, 0, sizeof(sockaddr_in6));
+	source->sin6_len = sizeof(sockaddr_in6);
+	source->sin6_family = AF_INET6;
+	source->sin6_addr = header.ip6_dst;
+	memcpy(destination, source, sizeof(sockaddr_in6));
+	destination->sin6_addr = header.ip6_src;
+
+	NetBufferPrepend<icmp6_hdr> icmpHeader(reply);
+	status_t status = icmpHeader.Status();
+	if (status != B_OK) {
+		gBufferModule->free(reply);
+		return status;
+	}
+	icmpHeader->icmp6_type = icmpType;
+	icmpHeader->icmp6_code = icmpCode;
+	icmpHeader->icmp6_cksum = 0;
+	icmpHeader->icmp6_data32[0] = 0;
+	if (errorData != NULL) {
+		if (error == B_NET_ERROR_MESSAGE_SIZE)
+			icmpHeader->icmp6_mtu = htonl(errorData->mtu);
+		else if (error == B_NET_ERROR_PARAMETER_PROBLEM)
+			icmpHeader->icmp6_pptr = htonl(errorData->error_offset);
+	}
+	icmpHeader.Sync();
+
+	// the IPv6 header and 8 bytes of the original datagram
+	size_t length = std::min(sizeof(ip6_hdr) + 8,
+		sizeof(ip6_hdr) + ntohs(header.ip6_plen));
+	status = gBufferModule->append_restored_header(reply, buffer, 0, length);
+	if (status == B_OK) {
+		reply->protocol = IPPROTO_ICMPV6;
+		*ICMP6ChecksumField(reply) = Checksum::PseudoHeader(
+			domain->address_module, gBufferModule, reply, IPPROTO_ICMPV6);
+
+		status = domain->module->send_data(NULL, reply);
+	}
+	if (status != B_OK)
+		gBufferModule->free(reply);
+
+	return status;
 }
 
 
