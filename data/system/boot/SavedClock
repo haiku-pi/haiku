@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# SavedClock - keeps the time across boots on a computer without a battery-
+# backed clock (such as the Raspberry Pi 4), whose clock starts in 1970: at
+# boot the clock is set forward to the time last saved, if it is behind it;
+# then the time is saved every few minutes and when the system shuts down.
+# Network time synchronization corrects it later in either direction. The clock
+# is only ever moved forward here, so a working clock is left alone.
+
+file=/boot/system/settings/saved_clock
+interval=300
+
+if [ -f "$file" ]; then
+	saved=$(stat -c %Y "$file")
+	if [ -n "$saved" ] && [ "$(date +%s)" -lt "$saved" ]; then
+		date -s "@$saved" > /dev/null
+	fi
+fi
+
+save()
+{
+	touch "$file" 2>/dev/null
+}
+
+sleeper=
+trap 'kill $sleeper 2>/dev/null; save; exit 0' TERM INT
+
+while save; do
+	sleep $interval &
+	sleeper=$!
+	wait $sleeper
+done
