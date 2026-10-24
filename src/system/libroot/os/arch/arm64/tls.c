@@ -3,6 +3,7 @@
  * Distributed under the terms of the MIT License.
  */
 
+#include <arch_elf.h>
 #include <runtime_loader/runtime_loader.h>
 
 #include <support/TLS.h>
@@ -64,5 +65,22 @@ tls_set(int32 index, void *value)
 void*
 __tls_get_addr(struct tls_index* ti)
 {
+	// Fast path, without calling into the runtime loader: this thread's
+	// dynamic thread vector is up to date (no TLS image unloaded since it was
+	// last checked) and already holds the block. The layout is that of
+	// DynamicThreadVector in runtime_loader/elf_tls.cpp: entry 0 points to
+	// the vector's generation counter and size, entry dso + 1 to the block.
+	void** vector = (void**)get_tls()[TLS_DYNAMIC_THREAD_VECTOR];
+	const unsigned* generation = __gRuntimeLoader->tls_generation;
+	if (vector != NULL && generation != NULL) {
+		const unsigned* vectorGeneration = (const unsigned*)vector[0];
+		if (vectorGeneration[0] == *generation
+			&& ti->ti_module < vectorGeneration[1]) {
+			char* block = (char*)vector[ti->ti_module + 1];
+			if (block != NULL)
+				return block + TLS_DTV_OFFSET + ti->ti_offset;
+		}
+	}
+
 	return __gRuntimeLoader->get_tls_address(ti->ti_module, ti->ti_offset);
 }

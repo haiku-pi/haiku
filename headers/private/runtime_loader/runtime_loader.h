@@ -59,6 +59,12 @@ struct rld_export {
 	const void* commpage_address;
 	int abi_version;
 	int api_version;
+
+	// The TLS generation, counting unloaded TLS images: a thread's dynamic
+	// thread vector (TLS_DYNAMIC_THREAD_VECTOR) whose generation equals it
+	// holds no stale blocks, so __tls_get_addr() may use it without calling
+	// get_tls_address(). NULL until the first TLS image is registered.
+	const unsigned* tls_generation;
 };
 
 extern struct rld_export *__gRuntimeLoader;

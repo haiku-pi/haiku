@@ -15,6 +15,9 @@
 #include <util/kernel_cpp.h>
 
 
+// The dynamic thread vector's layout is also known to __tls_get_addr() in
+// libroot, which reads it directly: entry 0 points to the thread's
+// Generation, entry dso + 1 is the TLSBlock of that DSO.
 class TLSBlock {
 public:
 	inline				TLSBlock();
@@ -163,6 +166,7 @@ TLSBlockTemplates::TLSBlockTemplates()
 	:
 	fGeneration(0)
 {
+	gRuntimeLoader.tls_generation = &fGeneration;
 }
 
 
