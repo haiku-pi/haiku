@@ -1,0 +1,6 @@
+String routines for AArch64 from Arm Optimized Routines
+(https://github.com/ARM-software/optimized-routines, string/aarch64/, commit
+0b5e3775c6c04761a2ecda8218eb45958c28be02), unmodified. Licence: MIT OR Apache-2.0 WITH LLVM-exception (LICENSE).
+
+They are built under libroot's names by the wrapper files one directory up. Only the
+Armv8.0 + Advanced SIMD variants are used: no SVE, MTE or MOPS ones.

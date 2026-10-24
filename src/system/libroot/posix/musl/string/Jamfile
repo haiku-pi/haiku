@@ -10,7 +10,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 	on $(architectureObject) {
 		local architecture = $(TARGET_PACKAGING_ARCH) ;
 
-		MergeObject <$(architecture)>posix_musl_string.o :
+		local sources =
 			index.c
 			memccpy.c
 			memchr.c
@@ -35,5 +35,12 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			strtok_r.c
 			swab.c
 			;
+		if $(TARGET_ARCH) = arm64 {
+			# in posix_string_arch_arm64.o
+			sources = [ FFilter $(sources) : memchr.c memmove.c memrchr.c
+				stpcpy.c strchr.c strchrnul.c strcpy.c strlen.c strnlen.c ] ;
+		}
+
+		MergeObject <$(architecture)>posix_musl_string.o : $(sources) ;
 	}
 }

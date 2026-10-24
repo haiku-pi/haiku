@@ -32,6 +32,18 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 		AddResources [ MultiArchDefaultGristFiles runtime_loader ]
 			: runtime_loader.rdef ;
 
+		local muslStringObjects = memchr memmove stpcpy strcat strchr strchrnul
+			strcpy strcspn strlcat strlcpy strlen strnlen strpbrk strspn strstr ;
+		local stringObjects = memcmp strcasecmp strcmp strdup strerror strncmp
+			strrchr ;
+		if $(TARGET_ARCH) = arm64 {
+			# in posix_string_arch_arm64.o (libruntime_loader_arm64.a)
+			muslStringObjects = [ FFilter $(muslStringObjects) : memchr memmove
+				stpcpy strchr strchrnul strcpy strlen strnlen ] ;
+			stringObjects = [ FFilter $(stringObjects) : memcmp strcmp strncmp
+				strrchr ] ;
+		}
+
 		# needed for "runtime_loader" only
 		StaticLibrary <$(architecture)>libruntime_loader.a :
 			kernel_vsprintf.cpp
@@ -52,29 +64,8 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			<src!system!libroot!posix!locale!$(architecture)>ctype_loc_global.o
 			<src!system!libroot!posix!locale!$(architecture)>LocaleData.o
 
-			<src!system!libroot!posix!musl!string!$(architecture)>memchr.o
-			<src!system!libroot!posix!musl!string!$(architecture)>memmove.o
-			<src!system!libroot!posix!musl!string!$(architecture)>stpcpy.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strcat.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strchr.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strchrnul.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strcpy.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strcspn.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strlcat.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strlcpy.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strlen.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strnlen.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strpbrk.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strspn.o
-			<src!system!libroot!posix!musl!string!$(architecture)>strstr.o
-
-			<src!system!libroot!posix!string!$(architecture)>memcmp.o
-			<src!system!libroot!posix!string!$(architecture)>strcasecmp.o
-			<src!system!libroot!posix!string!$(architecture)>strcmp.o
-			<src!system!libroot!posix!string!$(architecture)>strdup.o
-			<src!system!libroot!posix!string!$(architecture)>strerror.o
-			<src!system!libroot!posix!string!$(architecture)>strncmp.o
-			<src!system!libroot!posix!string!$(architecture)>strrchr.o
+			<src!system!libroot!posix!musl!string!$(architecture)>$(muslStringObjects).o
+			<src!system!libroot!posix!string!$(architecture)>$(stringObjects).o
 		;
 
 		SEARCH on [ FGristFiles kernel_cpp.cpp ]
