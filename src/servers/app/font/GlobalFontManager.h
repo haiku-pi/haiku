@@ -76,7 +76,7 @@ private:
 			bool				_LoadRecentFontMappings();
 			status_t			_AddMappedFont(const char* family,
 									const char* style = NULL);
-			void				_PrecacheFontFile(const ServerFont* font);
+	static	status_t			_PrecacheFontFiles(void* paths);
 			void				_AddSystemPaths();
 			void				_AddUserPaths();
 			font_directory*		_FindDirectory(node_ref& nodeRef);

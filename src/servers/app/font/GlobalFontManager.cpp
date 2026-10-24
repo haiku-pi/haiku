@@ -20,6 +20,7 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <File.h>
+#include <StringList.h>
 #include <FindDirectory.h>
 #include <Message.h>
 #include <NodeMonitor.h>
@@ -119,9 +120,20 @@ GlobalFontManager::GlobalFontManager()
 		fInitStatus = _SetDefaultFonts();
 
 		if (fInitStatus == B_OK) {
-			// Precache the plain and bold fonts
-			_PrecacheFontFile(fDefaultPlainFont.Get());
-			_PrecacheFontFile(fDefaultBoldFont.Get());
+			// Precache the plain and bold fonts, in a thread of their own: the
+			// files only need to be in the file cache before text is drawn,
+			// and reading them here held up the desktop's start
+			BStringList* paths = new(std::nothrow) BStringList;
+			if (paths != NULL) {
+				paths->Add(fDefaultPlainFont->Path());
+				paths->Add(fDefaultBoldFont->Path());
+				thread_id thread = spawn_thread(&_PrecacheFontFiles,
+					"precache fonts", B_LOW_PRIORITY, paths);
+				if (thread >= 0)
+					resume_thread(thread);
+				else
+					delete paths;
+			}
 
 			// Post a message so we scan the initial paths.
 			PostMessage(B_PULSE);
@@ -613,34 +625,36 @@ GlobalFontManager::GetStyle(const char* familyName, const char* styleName,
 }
 
 
-void
-GlobalFontManager::_PrecacheFontFile(const ServerFont* font)
+/*static*/ status_t
+GlobalFontManager::_PrecacheFontFiles(void* data)
 {
-	if (font == NULL)
-		return;
+	BStringList* paths = (BStringList*)data;
 
 	size_t bufferSize = 32768;
 	uint8* buffer = new (std::nothrow) uint8[bufferSize];
 	if (buffer == NULL) {
 		// We don't care. Pre-caching doesn't make sense anyways when there
 		// is not enough RAM...
-		return;
+		delete paths;
+		return B_NO_MEMORY;
 	}
 
-	BFile file(font->Path(), B_READ_ONLY);
-	if (file.InitCheck() != B_OK) {
-		delete[] buffer;
-		return;
-	}
+	for (int32 i = 0; i < paths->CountStrings(); i++) {
+		BFile file(paths->StringAt(i).String(), B_READ_ONLY);
+		if (file.InitCheck() != B_OK)
+			continue;
 
-	while (true) {
-		// We just want the file in the kernel file cache...
-		ssize_t read = file.Read(buffer, bufferSize);
-		if (read < (ssize_t)bufferSize)
-			break;
+		while (true) {
+			// We just want the file in the kernel file cache...
+			ssize_t read = file.Read(buffer, bufferSize);
+			if (read < (ssize_t)bufferSize)
+				break;
+		}
 	}
 
 	delete[] buffer;
+	delete paths;
+	return B_OK;
 }
 
 
