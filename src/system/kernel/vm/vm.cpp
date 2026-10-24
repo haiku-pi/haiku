@@ -5218,8 +5218,12 @@ lock_memory_etc(team_id team, void* address, size_t numBytes, uint32 flags)
 				cacheChainLocker.Unlock();
 				range->~VMAreaWiredRange();
 				free_etc(range, mallocFlags);
-			} else
+			} else {
+				// Only the pages before nextAddress are wired, and that is the
+				// range unlock_memory_etc() will look for when reverting.
+				range->size = nextAddress - areaStart;
 				cacheChainLocker.Unlock();
+			}
 
 			break;
 		}
