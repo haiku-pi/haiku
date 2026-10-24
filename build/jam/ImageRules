@@ -535,10 +535,12 @@ rule AddNewDriversToContainer container : relativeDirectoryTokens
 		: $(targets) : : $(flags) ;
 }
 
-rule AddBootModuleSymlinksToContainer container : targets
+rule AddBootModuleSymlinksToContainer container : targets : subDirectory
 {
-	# AddBootModuleSymlinksToContainer <container> : <targets> ;
+	# AddBootModuleSymlinksToContainer <container> : <targets>
+	#	[ : <subDirectory> ] ;
 	#
+	# The links go into add-ons/kernel/boot, or into its <subDirectory>.
 
 	# If the container shall only be updated, we don't add any symlinks.
 
@@ -575,9 +577,12 @@ rule AddBootModuleSymlinksToContainer container : targets
 
 		local name = $(target:BSM) ;
 		local linkTarget = [ FDirName ../../.. $(installDir) $(name) ] ;
+		if $(subDirectory) {
+			linkTarget = [ FDirName .. $(linkTarget) ] ;
+		}
 
 		AddSymlinkToContainer $(container)
-			: $(systemDirTokens) add-ons kernel boot
+			: $(systemDirTokens) add-ons kernel boot $(subDirectory)
 			: $(linkTarget) : $(name) ;
 	}
 }

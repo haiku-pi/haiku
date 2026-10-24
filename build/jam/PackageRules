@@ -325,11 +325,11 @@ rule AddNewDriversToPackage relativeDirectoryTokens : targets
 }
 
 
-rule AddBootModuleSymlinksToPackage targets
+rule AddBootModuleSymlinksToPackage targets : subDirectory
 {
 	if ! [ FDontRebuildCurrentPackage ] {
 		AddBootModuleSymlinksToContainer $(HAIKU_CURRENTLY_BUILT_HAIKU_PACKAGE)
-			: $(targets) ;
+			: $(targets) : $(subDirectory) ;
 	}
 }
 

@@ -334,22 +334,22 @@ AddFilesToPackage data Terminal Themes : $(terminalThemes) ;
 # boot module links
 AddBootModuleSymlinksToPackage
 	acpi@x86,x86_64,arm64
-	ahci
-	ata
-	ata_adapter
+	ahci@!arm64
+	ata@!arm64
+	ata_adapter@!arm64
 	bcm2835_mailbox@arm64
 	bfs
 	dpc
 	efi_gpt
-	generic_ide_pci
-	highpoint_ide_pci
+	generic_ide_pci@!arm64
+	highpoint_ide_pci@!arm64
 	hyperv@x86,x86_64
 	hyperv_scsi@x86,x86_64
 	ide_isa@x86
 	isa@x86,x86_64
 	intel
-	it8211
-	legacy_sata
+	it8211@!arm64
+	legacy_sata@!arm64
 	mmc
 	mmc_disk
 	nvme_disk
@@ -362,29 +362,28 @@ AddBootModuleSymlinksToPackage
 	<pci>x86@x86,x86_64
 	fdt@riscv64,arm,arm64
 	scsi
-	scsi_cd
+	scsi_cd@!arm64
 	scsi_disk
 	scsi_periph
-	silicon_image_3112
+	silicon_image_3112@!arm64
 	smbios@x86,x86_64
 	sdhci
-	ufshci
+	ufshci@!arm64
 	usb
 	usb_disk
-	<usb>ehci
-	<usb>ohci
-	<usb>uhci
+	<usb>ehci@!arm64
+	<usb>ohci@!arm64
+	<usb>uhci@!arm64
 	<usb>xhci
 	virtio
 	virtio_block@arm,arm64,riscv64
 	virtio_mmio@arm,arm64,riscv64
 	virtio_pci
 	virtio_scsi
-	# haiku-pi: network boot from a remote disk (the EFI loader finds one when
-	# its load options have "ip="; the network modules below)
-	remote_disk@arm64
-	genet@arm64
 ;
+# haiku-pi: the SATA, IDE, UFS, OHCI/UHCI/EHCI and CD drivers above are no boot
+# modules on arm64 (the Pi 4 boots from SD, USB 3 or the network); they still
+# load from /boot when a device needs them.
 
 # add-ons
 AddFilesToPackage add-ons accelerants :
@@ -469,15 +468,19 @@ AddFilesToPackage add-ons kernel network ppp
 	: $(SYSTEM_NETWORK_PPP) ;
 AddFilesToPackage add-ons kernel network protocols
 	: $(SYSTEM_NETWORK_PROTOCOLS) ;
-# haiku-pi: the network for booting from a remote disk, all of it: the kernel
-# keeps it loaded then (vfs_net_boot.cpp), as reading a network module from the
-# remote disk can deadlock. Boot module links may only name what is in the
-# package already.
+# haiku-pi: booting from a remote disk (the EFI loader finds one when its load
+# options have "ip="), and the network for it, all of it: the kernel keeps it
+# loaded then (vfs_net_boot.cpp), as reading a network module from the remote
+# disk can deadlock. In boot/network, which the loader reads on network boots
+# only. Boot module links may only name what is in the package already.
 AddBootModuleSymlinksToPackage
+	remote_disk@arm64
+	genet@arm64
 	stack@arm64
 	$(SYSTEM_NETWORK_DEVICES)@arm64
 	$(SYSTEM_NETWORK_DATALINK_PROTOCOLS)@arm64
 	$(SYSTEM_NETWORK_PROTOCOLS)@arm64
+	: network
 ;
 
 AddFilesToPackage add-ons Screen\ Savers : $(SYSTEM_ADD_ONS_SCREENSAVERS) ;

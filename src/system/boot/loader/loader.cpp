@@ -17,6 +17,7 @@
 #include <boot/stdio.h>
 #include <boot/partitions.h>
 
+#include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -161,6 +162,17 @@ load_modules_from(BootVolume& volume, const char* path)
 			if (!strcmp(name, ".") || !strcmp(name, ".."))
 				continue;
 
+			// subdirectories (boot/network) are loaded on their own
+			int entryFD = open_from(modules, name, O_RDONLY);
+			if (entryFD >= 0) {
+				struct stat entryStat;
+				bool isDirectory = fstat(entryFD, &entryStat) == 0
+					&& S_ISDIR(entryStat.st_mode);
+				close(entryFD);
+				if (isDirectory)
+					continue;
+			}
+
 			status_t status = elf_load_image(modules, name);
 			if (status != B_OK)
 				dprintf("Could not load \"%s\" error %" B_PRIx32 "\n", name, status);
@@ -202,10 +214,22 @@ load_modules(stage2_args* args, BootVolume& volume)
 		}
 	}
 
-	// and now load all partitioning and file system modules
 	char path[B_FILE_NAME_LENGTH];
+
+	// a network boot also needs the network and the remote disk driver
+	if (gBootParams.GetInt32(BOOT_METHOD, BOOT_METHOD_DEFAULT)
+			== BOOT_METHOD_NET) {
+		snprintf(path, sizeof(path), "%s/boot/network", sAddonPaths[0]);
+		load_modules_from(volume, path);
+	}
+
+	// and now load all partitioning and file system modules
+#ifndef __aarch64__
+	// (on arm64 the boot volume is BFS with packagefs, both boot modules; the
+	// kernel loads other file systems from it when they are needed)
 	snprintf(path, sizeof(path), "%s/%s", sAddonPaths[0], "file_systems");
 	load_modules_from(volume, path);
+#endif
 	snprintf(path, sizeof(path), "%s/%s", sAddonPaths[0], "partitioning_systems");
 	load_modules_from(volume, path);
 
