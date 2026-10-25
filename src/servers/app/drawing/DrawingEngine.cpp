@@ -108,6 +108,7 @@ public:
 		fDirty.IntersectWith(fEngine->fPainter->ClippingRegion());
 		if (fDirty.CountRects() == 0)
 			return;
+		fEngine->_ResolveDeferredBitmapCopy(&fDirty);
 		fOverlaysHidden
 			= fEngine->fGraphicsCard->HideFloatingOverlays(fDirty.Frame());
 	}
@@ -120,6 +121,7 @@ public:
 		fDirty = *fEngine->fPainter->ClippingRegion();
 		if (fDirty.CountRects() == 0)
 			return;
+		fEngine->_ResolveDeferredBitmapCopy(&fDirty);
 		fOverlaysHidden
 			= fEngine->fGraphicsCard->HideFloatingOverlays(fDirty.Frame());
 	}
@@ -133,6 +135,7 @@ public:
 		fDirty = region;
 		if (fDirty.CountRects() == 0)
 			return;
+		fEngine->_ResolveDeferredBitmapCopy(&fDirty);
 		fOverlaysHidden
 			= fEngine->fGraphicsCard->HideFloatingOverlays(fDirty.Frame());
 	}
@@ -180,7 +183,9 @@ DrawingEngine::DrawingEngine(HWInterface* interface)
 	:
 	fPainter(new Painter()),
 	fGraphicsCard(NULL),
-	fCopyToFront(true)
+	fCopyToFront(true),
+	fBitmapCopiesDeferred(false),
+	fDeferredBitmap(NULL)
 {
 	SetHWInterface(interface);
 }
@@ -188,6 +193,7 @@ DrawingEngine::DrawingEngine(HWInterface* interface)
 
 DrawingEngine::~DrawingEngine()
 {
+	_DropDeferredBitmapCopy();
 	SetHWInterface(NULL);
 }
 
@@ -245,6 +251,9 @@ DrawingEngine::UnlockExclusiveAccess()
 void
 DrawingEngine::FrameBufferChanged()
 {
+	// the back buffer is a new one
+	_DropDeferredBitmapCopy();
+
 	if (!fGraphicsCard) {
 		fPainter->DetachFromBuffer();
 		return;
@@ -287,7 +296,54 @@ DrawingEngine::SetCopyToFrontEnabled(bool enable)
 void
 DrawingEngine::CopyToFront(/*const*/ BRegion& region)
 {
-	fGraphicsCard->InvalidateRegion(region);
+	if (fDeferredBitmap == NULL) {
+		fGraphicsCard->InvalidateRegion(region);
+		return;
+	}
+
+	// the deferred bitmap goes to both buffers in one pass, the rest of the
+	// region from the back buffer
+	BRegion front(fDeferredRegion);
+	front.IntersectWith(&region);
+	BRegion backOnly(fDeferredRegion);
+	backOnly.Exclude(&region);
+	BRegion rest(region);
+	rest.Exclude(&front);
+
+	if (front.CountRects() > 0) {
+		fGraphicsCard->CopyToBackAndFront((const uint8*)fDeferredBitmap->Bits(),
+			fDeferredBitmap->BytesPerRow(), fDeferredOffset, front, true);
+	}
+	if (backOnly.CountRects() > 0) {
+		fGraphicsCard->CopyToBackAndFront((const uint8*)fDeferredBitmap->Bits(),
+			fDeferredBitmap->BytesPerRow(), fDeferredOffset, backOnly, false);
+	}
+	_DropDeferredBitmapCopy();
+
+	if (rest.CountRects() > 0)
+		fGraphicsCard->InvalidateRegion(rest);
+}
+
+
+void
+DrawingEngine::SetBitmapCopiesDeferred(bool deferred)
+{
+	if (!deferred)
+		ResolveDeferredBitmapCopy();
+	fBitmapCopiesDeferred = deferred;
+}
+
+
+/*!	Draws a deferred bitmap copy into the back buffer now: before anything
+	may read the back buffer or the bitmap may change.
+*/
+void
+DrawingEngine::ResolveDeferredBitmapCopy()
+{
+	if (fDeferredBitmap == NULL || !LockParallelAccess())
+		return;
+	_ResolveDeferredBitmapCopy();
+	UnlockParallelAccess();
 }
 
 
@@ -523,6 +579,9 @@ void
 DrawingEngine::CopyRegion(/*const*/ BRegion* region, int32 xOffset,
 	int32 yOffset)
 {
+	// it reads the back buffer outside the region it writes
+	_ResolveDeferredBitmapCopy();
+
 	// NOTE: region is already clipped
 	ASSERT_PARALLEL_LOCKED();
 
@@ -634,6 +693,37 @@ DrawingEngine::DrawBitmap(ServerBitmap* bitmap, const BRect& bitmapRect,
 	const BRect& viewRect, uint32 options)
 {
 	ASSERT_PARALLEL_LOCKED();
+
+	// A plain copy into the back buffer would be read back at once to be
+	// copied to the front buffer (or at the end of an update session): write
+	// both buffers in one pass instead.
+	BRegion region;
+	IntPoint offset;
+	if (_IsPlainBitmapCopy(bitmap, bitmapRect, viewRect, options, region,
+			offset)) {
+		if (fCopyToFront) {
+			_ResolveDeferredBitmapCopy(&region);
+			fGraphicsCard->CopyToBackAndFront((const uint8*)bitmap->Bits(),
+				bitmap->BytesPerRow(), offset, region, true);
+			return;
+		}
+		if (fBitmapCopiesDeferred) {
+			if (fDeferredBitmap != NULL) {
+				// the new copy overwrites what it covers of the previous one
+				BRegion uncovered(fDeferredRegion);
+				uncovered.Exclude(&region);
+				if (uncovered.CountRects() > 0)
+					_ResolveDeferredBitmapCopy();
+				else
+					_DropDeferredBitmapCopy();
+			}
+			bitmap->AcquireReference();
+			fDeferredBitmap = bitmap;
+			fDeferredOffset = offset;
+			fDeferredRegion = region;
+			return;
+		}
+	}
 
 	DrawTransaction transaction(this, fPainter->TransformAndClipRect(viewRect));
 	if (transaction.IsDirty())
@@ -1374,6 +1464,8 @@ DrawingEngine::DumpToBitmap()
 status_t
 DrawingEngine::ReadBitmap(ServerBitmap* bitmap, bool drawCursor, BRect bounds)
 {
+	_ResolveDeferredBitmapCopy();
+
 	ASSERT_EXCLUSIVE_LOCKED();
 
 	RenderingBuffer* buffer = fGraphicsCard->FrontBuffer();
@@ -1479,6 +1571,80 @@ void
 DrawingEngine::SetRendererOffset(int32 offsetX, int32 offsetY)
 {
 	fPainter->SetRendererOffset(offsetX, offsetY);
+}
+
+
+/*!	Whether DrawBitmap() would copy the bitmap's pixels unchanged into the
+	back buffer (Painter::IsPlainBitmapCopy()) on a screen whose front buffer
+	CopyToBackAndFront() can write: then \a region is what it writes (screen
+	coordinates) and \a offset the position of the bitmap's pixel (0, 0).
+	Small bitmaps (icons) gain nothing and take the usual path.
+*/
+bool
+DrawingEngine::_IsPlainBitmapCopy(ServerBitmap* bitmap,
+	const BRect& bitmapRect, const BRect& viewRect, uint32 options,
+	BRegion& region, IntPoint& offset) const
+{
+	static const int64 kMinPixels = 64 * 64;
+
+	if (bitmap == NULL || !fGraphicsCard->CanCopyToBackAndFront()
+		|| fPainter->ClippingRegion() == NULL) {
+		return false;
+	}
+
+	IntRect destination;
+	if (!fPainter->IsPlainBitmapCopy(bitmap, bitmapRect, viewRect, options,
+			destination, offset)
+		|| (int64)(destination.IntegerWidth() + 1)
+			* (destination.IntegerHeight() + 1) < kMinPixels) {
+		return false;
+	}
+
+	RenderingBuffer* buffer = fGraphicsCard->DrawingBuffer();
+	destination = destination & IntRect(0, 0, buffer->Width() - 1,
+		buffer->Height() - 1);
+	if (!destination.IsValid())
+		return false;
+
+	region = *fPainter->ClippingRegion();
+	BRegion destinationRegion;
+	destinationRegion.Set((clipping_rect)destination);
+	region.IntersectWith(&destinationRegion);
+	return region.CountRects() > 0;
+}
+
+
+/*!	Draws the deferred bitmap copy into the back buffer if \a dirty (the
+	region an operation is about to draw into or read) is NULL or meets it.
+	The engine must be locked.
+*/
+void
+DrawingEngine::_ResolveDeferredBitmapCopy(const BRegion* dirty)
+{
+	if (fDeferredBitmap == NULL)
+		return;
+	if (dirty != NULL) {
+		BRegion overlap(fDeferredRegion);
+		overlap.IntersectWith(dirty);
+		if (overlap.CountRects() == 0)
+			return;
+	}
+
+	fGraphicsCard->CopyToBackAndFront((const uint8*)fDeferredBitmap->Bits(),
+		fDeferredBitmap->BytesPerRow(), fDeferredOffset, fDeferredRegion,
+		false);
+	_DropDeferredBitmapCopy();
+}
+
+
+void
+DrawingEngine::_DropDeferredBitmapCopy()
+{
+	if (fDeferredBitmap == NULL)
+		return;
+	fDeferredBitmap->ReleaseReference();
+	fDeferredBitmap = NULL;
+	fDeferredRegion.MakeEmpty();
 }
 
 

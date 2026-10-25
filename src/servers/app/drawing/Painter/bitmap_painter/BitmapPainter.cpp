@@ -174,6 +174,30 @@ Painter::BitmapPainter::Draw(const BRect& sourceRect,
 }
 
 
+/*!	Whether Draw() would copy the bitmap's rows unchanged (DrawBitmapNoScale
+	with Bgr32Copy): the rectangle it writes and the bitmap's offset in it.
+*/
+bool
+Painter::BitmapPainter::IsPlainCopy(const BRect& sourceRect,
+	const BRect& destinationRect, IntRect& destination, IntPoint& offset)
+{
+	if (fStatus != B_OK || (fOptions & B_TILE_BITMAP) != 0
+		|| (fColorSpace != B_RGB32 && fColorSpace != B_RGBA32)
+		|| fPainter->fDrawingMode != B_OP_COPY
+		|| !_DetermineTransform(sourceRect, destinationRect)
+		|| _HasScale() || _HasAffineTransform() || _HasAlphaMask()) {
+		return false;
+	}
+
+	// as DrawBitmapNoScale::Draw() rounds them
+	destination = IntRect((int32)fDestinationRect.left,
+		(int32)fDestinationRect.top, (int32)fDestinationRect.right,
+		(int32)fDestinationRect.bottom);
+	offset = IntPoint(fOffset);
+	return destination.IsValid();
+}
+
+
 bool
 Painter::BitmapPainter::_DetermineTransform(BRect sourceRect,
 	const BRect& destinationRect)

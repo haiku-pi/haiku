@@ -4283,8 +4283,10 @@ ServerWindow::_MessageLooper()
 					fLink.Flush();
 				}
 
-				if (lockedDesktopSingleWindow)
+				if (lockedDesktopSingleWindow) {
+					_DeferBitmapCopies(false);
 					fDesktop->UnlockSingleWindow();
+				}
 
 				quitLoop = true;
 
@@ -4300,6 +4302,7 @@ ServerWindow::_MessageLooper()
 				// We may already still hold the read-lock from the previous
 				// inner-loop iteration.
 				if (lockedDesktopSingleWindow) {
+					_DeferBitmapCopies(false);
 					fDesktop->UnlockSingleWindow();
 					lockedDesktopSingleWindow = false;
 				}
@@ -4311,8 +4314,13 @@ ServerWindow::_MessageLooper()
 				if (!lockedDesktopSingleWindow) {
 					fDesktop->LockSingleWindow();
 					lockedDesktopSingleWindow = true;
+					_DeferBitmapCopies(true);
 				}
 			}
+
+			// a client waiting for a reply may change a bitmap it drew
+			if (receiver.NeedsReply() && fWindow.IsSet())
+				fWindow->GetDrawingEngine()->ResolveDeferredBitmapCopy();
 
 			if (atomic_and(&fRedrawRequested, 0) != 0) {
 #ifdef PROFILE_MESSAGE_LOOP
@@ -4356,10 +4364,15 @@ ServerWindow::_MessageLooper()
 
 			// Only process up to 70 waiting messages at once (we have the
 			// Desktop locked), but don't hold the lock longer than 10 ms
-			if (!receiver.HasMessages() || ++messagesProcessed > 70
+			if (!receiver.HasMessages() && lockedDesktopSingleWindow
+				&& _WaitForUpdateEnd()) {
+				// the rest of the update session arrived
+			} else if (!receiver.HasMessages() || ++messagesProcessed > 70
 				|| system_time() - processingStart > 10000) {
-				if (lockedDesktopSingleWindow)
+				if (lockedDesktopSingleWindow) {
+					_DeferBitmapCopies(false);
 					fDesktop->UnlockSingleWindow();
+				}
 				break;
 			}
 
@@ -4368,8 +4381,10 @@ ServerWindow::_MessageLooper()
 			if (status != B_OK) {
 				// that shouldn't happen, it's our port
 				printf("Someone deleted our message port!\n");
-				if (lockedDesktopSingleWindow)
+				if (lockedDesktopSingleWindow) {
+					_DeferBitmapCopies(false);
 					fDesktop->UnlockSingleWindow();
+				}
 
 				// try to let our client die happily
 				NotifyQuitRequested();
@@ -4384,6 +4399,39 @@ ServerWindow::_MessageLooper()
 	// an error.
 	Quit();
 		// does not return
+}
+
+
+/*!	While the window thread holds the desktop's read lock for a batch of
+	messages, nobody else draws into or reads its part of the back buffer: a
+	plain bitmap copy may wait there for the copy to the front buffer at the
+	end of the update session (DrawingEngine::SetBitmapCopiesDeferred()). It
+	is resolved before the lock is released.
+*/
+void
+ServerWindow::_DeferBitmapCopies(bool defer)
+{
+	if (fWindow.IsSet())
+		fWindow->GetDrawingEngine()->SetBitmapCopiesDeferred(defer);
+}
+
+
+/*!	A client sends the drawing of an update session and its end in two
+	flushes (BView::_Draw() flushes after Draw()). With a bitmap copy deferred
+	for the end of the session (see _DeferBitmapCopies()), waits a moment for
+	the end rather than resolve the copy now. Returns whether a message came.
+*/
+bool
+ServerWindow::_WaitForUpdateEnd()
+{
+	static const bigtime_t kUpdateEndWait = 2000;
+
+	if (!fWindow.IsSet() || !fWindow->InUpdate()
+		|| !fWindow->GetDrawingEngine()->HasDeferredBitmapCopy()) {
+		return false;
+	}
+	return port_buffer_size_etc(fMessagePort, B_RELATIVE_TIMEOUT,
+		kUpdateEndWait) >= 0;
 }
 
 

@@ -1581,6 +1581,26 @@ Painter::DrawBitmap(const ServerBitmap* bitmap, BRect bitmapRect,
 }
 
 
+/*!	Whether DrawBitmap() with these arguments and the current state copies
+	the bitmap's pixels unchanged (an unscaled B_OP_COPY of a 32-bit bitmap,
+	no transform, no alpha mask): then \a destination is the rectangle it
+	writes, before clipping, and \a offset the position of the bitmap's
+	pixel (0, 0) in it.
+*/
+bool
+Painter::IsPlainBitmapCopy(const ServerBitmap* bitmap, BRect bitmapRect,
+	BRect viewRect, uint32 options, IntRect& destination,
+	IntPoint& offset) const
+{
+	if (!fValidClipping || fDrawingMode != B_OP_COPY || !fIdentityTransform)
+		return false;
+
+	BitmapPainter bitmapPainter(this, bitmap, options);
+	return bitmapPainter.IsPlainCopy(bitmapRect, viewRect, destination,
+		offset);
+}
+
+
 // #pragma mark -
 
 

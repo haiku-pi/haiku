@@ -19,6 +19,8 @@
 #include "ServerFont.h"
 #include "Transformable.h"
 
+#include "IntPoint.h"
+#include "IntRect.h"
 #include "defines.h"
 
 #include <agg_conv_curve.h>
@@ -245,6 +247,10 @@ public:
 			BRect				DrawBitmap(const ServerBitmap* bitmap,
 									BRect bitmapRect, BRect viewRect,
 									uint32 options) const;
+			bool				IsPlainBitmapCopy(const ServerBitmap* bitmap,
+									BRect bitmapRect, BRect viewRect,
+									uint32 options, IntRect& destination,
+									IntPoint& offset) const;
 
 								// some convenience stuff
 			BRect				FillRegion(const BRegion* region) const;
