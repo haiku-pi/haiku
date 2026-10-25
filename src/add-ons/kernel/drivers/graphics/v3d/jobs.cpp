@@ -515,6 +515,11 @@ account_job(v3d_device* device, v3d_job* job)
 			stats.render_time / stats.cl_jobs,
 			stats.gpu_time * 100 / (now - stats.window_start));
 	}
+	if (stats.syncs > 0) {
+		TRACE_ALWAYS("stats: %" B_PRIu32 " cache syncs of imported memory, %"
+			B_PRIu64 " KiB and %" B_PRId64 " us each\n", stats.syncs,
+			stats.sync_bytes / stats.syncs / 1024, stats.sync_time / stats.syncs);
+	}
 	const bool enabled = stats.enabled;
 	memset(&stats, 0, sizeof(stats));
 	stats.enabled = enabled;
