@@ -403,6 +403,10 @@ struct v3d_device {
 		uint32			waits;
 		bigtime_t		wait_time;
 			// clients sleeping in WAIT_BO/SYNCOBJ_WAIT
+		uint32			syncs;
+		uint64			sync_bytes;
+		bigtime_t		sync_time;
+			// cache maintenance of imported BOs (SYNC_BO)
 	} stats;
 
 	sem_id				worker_sem;

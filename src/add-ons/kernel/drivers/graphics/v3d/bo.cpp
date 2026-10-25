@@ -341,33 +341,51 @@ import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
 
 /*!	Writes back and drops the CPU's cache lines of an imported BO (through the
 	physical map: the GPU does not snoop the caches).
+
+	A window's frame is megabytes: the walk takes milliseconds, so it runs
+	without the device's lock, which the worker needs to finish a job and
+	start the next one. The reference keeps the BO (and its wired pages).
 */
 static status_t
 sync_bo(v3d_file* file, drm_v3d_haiku_sync_bo* args)
 {
-	MutexLocker locker(file->device->lock);
+	v3d_device* device = file->device;
+	MutexLocker locker(device->lock);
 	v3d_bo* bo = v3d_bo_lookup(file, args->handle);
 	if (bo == NULL)
 		return B_BAD_VALUE;
 	if (bo->area >= 0)
 		return B_OK;
 			// write-combining: nothing cached
+	bo->references++;
+	locker.Unlock();
 
+	const bigtime_t start = system_time();
+	status_t status = B_OK;
 	size_t offset = 0;
 	while (offset < bo->size) {
 		physical_entry ranges[16];
 		uint32 count = B_COUNT_OF(ranges);
-		status_t status = get_memory_map_etc(bo->imported_team,
+		status = get_memory_map_etc(bo->imported_team,
 			(uint8*)bo->address + offset, bo->size - offset, ranges, &count);
 		if (status != B_OK && status != B_BUFFER_OVERFLOW)
-			return status;
+			break;
+		status = B_OK;
 		for (uint32 i = 0; i < count; i++) {
 			arm64_dcache_flush_range(KERNEL_PMAP_BASE + ranges[i].address,
 				ranges[i].size);
 			offset += ranges[i].size;
 		}
 	}
-	return B_OK;
+
+	locker.Lock();
+	if (device->stats.enabled) {
+		device->stats.syncs++;
+		device->stats.sync_bytes += offset;
+		device->stats.sync_time += system_time() - start;
+	}
+	v3d_bo_put(device, bo);
+	return status;
 }
 
 
