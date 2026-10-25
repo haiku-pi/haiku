@@ -123,6 +123,9 @@ program_cpu(void*, int cpu)
 	WRITE_SPECIALREG(PMINTENCLR_EL1,
 		event_counter_mask(sCounterCount) | CYCLE_COUNTER_BIT);
 	WRITE_SPECIALREG(PMUSERENR_EL0, 0);
+	// the cycle counter counts in user mode and in the kernel (its reset
+	// value is unknown)
+	WRITE_SPECIALREG(PMCCFILTR_EL0, 0);
 
 	uint32 filter = 0;
 	if ((sConfig.flags & PMU_EXCLUDE_USER) != 0)
@@ -266,7 +269,7 @@ start_counting(const pmu_config& config)
 	sMaxSampleGap = 0;
 
 	sSampler = spawn_kernel_thread(&sampler_thread, "arm64 pmu sampler",
-		B_URGENT_DISPLAY_PRIORITY, (void*)(addr_t)sSamplerSem);
+		B_URGENT_PRIORITY, (void*)(addr_t)sSamplerSem);
 	if (sSampler < 0 || resume_thread(sSampler) != B_OK) {
 		status_t status = sSampler < 0 ? sSampler : B_ERROR;
 		call_all_cpus_sync(&stop_cpu, NULL);
