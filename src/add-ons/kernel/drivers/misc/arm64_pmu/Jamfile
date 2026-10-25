@@ -1,0 +1,8 @@
+SubDir HAIKU_TOP src add-ons kernel drivers misc arm64_pmu ;
+
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+
+KernelAddon arm64_pmu :
+	arm64_pmu.cpp
+	;

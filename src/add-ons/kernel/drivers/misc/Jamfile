@@ -18,3 +18,7 @@ KernelAddon <driver>kdl :
 KernelAddon <driver>test :
 	test.c
 	;
+
+if $(TARGET_ARCH) = arm64 {
+	SubInclude HAIKU_TOP src add-ons kernel drivers misc arm64_pmu ;
+}

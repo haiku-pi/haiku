@@ -211,6 +211,7 @@ AddDriversToPackage input :
 AddDriversToPackage misc :
 	<driver>poke
 	<driver>mem
+	arm64_pmu@arm64
 	nvmm@x86_64
 	;
 AddDriversToPackage net
