@@ -120,6 +120,8 @@ private:
 			void				_Hide();
 
 			// message handling methods.
+			void				_DeferBitmapCopies(bool defer);
+			bool				_WaitForUpdateEnd();
 			void				_DispatchMessage(int32 code,
 									BPrivate::LinkReceiver &link);
 			void				_DispatchViewMessage(int32 code,

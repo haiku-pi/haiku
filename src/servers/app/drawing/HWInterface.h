@@ -147,6 +147,13 @@ public:
 	// while CopyBackToFront() actually performs the operation
 	virtual	status_t			CopyBackToFront(const BRect& frame);
 
+	// writing a 32-bit bitmap's pixels into the back buffer and, in the same
+	// pass, the front buffer
+			bool				CanCopyToBackAndFront() const;
+			void				CopyToBackAndFront(const uint8* bits,
+									uint32 bytesPerRow, IntPoint offset,
+									const BRegion& region, bool front);
+
 protected:
 	virtual	void				_CopyBackToFront(/*const*/ BRegion& region);
 

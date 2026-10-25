@@ -384,6 +384,88 @@ HWInterface::CopyBackToFront(const BRect& frame)
 }
 
 
+/*!	Whether CopyToBackAndFront() can write the front buffer: both buffers
+	hold 32-bit pixels, as the back buffer always does.
+*/
+bool
+HWInterface::CanCopyToBackAndFront() const
+{
+	RenderingBuffer* frontBuffer = FrontBuffer();
+	return IsDoubleBuffered() && frontBuffer != NULL && BackBuffer() != NULL
+		&& (frontBuffer->ColorSpace() == B_RGB32
+			|| frontBuffer->ColorSpace() == B_RGBA32);
+}
+
+
+/*!	Copies \a region (screen coordinates) of a 32-bit bitmap whose pixel
+	(0, 0) is at \a offset on screen into the back buffer and, if \a front,
+	into the front buffer too: each row of the bitmap is read once (it is
+	still cached for the second copy), where drawing it into the back buffer
+	and then CopyBackToFront() read the frame twice.
+	The front buffer gets what CopyBackToFront() would put there: the
+	software cursor's area is redrawn over the new back buffer.
+	The object must be locked, and CanCopyToBackAndFront() true for \a front.
+*/
+void
+HWInterface::CopyToBackAndFront(const uint8* bits, uint32 bytesPerRow,
+	IntPoint offset, const BRegion& region, bool front)
+{
+	RenderingBuffer* backBuffer = DrawingBuffer();
+	if (backBuffer == NULL)
+		return;
+	uint8* back = (uint8*)backBuffer->Bits();
+	const uint32 backBPR = backBuffer->BytesPerRow();
+
+	if (!front) {
+		const int32 count = region.CountRects();
+		for (int32 i = 0; i < count; i++) {
+			const clipping_rect rect = region.RectAtInt(i);
+			const size_t bytes = (rect.right - rect.left + 1) * 4;
+			const uint8* source = bits + (rect.top - offset.y) * bytesPerRow
+				+ (rect.left - offset.x) * 4;
+			for (int32 y = rect.top; y <= rect.bottom; y++) {
+				memcpy(back + y * backBPR + rect.left * 4, source, bytes);
+				source += bytesPerRow;
+			}
+		}
+		return;
+	}
+
+	RenderingBuffer* frontBuffer = FrontBuffer();
+	uint8* frontBits = (uint8*)frontBuffer->Bits();
+	const uint32 frontBPR = frontBuffer->BytesPerRow();
+
+	bool cursorLocked = fFloatingOverlaysLock.Lock();
+
+	// as CopyBackToFront(): the front buffer under the cursor is left to
+	// _DrawCursor()
+	BRegion frontRegion(region);
+	frontRegion.Exclude((clipping_rect)_CursorFrame());
+	BRegion backOnly(region);
+	backOnly.Exclude(&frontRegion);
+
+	const int32 count = frontRegion.CountRects();
+	for (int32 i = 0; i < count; i++) {
+		const clipping_rect rect = frontRegion.RectAtInt(i);
+		const size_t bytes = (rect.right - rect.left + 1) * 4;
+		const uint8* source = bits + (rect.top - offset.y) * bytesPerRow
+			+ (rect.left - offset.x) * 4;
+		for (int32 y = rect.top; y <= rect.bottom; y++) {
+			memcpy(back + y * backBPR + rect.left * 4, source, bytes);
+			memcpy(frontBits + y * frontBPR + rect.left * 4, source, bytes);
+			source += bytesPerRow;
+		}
+	}
+	if (backOnly.CountRects() > 0) {
+		CopyToBackAndFront(bits, bytesPerRow, offset, backOnly, false);
+		_DrawCursor(IntRect(backOnly.Frame()));
+	}
+
+	if (cursorLocked)
+		fFloatingOverlaysLock.Unlock();
+}
+
+
 void
 HWInterface::_CopyBackToFront(/*const*/ BRegion& region)
 {

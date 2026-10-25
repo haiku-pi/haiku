@@ -50,6 +50,15 @@ public:
 								{ return fCopyToFront; }
 	virtual	void			CopyToFront(/*const*/ BRegion& region);
 
+	// While deferred (the caller resolves it before anybody else can see the
+	// back buffer: ServerWindow while it holds the desktop's read lock), the
+	// back buffer copy of a plain bitmap copy drawn with copy to front disabled
+	// waits for CopyToFront(), which then writes both buffers in one pass.
+			void			SetBitmapCopiesDeferred(bool deferred);
+			void			ResolveDeferredBitmapCopy();
+			bool			HasDeferredBitmapCopy() const
+								{ return fDeferredBitmap != NULL; }
+
 	// locking
 			bool			LockParallelAccess();
 #if DEBUG
@@ -207,10 +216,24 @@ private:
 								uint32 width, uint32 height, uint32 bytesPerRow,
 								int32 xOffset, int32 yOffset) const;
 
+			bool			_IsPlainBitmapCopy(ServerBitmap* bitmap,
+								const BRect& bitmapRect, const BRect& viewRect,
+								uint32 options, BRegion& region,
+								IntPoint& offset) const;
+			void			_ResolveDeferredBitmapCopy(
+								const BRegion* dirty = NULL);
+			void			_DropDeferredBitmapCopy();
+
 			ObjectDeleter<Painter>
 							fPainter;
 			HWInterface*	fGraphicsCard;
 			bool			fCopyToFront;
+
+			bool			fBitmapCopiesDeferred;
+			ServerBitmap*	fDeferredBitmap;
+								// referenced
+			IntPoint		fDeferredOffset;
+			BRegion			fDeferredRegion;
 };
 
 #endif // DRAWING_ENGINE_H_

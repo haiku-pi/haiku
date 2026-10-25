@@ -22,6 +22,9 @@ public:
 
 			void				Draw(const BRect& sourceRect,
 									const BRect& destinationRect);
+			bool				IsPlainCopy(const BRect& sourceRect,
+									const BRect& destinationRect,
+									IntRect& destination, IntPoint& offset);
 
 private:
 			bool				_DetermineTransform(
