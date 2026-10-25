@@ -1,0 +1,7 @@
+SubDir HAIKU_TOP src bin pmustat ;
+
+UsePrivateHeaders drivers ;
+
+Application pmustat :
+	pmustat.c
+	;
