@@ -160,6 +160,8 @@ static const char* kUsage =
 	"  -A          also print the counts of each CPU\n"
 	"  -u          count the events in user mode only\n"
 	"  -k          count the events in the kernel only\n"
+	"              (with -u or -k, cpu_cycles is counted in that mode too,\n"
+	"              for IPC; the cycle counter always counts all modes)\n"
 	"  -l          list the events and whether this CPU implements them\n"
 	"  -h          this help\n";
 
@@ -324,9 +326,10 @@ print_results(const pmu_info* info, const pmu_config* config,
 		"events counted system-wide", what);
 
 	char count[40], rate[32], label[24];
+	const bool filtered = args->flags != 0;
 	fprintf(stderr, " %22s  %-20s %s", format_count(cycles, count,
-		sizeof(count)), "cycles", format_rate(cycles / seconds, rate,
-		sizeof(rate)));
+		sizeof(count)), filtered ? "cycles (all modes)" : "cycles",
+		format_rate(cycles / seconds, rate, sizeof(rate)));
 	if (active > 0) {
 		fprintf(stderr, "   # %.1f MHz while busy, CPUs busy %.1f %%",
 			cycles / (double)active,
@@ -346,8 +349,17 @@ print_results(const pmu_info* info, const pmu_config* config,
 		int ratioOf = -1;
 		switch (number) {
 			case 0x08:
-				if (base > 0)
-					fprintf(stderr, "   # IPC %.3f", totals[i] / (double)base);
+				if (base > 0) {
+					fprintf(stderr, "   # IPC %.3f%s", totals[i] / (double)base,
+						filtered && cpuCycles < 0
+							? " (against all modes' cycles)" : "");
+				}
+				break;
+			case 0x11:
+				if (filtered && cycles > 0) {
+					fprintf(stderr, "   # %.1f %% of all cycles",
+						100.0 * totals[i] / cycles);
+				}
 				break;
 			case 0x03:
 				ratioOf = event_index(config, 0x04);
@@ -507,6 +519,21 @@ main(int argc, char** argv)
 		for (size_t i = 0; i < sizeof(kDefaultEvents) / sizeof(uint16)
 				&& i < info.event_counters; i++) {
 			config.events[config.event_count++] = kDefaultEvents[i];
+		}
+	}
+	if (flags != 0 && event_index(&config, 0x11) < 0) {
+		// The cycle counter counts in every mode: IPC in one mode needs
+		// cpu_cycles counted in that mode. The default set gives up its last
+		// event for it.
+		if (events == NULL && config.event_count > 0
+			&& config.event_count >= info.event_counters) {
+			config.event_count--;
+		}
+		if (config.event_count < info.event_counters)
+			config.events[config.event_count++] = 0x11;
+		else {
+			fprintf(stderr, "pmustat: no counter left for cpu_cycles: IPC "
+				"is against the cycles of all modes\n");
 		}
 	}
 	for (uint32 i = 0; i < config.event_count; i++) {
