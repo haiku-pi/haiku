@@ -284,6 +284,20 @@ parse_dynamic_segment(image_t* image)
 			case DT_RELASZ:
 				image->rela_len = d[i].d_un.d_val;
 				break;
+			case DT_RELR:
+				image->relr = (elf_relr*)
+					(d[i].d_un.d_ptr + image->regions[0].delta);
+				break;
+			case DT_RELRSZ:
+				image->relr_len = d[i].d_un.d_val;
+				break;
+			case DT_RELRENT:
+				if (d[i].d_un.d_val != sizeof(elf_relr)) {
+					FATAL("%s: Unsupported DT_RELRENT %" B_PRIu64 "\n",
+						image->path, (uint64)d[i].d_un.d_val);
+					return false;
+				}
+				break;
 			case DT_JMPREL:
 				// procedure linkage table relocations
 				image->pltrel = (elf_rel*)

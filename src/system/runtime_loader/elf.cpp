@@ -280,9 +280,44 @@ load_dependencies(image_t* image, bool preload = false)
 }
 
 
+/*!	Applies the packed relative relocations of \a image (DT_RELR). An even
+	entry is the address of a word to relocate, and moves the position past
+	it. An odd entry is a bitmap of the 63 (31 for ELF32) words from the
+	position on, bit n + 1 standing for the n-th of them, and moves the
+	position past them.
+*/
+static void
+relocate_relr(image_t* image)
+{
+	const addr_t delta = image->regions[0].delta;
+	const size_t bitmapWords = sizeof(elf_relr) * 8 - 1;
+	const elf_relr* entry = image->relr;
+	const elf_relr* end = entry + image->relr_len / sizeof(elf_relr);
+	addr_t* where = NULL;
+
+	for (; entry < end; entry++) {
+		elf_relr bitmap = *entry;
+		if ((bitmap & 1) == 0) {
+			where = (addr_t*)(bitmap + delta);
+			*where++ += delta;
+			continue;
+		}
+
+		for (size_t i = 0; (bitmap >>= 1) != 0; i++) {
+			if ((bitmap & 1) != 0)
+				where[i] += delta;
+		}
+		where += bitmapWords;
+	}
+}
+
+
 static status_t
 relocate_image(image_t *rootImage, image_t *image)
 {
+	if (image->relr != NULL)
+		relocate_relr(image);
+
 	SymbolLookupCache cache(image);
 
 	status_t status = arch_relocate_image(rootImage, image, &cache);
