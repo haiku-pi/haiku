@@ -32,6 +32,13 @@ rule AddSharedObjectGlueCode
 			Depends $(1) : $(stdLibs) $(beginGlue) $(endGlue) ;
 			LINKFLAGS on $(1) = [ on $(1) return $(LINKFLAGS) ] -nostdlib
 				-Xlinker --no-undefined ;
+
+			# Optionally pack the relative relocations into a DT_RELR table,
+			# a small fraction of their RELA size. Only for what the runtime
+			# loader loads: the kernel and the boot loader cannot apply it.
+			if $(HAIKU_PACK_RELATIVE_RELOCS) = 1 {
+				LINKFLAGS on $(1) += -Xlinker -z -Xlinker pack-relative-relocs ;
+			}
 		}
 	}
 
