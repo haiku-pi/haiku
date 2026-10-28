@@ -1,4 +1,4 @@
-# haiku-pi: bzip2, ffmpeg6, fluidlite, glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip,
+# haiku-pi: bzip2, ffmpeg6, fluidlite, gcc_syslibs (GNU hash), glu, gzip, libogg, libsdl2, libvorbis, mesa, tar, unzip,
 # zstd and the NetSurf, Firefox, CPython and WebKit blocks below (with their _devel, and zstd_source) are ours, built
 # by the coordination repository (scripts/build-packages.sh) and staged in download/; a build needs
 # -sHAIKU_NO_DOWNLOADS=1, as Haiku's servers do not have them (scripts/fetch-build-packages.sh
@@ -42,7 +42,7 @@ RemotePackageRepository HaikuPorts
 	freetype_devel-2.6.3_bootstrap-1
 	gawk-3.1.8_bootstrap-2
 	gcc-13.3.0_2026_03_29_bootstrap-1
-	gcc_syslibs-13.3.0_2026_03_29_bootstrap-1
+	gcc_syslibs-13.3.0_2026_03_29_bootstrap-2
 	gcc_syslibs_devel-13.3.0_2026_03_29_bootstrap-1
 	glu-9.0.3-6
 	glu_devel-9.0.3-6
