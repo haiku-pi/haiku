@@ -18,6 +18,14 @@
 #include "aarch64.h"
 
 
+//#define TRACE_MEMORY_MAP
+#ifdef TRACE_MEMORY_MAP
+#	define TRACE_MEMORY_MAP_ENTRY(x...) dprintf(x)
+#else
+#	define TRACE_MEMORY_MAP_ENTRY(x...) ;
+#endif
+
+
 extern const char* granule_type_str(int tg);
 
 
@@ -113,7 +121,7 @@ arch_start_kernel(addr_t kernelEntry)
 	if (memoryMap == NULL)
 		panic("Unable to allocate memory map.");
 
-	// Read (and print) the memory map.
+	// Read (and trace) the memory map.
 	memoryMapSize = actualMemoryMapSize;
 	if (kBootServices->GetMemoryMap(&memoryMapSize, memoryMap, &mapKey,
 			&descriptorSize, &descriptorVersion) != EFI_SUCCESS) {
@@ -122,11 +130,11 @@ arch_start_kernel(addr_t kernelEntry)
 
 	addr_t addr = (addr_t)memoryMap;
 	efi_physical_addr loaderCode = 0LL;
-	dprintf("System provided memory map:\n");
+	TRACE_MEMORY_MAP_ENTRY("System provided memory map:\n");
 	for (size_t i = 0; i < memoryMapSize / descriptorSize; i++) {
 		efi_memory_descriptor *entry
 			= (efi_memory_descriptor *)(addr + i * descriptorSize);
-		dprintf("  phys: 0x%08" PRIx64 "-0x%08" PRIx64
+		TRACE_MEMORY_MAP_ENTRY("  phys: 0x%08" PRIx64 "-0x%08" PRIx64
 			", virt: 0x%08" PRIx64 "-0x%08" PRIx64
 			", size = 0x%08" PRIx64 ", type: %s (%#x), attr: %#" PRIx64 "\n",
 			entry->PhysicalStart,

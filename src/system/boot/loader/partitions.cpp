@@ -22,7 +22,7 @@
 
 using namespace boot;
 
-#define TRACE_PARTITIONS
+//#define TRACE_PARTITIONS
 #ifdef TRACE_PARTITIONS
 #	define TRACE(x) dprintf x
 #else
