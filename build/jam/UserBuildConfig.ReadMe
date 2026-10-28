@@ -54,6 +54,15 @@ DEBUG on <src!bin!gdb!gdb!>haiku-nat.o = 1 ;
 # feature.
 HAIKU_BUILD_FEATURE_SSL = 1 ;
 
+# Link the applications, libraries and add-ons with "-z pack-relative-relocs":
+# their relative relocations become a DT_RELR table, which is much smaller and
+# faster to apply. Needs a linker that supports it for the target (for arm64,
+# buildtools with the binutils/haiku change "support -z pack-relative-relocs on
+# arm64"; an older one only warns and ignores the option: check with
+# "readelf -d libbe.so | grep RELR") and a runtime_loader that applies DT_RELR.
+# Changing it does not relink what is already built.
+HAIKU_PACK_RELATIVE_RELOCS = 1 ;
+
 
 # Haiku Image Related Modifications
 
