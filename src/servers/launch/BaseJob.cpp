@@ -8,6 +8,7 @@
 #include "BaseJob.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,8 +199,11 @@ BaseJob::ResolveSourceFiles()
 void
 BaseJob::_GetSourceFileEnvironment(const char* script, BStringList& environment)
 {
+	// Other launch_daemon threads spawn jobs at the same time. Without
+	// O_CLOEXEC they inherit the write end, and the read() below never sees
+	// EOF while such a job (a service, for example) keeps running.
 	int pipes[2];
-	if (pipe(&pipes[0]) != 0) {
+	if (pipe2(&pipes[0], O_CLOEXEC) != 0) {
 		// TODO: log error
 		return;
 	}
@@ -208,6 +212,8 @@ BaseJob::_GetSourceFileEnvironment(const char* script, BStringList& environment)
 	int status = posix_spawn_file_actions_init(&fileActions);
 	if (status != 0) {
 		// TODO: log error
+		close(pipes[0]);
+		close(pipes[1]);
 		return;
 	}
 	CObjectDeleter<posix_spawn_file_actions_t, int, posix_spawn_file_actions_destroy>
@@ -233,6 +239,8 @@ BaseJob::_GetSourceFileEnvironment(const char* script, BStringList& environment)
 	if (status != 0) {
 		// TODO: log error
 		debug_printf("could not fork: %s\n", strerror(errno));
+		close(pipes[0]);
+		close(pipes[1]);
 		return;
 	}
 
