@@ -34,6 +34,7 @@ DEFINE_ELF_TYPE(Sym, elf_sym);
 DEFINE_ELF_TYPE(Dyn, elf_dyn);
 DEFINE_ELF_TYPE(Rel, elf_rel);
 DEFINE_ELF_TYPE(Rela, elf_rela);
+DEFINE_ELF_TYPE(Relr, elf_relr);
 DEFINE_ELF_TYPE(Verdef, elf_verdef);
 DEFINE_ELF_TYPE(Verdaux, elf_verdaux);
 DEFINE_ELF_TYPE(Verneed, elf_verneed);
