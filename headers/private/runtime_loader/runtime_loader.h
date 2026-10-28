@@ -135,6 +135,8 @@ typedef struct image_t {
 	int					rel_len;
 	elf_rela			*rela;
 	int					rela_len;
+	elf_relr			*relr;
+	int					relr_len;
 	elf_rel				*pltrel;
 	int					pltrel_len;
 
