@@ -285,6 +285,7 @@ typedef struct {
 #define SHT_DYNSYM		11
 #define SHT_INIT_ARRAY	14
 #define SHT_FINI_ARRAY	15
+#define SHT_RELR		19	/* packed relative relocations */
 
 #define SHT_GNU_verdef	0x6ffffffd    /* version definition section */
 #define SHT_GNU_verneed	0x6ffffffe    /* version needs section */
@@ -491,6 +492,10 @@ typedef struct {
 	Elf64_Sxword	r_addend;
 } Elf64_Rela;
 
+/* packed relative relocation: an address, or a bitmap of the words after one */
+typedef Elf32_Word Elf32_Relr;
+typedef Elf64_Xword Elf64_Relr;
+
 #define ELF32_R_SYM(i) ((i) >> 8)
 #define ELF32_R_TYPE(i) ((unsigned char)(i))
 #define ELF32_R_INFO(s, t) (((s) << 8) + (unsigned char)(t))
@@ -553,6 +558,9 @@ typedef struct {
 #define DT_ENCODING			32
 #define DT_PREINIT_ARRAY	32	/* preinitialization array */
 #define DT_PREINIT_ARRAYSZ	33	/* preinitialization array size */
+#define DT_RELRSZ			35	/* size of the DT_RELR table */
+#define DT_RELR				36	/* packed relative relocations */
+#define DT_RELRENT			37	/* size of a DT_RELR entry */
 #define DT_NUM				38	/* size of the machine-independent dynamic section */
 
 #define	DT_GNU_HASH		0x6ffffef5	/* GNU-style hash table */
