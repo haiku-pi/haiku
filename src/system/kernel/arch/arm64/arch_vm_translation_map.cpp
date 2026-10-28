@@ -14,6 +14,14 @@
 #include "VMSAv8TranslationMap.h"
 #include "arm_registers.h"
 
+
+//#define TRACE_ARCH_VM_TRANSLATION_MAP
+#ifdef TRACE_ARCH_VM_TRANSLATION_MAP
+#	define TRACE(x...) dprintf(x)
+#else
+#	define TRACE(x...) ;
+#endif
+
 static char sPhysicalPageMapperData[sizeof(PMAPPhysicalPageMapper)];
 
 // Physical pointer to an empty page table, which is used for break-before-make
@@ -85,7 +93,7 @@ arch_vm_translation_map_init(kernel_args* args, VMPhysicalPageMapper** _physical
 status_t
 arch_vm_translation_map_init_post_sem(kernel_args* args)
 {
-	dprintf("arch_vm_translation_map_init_post_sem\n");
+	TRACE("arch_vm_translation_map_init_post_sem\n");
 
 	return B_OK;
 }
@@ -94,7 +102,7 @@ arch_vm_translation_map_init_post_sem(kernel_args* args)
 status_t
 arch_vm_translation_map_init_post_area(kernel_args* args)
 {
-	dprintf("arch_vm_translation_map_init_post_area\n");
+	TRACE("arch_vm_translation_map_init_post_area\n");
 
 	// Create an area covering the physical map area.
 	void* address = (void*) KERNEL_PMAP_BASE;
@@ -149,7 +157,7 @@ map_page_early(phys_addr_t ptPa, int level, addr_t va, phys_addr_t pa,
 			table = pteVal & kPteAddrMask;
 		} else {
 			table = vm_allocate_early_physical_page(args) << page_bits;
-			dprintf("early: pulling page %lx\n", table);
+			TRACE("early: pulling page %lx\n", table);
 			uint64_t* newTableVa = TableFromPa(table);
 
 			if (type == 0x1) {
