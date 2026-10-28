@@ -39,6 +39,13 @@ public:
 	// clears the interrupt). Returns false if not supported.
 	virtual	bool			EnableReceiveInterrupt() { return false; }
 
+	// Raise the UART's interrupt when its transmit FIFO has drained to its
+	// trigger level (enable), or not. Returns false if not supported. While
+	// it is used, CanPutChar() says whether PutChar() would not wait.
+	virtual	bool			EnableTransmitInterrupt(bool enable)
+								{ return false; }
+	virtual	bool			CanPutChar() { return true; }
+
 			void			SetBase(addr_t base) { fBase = base; }
 			addr_t			Base() const { return fBase; }
 			int64			Clock() const { return fClock; }

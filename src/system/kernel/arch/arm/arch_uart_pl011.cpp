@@ -349,6 +349,30 @@ ArchUARTPL011::EnableReceiveInterrupt()
 }
 
 
+bool
+ArchUARTPL011::EnableTransmitInterrupt(bool enable)
+{
+	// The transmit interrupt is raised when the FIFO drains through its
+	// trigger level, not while it is below: enable it with the FIFO full.
+	// The level is 1/8 full, for few interrupts and room for many characters.
+	if (enable) {
+		Out32(PL011_IFLS, (In32(PL011_IFLS) & ~0x7) | PL011_IFLS_TX1_8);
+		Out32(PL011_IMSC, In32(PL011_IMSC) | PL011_TXIM);
+	} else {
+		Out32(PL011_IMSC, In32(PL011_IMSC) & ~PL011_TXIM);
+		Out32(PL011_ICR, PL011_TXIC);
+	}
+	return true;
+}
+
+
+bool
+ArchUARTPL011::CanPutChar()
+{
+	return (In32(PL01x_FR) & PL01x_FR_TXFF) == 0;
+}
+
+
 void
 ArchUARTPL011::FlushRx()
 {
