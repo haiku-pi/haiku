@@ -200,7 +200,10 @@ void GICv2InterruptController::HandleInterrupt()
 	uint32_t irqnr = iar & 0x3FF;
 
 	if ((irqnr == 1022) || (irqnr == 1023)) {
-		dprintf("spurious interrupt (%d)\n", irqnr);
+		// Spurious: an interrupt routed to several CPUs was taken by another
+		// one (or withdrawn) before this CPU acknowledged it. That is normal,
+		// and it has no end of interrupt (as Linux's gic_handle_irq()).
+		return;
 	} else if (irqnr == ICI_IRQ) {
 		// The sender's message must be read after the acknowledge (pairs with
 		// the write barrier in SendMulticastIci(); as Linux's gic_handle_irq())
