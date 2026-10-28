@@ -34,6 +34,10 @@
 static const int kMaxRequestResendCount = 5;
 static const bigtime_t kReceiveTimeout = 800000LL;
 static const bigtime_t kRequestTimeout = 5000000LL;
+// Looking for the server, right after the link came up, a lost broadcast
+// should not cost a whole request timeout.
+static const bigtime_t kHelloTimeout = 1000000LL;
+static const int kMaxHelloSendCount = 25;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 
@@ -140,7 +144,8 @@ RemoteDisk::FindAnyRemoteDisk()
 	// send request
 	sockaddr_in serverAddress;
 	error = _SendRequest(&request, sizeof(request), REMOTE_DISK_HELLO_REPLY,
-		&serverAddress);
+		&serverAddress, fPacket, BUFFER_SIZE, &fPacketSize, kHelloTimeout,
+		kMaxHelloSendCount);
 	if (error != B_OK) {
 		dprintf("RemoteDisk::FindAnyRemoteDisk(): Got no server reply: %s\n",
 			strerror(error));
@@ -541,7 +546,8 @@ RemoteDisk::WriteAt(off_t pos, const void *_buffer, size_t bufferSize)
 		remote_disk_header reply;
 		int32 replySize;
 		error = _SendRequest(request, requestSize, REMOTE_DISK_WRITE_REPLY,
-			NULL, &reply, sizeof(reply), &replySize);
+			NULL, &reply, sizeof(reply), &replySize, kRequestTimeout,
+			kMaxRequestResendCount);
 		if (error != B_OK)
 			break;
 
@@ -660,20 +666,21 @@ RemoteDisk::_SendRequest(remote_disk_header* request, size_t size,
 	uint8 expectedReply, sockaddr_in* peerAddress)
 {
 	return _SendRequest(request, size, expectedReply, peerAddress, fPacket,
-		BUFFER_SIZE, &fPacketSize);
+		BUFFER_SIZE, &fPacketSize, kRequestTimeout, kMaxRequestResendCount);
 }
 
 
 status_t
 RemoteDisk::_SendRequest(remote_disk_header *request, size_t size,
 	uint8 expectedReply, sockaddr_in* peerAddress, void* receiveBuffer,
-	size_t receiveBufferSize, int32* _bytesReceived)
+	size_t receiveBufferSize, int32* _bytesReceived, bigtime_t replyTimeout,
+	int32 attempts)
 {
 	request->request_id = fRequestID++;
 	request->port = fSocketAddress.sin_port;
 
-	// try sending the request kMaxRequestResendCount times at most
-	for (int i = 0; i < kMaxRequestResendCount; i++) {
+	// try sending the request attempts times at most
+	for (int32 i = 0; i < attempts; i++) {
 		// send request
 		ssize_t bytesSent;
 		do {
@@ -693,7 +700,7 @@ RemoteDisk::_SendRequest(remote_disk_header *request, size_t size,
 		}
 
 		// receive reply
-		bigtime_t timeout = system_time() + kRequestTimeout;
+		bigtime_t timeout = system_time() + replyTimeout;
 		do {
 			*_bytesReceived = 0;
 			socklen_t addrSize = sizeof(sockaddr_in);

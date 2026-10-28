@@ -56,7 +56,9 @@ private:
 									sockaddr_in* peerAddress,
 									void* receiveBuffer,
 									size_t receiveBufferSize,
-									int32* bytesReceived);
+									int32* bytesReceived,
+									bigtime_t replyTimeout,
+									int32 attempts);
 
 private:
 			sockaddr_in			fSocketAddress;
