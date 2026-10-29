@@ -761,8 +761,21 @@ ThreadHandler::_HandleBreakpointHitStep(CpuState* cpuState)
 		{
 			// That's the return address, so we're done in theory,
 			// unless we're a recursive function. Check if we've actually
-			// exited the previous stack frame or not
-			if (!_HasExitedFrame(cpuState->StackFramePointer())) {
+			// exited the previous stack frame or not. Compare frame addresses
+			// as the stack trace gives them, like the one we started from:
+			// the frame pointer register need not be comparable (on AArch64
+			// a caller's frame pointer is usually its callee's frame address).
+			target_addr_t frameAddress = cpuState->StackFramePointer();
+			StackTrace* stackTrace = NULL;
+			if (fDebuggerInterface->GetArchitecture()->CreateStackTrace(
+					fThread->GetTeam(), this, cpuState, stackTrace, NULL, 1,
+					false, false) == B_OK) {
+				BReference<StackTrace> stackTraceReference(stackTrace, true);
+				if (StackFrame* frame = stackTrace->FrameAt(0))
+					frameAddress = frame->FrameAddress();
+			}
+
+			if (!_HasExitedFrame(frameAddress)) {
 				status_t error = _InstallTemporaryBreakpoint(
 					cpuState->InstructionPointer());
 				if (error != B_OK)
@@ -776,9 +789,9 @@ ThreadHandler::_HandleBreakpointHitStep(CpuState* cpuState)
 				return false;
 
 			TRACE_CONTROL("ThreadHandler::_HandleBreakpointHitStep() - "
-				"frame pointer 0x%#" B_PRIx64 ", previous: 0x%#" B_PRIx64
-				" - step out adding return value\n", cpuState
-					->StackFramePointer(), fPreviousFrameAddress);
+				"frame address 0x%#" B_PRIx64 ", previous: 0x%#" B_PRIx64
+				" - step out adding return value\n", frameAddress,
+				fPreviousFrameAddress);
 			ReturnValueInfo* info = new(std::nothrow) ReturnValueInfo(
 				fPreviousInstructionPointer, cpuState);
 			if (info == NULL)
