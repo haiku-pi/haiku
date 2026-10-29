@@ -759,8 +759,10 @@ enter_userspace(Thread* thread, UserThreadEntryArguments* args)
 	userThread->pending_signals = 0;
 	arch_cpu_disable_user_access();
 
-	// initialize default TLS fields
-	addr_t tls[TLS_FIRST_FREE_SLOT];
+	// initialize default TLS fields, and clear the others: the stack area
+	// may have been used by an exited thread before, and a stack given by
+	// the caller isn't necessarily clear either
+	addr_t tls[TLS_MAX_KEYS];
 	memset(tls, 0, sizeof(tls));
 	tls[TLS_BASE_ADDRESS_SLOT] = thread->user_local_storage;
 	tls[TLS_THREAD_ID_SLOT] = thread->id;
