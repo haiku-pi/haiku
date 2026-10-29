@@ -10,6 +10,7 @@
 #include <AutoDeleter.h>
 #include <AutoLocker.h>
 
+#include "CpuState.h"
 #include "StackTrace.h"
 #include "UserInterface.h"
 #include "Value.h"
@@ -414,13 +415,40 @@ CliContext::MessageReceived(BMessage* message)
 			AutoLocker< ::Team> locker(fTeam);
 			::Thread* thread = fTeam->ThreadByID(threadID);
 
-			if (thread->State() == THREAD_STATE_STOPPED) {
-				printf("[thread stopped: %" B_PRId32 " \"%s\"]\n",
-					threadID, threadName);
+			if (thread == NULL)
+				break;
+
+			// the state the event was about: a thread that ran and stopped
+			// again since is reported by the later event, a stop only once
+			uint32 state;
+			if (message->FindUInt32("state", &state) != B_OK)
+				state = thread->State();
+
+			if (state == THREAD_STATE_STOPPED
+				&& thread->State() == THREAD_STATE_STOPPED
+				&& fStoppedThread.Get() != thread) {
+				static const char* const kReasons[] = {
+					"", ": debugged", ": debugger call", ": breakpoint",
+					": watchpoint", ": single step", ": exception"
+				};
+				uint32 reason = thread->StoppedReason();
+				CpuState* cpuState = thread->GetCpuState();
+				BString where;
+				if (cpuState != NULL) {
+					where.SetToFormat(" at %#" B_PRIx64,
+						cpuState->InstructionPointer());
+				}
+				printf("[thread stopped: %" B_PRId32 " \"%s\"%s%s]\n",
+					threadID, threadName,
+					reason < B_COUNT_OF(kReasons) ? kReasons[reason] : "",
+					where.String());
 				fStoppedThread.SetTo(thread);
-			} else {
+
+				// without a current thread, the commands work on this one
+				if (fCurrentThread == NULL)
+					SetCurrentThread(thread);
+			} else if (state != THREAD_STATE_STOPPED)
 				fStoppedThread = NULL;
-			}
 			break;
 		}
 		case MSG_THREAD_STACK_TRACE_CHANGED:
@@ -514,6 +542,7 @@ CliContext::ThreadStateChanged(const Team::ThreadEvent& threadEvent)
 	BMessage message(MSG_THREAD_STATE_CHANGED);
 	message.AddInt32("thread", threadEvent.GetThread()->ID());
 	message.AddString("threadName", threadEvent.GetThread()->Name());
+	message.AddUInt32("state", threadEvent.GetThread()->State());
 	PostMessage(&message);
 }
 

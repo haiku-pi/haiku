@@ -69,6 +69,7 @@ local sources =
 	CommandLineUserInterface.cpp
 
 	# user_interface/cli/commands
+	CliBreakCommand.cpp
 	CliCommand.cpp
 	CliContinueCommand.cpp
 	CliDebugReportCommand.cpp
@@ -78,6 +79,7 @@ local sources =
 	CliQuitCommand.cpp
 	CliStackFrameCommand.cpp
 	CliStackTraceCommand.cpp
+	CliStepCommand.cpp
 	CliStopCommand.cpp
 	CliThreadCommand.cpp
 	CliThreadsCommand.cpp

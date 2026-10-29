@@ -16,6 +16,7 @@
 #include <AutoLocker.h>
 #include <Referenceable.h>
 
+#include "CliBreakCommand.h"
 #include "CliContext.h"
 #include "CliContinueCommand.h"
 #include "CliDebugReportCommand.h"
@@ -25,11 +26,13 @@
 #include "CliQuitCommand.h"
 #include "CliStackFrameCommand.h"
 #include "CliStackTraceCommand.h"
+#include "CliStepCommand.h"
 #include "CliStopCommand.h"
 #include "CliThreadCommand.h"
 #include "CliThreadsCommand.h"
 #include "CliVariablesCommand.h"
 #include "CliWriteCoreFileCommand.h"
+#include "MessageCodes.h"
 
 
 static const char* kDebuggerPrompt = "debugger> ";
@@ -299,7 +302,8 @@ CommandLineUserInterface::_InputLoop()
 status_t
 CommandLineUserInterface::_RegisterCommands()
 {
-	if (_RegisterCommand("bt sc", new(std::nothrow) CliStackTraceCommand)
+	if (_RegisterCommand("break", new(std::nothrow) CliBreakCommand)
+		&& _RegisterCommand("bt sc", new(std::nothrow) CliStackTraceCommand)
 		&& _RegisterCommand("continue", new(std::nothrow) CliContinueCommand)
 		&& _RegisterCommand("db", new(std::nothrow)
 			CliDumpMemoryCommand(1, "byte", 16))
@@ -309,12 +313,27 @@ CommandLineUserInterface::_RegisterCommands()
 			CliDumpMemoryCommand(4, "word", 4))
 		&& _RegisterCommand("dl", new(std::nothrow)
 			CliDumpMemoryCommand(8, "long", 2))
+		&& _RegisterCommand("finish", new(std::nothrow) CliStepCommand(
+			MSG_THREAD_STEP_OUT, "run the current thread out of the function",
+			"%s\n"
+			"Runs the current thread until it returns from the current "
+			"function."))
 		&& _RegisterCommand("frame", new(std::nothrow) CliStackFrameCommand)
 		&& _RegisterCommand("help", new(std::nothrow) HelpCommand(this))
+		&& _RegisterCommand("next", new(std::nothrow) CliStepCommand(
+			MSG_THREAD_STEP_OVER, "step over the current statement",
+			"%s\n"
+			"Runs the current thread to the next statement, stepping over "
+			"function calls."))
 		&& _RegisterCommand("print", new(std::nothrow) CliPrintVariableCommand)
 		&& _RegisterCommand("quit", new(std::nothrow) CliQuitCommand)
 		&& _RegisterCommand("save-report",
 			new(std::nothrow) CliDebugReportCommand)
+		&& _RegisterCommand("step", new(std::nothrow) CliStepCommand(
+			MSG_THREAD_STEP_INTO, "step into the current statement",
+			"%s\n"
+			"Runs the current thread to the next statement, stepping into "
+			"function calls."))
 		&& _RegisterCommand("stop", new(std::nothrow) CliStopCommand)
 		&& _RegisterCommand("string", new(std::nothrow)
 			CliDumpStringCommand())

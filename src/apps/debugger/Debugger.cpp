@@ -694,6 +694,10 @@ CliDebugger::Run(const Options& options)
 		return false;
 	}
 
+	// Write each line at once, also into a pipe or a file (a script driving
+	// the debugger needs to see the replies to its commands).
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	// Block SIGINT, in this thread so all threads created by it inherit the
 	// a block mask with the signal blocked. In the input loop the signal will
 	// be unblocked again.
