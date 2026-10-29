@@ -547,6 +547,11 @@ do_error_handler(iframe * frame)
 }
 
 
+// arch_debug_console.cpp
+extern bool gDebugHeartbeat;
+void arch_debug_heartbeat(iframe* frame);
+
+
 extern "C" void
 do_irq_handler(iframe * frame)
 {
@@ -555,6 +560,9 @@ do_irq_handler(iframe * frame)
 #endif
 
 	InterruptScope scope(frame);
+
+	if (gDebugHeartbeat)
+		arch_debug_heartbeat(frame);
 
 	InterruptController *ic = InterruptController::Get();
 	if (ic != NULL)

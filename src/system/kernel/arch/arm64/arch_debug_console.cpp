@@ -15,9 +15,11 @@
 #include <kernel.h>
 #include <safemode.h>
 #include <smp.h>
+#include <thread.h>
 #include "soc.h"
 #include <util/AutoLock.h>
 #include <vm/vm.h>
+#include <stdio.h>
 #include <string.h>
 
 
@@ -36,6 +38,13 @@ static size_t sTxCount;
 static spinlock sTxLock = B_SPINLOCK_INITIALIZER;
 static bool sTxBuffered;
 static bool sTxInterruptEnabled;
+
+// The kernel setting "debug_heartbeat true": each CPU writes a line straight
+// to the UART from its interrupt handler, at most every two seconds (see
+// arch_debug_heartbeat()). For hangs that take the kernel debugger with them:
+// which CPUs still take interrupts, and what they interrupted.
+bool gDebugHeartbeat;
+static bigtime_t sHeartbeatLast[SMP_MAX_CPUS];
 
 
 //!	Moves what fits into the UART's FIFO. Called with sTxLock held.
@@ -163,6 +172,30 @@ arm64_debug_console_init_interrupt(kernel_args* args)
 
 	if (get_safemode_boolean("serial_debug_buffered", true))
 		sTxBuffered = sArchDebugUART->EnableTransmitInterrupt(false);
+	gDebugHeartbeat = get_safemode_boolean("debug_heartbeat", false);
+}
+
+
+/*!	Called from the IRQ handler when gDebugHeartbeat is set: "HB<cpu> <seconds>
+	pc <interrupted pc> <k|u> thread <id>", written past the output queue and
+	its lock, so that it still comes out when another CPU holds them.
+*/
+void
+arch_debug_heartbeat(iframe* frame)
+{
+	int32 cpu = smp_get_current_cpu();
+	bigtime_t now = system_time();
+	if (now - sHeartbeatLast[cpu] < 2000000)
+		return;
+	sHeartbeatLast[cpu] = now;
+
+	Thread* thread = thread_get_current_thread();
+	char line[96];
+	snprintf(line, sizeof(line), "HB%" B_PRId32 " %" B_PRIdBIGTIME " pc %#" B_PRIx64
+		" %c thread %" B_PRId32 "\r\n", cpu, now / 1000000, frame->elr,
+		(frame->spsr & 0xf) == 0 ? 'u' : 'k', thread != NULL ? thread->id : -1);
+	for (const char* c = line; *c != '\0'; c++)
+		sArchDebugUART->PutChar(*c);
 }
 
 
