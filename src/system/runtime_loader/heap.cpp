@@ -105,6 +105,20 @@ heap_reinit_after_fork()
 }
 
 
+void
+heap_lock_for_fork()
+{
+	recursive_lock_lock(&sLock);
+}
+
+
+void
+heap_unlock_after_fork()
+{
+	recursive_lock_unlock(&sLock);
+}
+
+
 void*
 malloc(size_t size)
 {

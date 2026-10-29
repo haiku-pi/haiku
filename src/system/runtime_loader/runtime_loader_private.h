@@ -104,6 +104,8 @@ status_t elf_reinit_after_fork();
 
 status_t heap_init();
 status_t heap_reinit_after_fork();
+void heap_lock_for_fork();
+void heap_unlock_after_fork();
 
 // arch dependent prototypes
 status_t arch_relocate_image(image_t* rootImage, image_t* image,

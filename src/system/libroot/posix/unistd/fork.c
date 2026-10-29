@@ -150,6 +150,7 @@ fork(void)
 	// call preparation hooks
 	call_fork_hooks(sPrepareHooks);
 	__heap_before_fork();
+	__gRuntimeLoader->lock_heap_for_fork();
 
 	thread = _kern_fork();
 	if (thread == 0) {
@@ -165,6 +166,7 @@ fork(void)
 		call_fork_hooks(sChildHooks);
 	} else {
 		// we are the parent
+		__gRuntimeLoader->unlock_heap_after_fork();
 		__heap_after_fork_parent();
 		call_fork_hooks(sParentHooks);
 		mutex_unlock(&sForkLock);

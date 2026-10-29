@@ -93,6 +93,8 @@ rldexport_init(void)
 {
 	gRuntimeLoader.program_args = gProgramArgs;
 	gRuntimeLoader.commpage_address = __gCommPageAddress;
+	gRuntimeLoader.lock_heap_for_fork = heap_lock_for_fork;
+	gRuntimeLoader.unlock_heap_after_fork = heap_unlock_after_fork;
 }
 
 

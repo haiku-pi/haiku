@@ -65,6 +65,11 @@ struct rld_export {
 	// holds no stale blocks, so __tls_get_addr() may use it without calling
 	// get_tls_address(). NULL until the first TLS image is registered.
 	const unsigned* tls_generation;
+
+	// fork() holds the runtime loader's heap lock, so that the child doesn't
+	// get the heap in the middle of a change by another thread
+	void (*lock_heap_for_fork)();
+	void (*unlock_heap_after_fork)();
 };
 
 extern struct rld_export *__gRuntimeLoader;
