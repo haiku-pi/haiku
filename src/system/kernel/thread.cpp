@@ -155,6 +155,9 @@ static ThreadNotificationService sNotificationService;
 // object cache to allocate thread structures from
 static object_cache* sThreadCache;
 
+// largest user stack (without guard and TLS) a team keeps for reuse
+static const size_t kMaxCachedUserStackSize = 2 * 1024 * 1024;
+
 
 // #pragma mark - kernel stack cache
 
@@ -251,6 +254,75 @@ destroy_kernel_stack(void* cookie, void* object)
 }
 
 
+// #pragma mark - user stack cache
+
+
+/*!	Takes a stack area of \a size bytes with a guard of \a guardSize bytes
+	that an exited thread of \a team left, if the team kept one, and renames
+	it to \a name.
+	\return The area's ID, or \c -1, if there is none.
+*/
+static area_id
+get_cached_user_stack(Team* team, size_t size, size_t guardSize,
+	const char* name, addr_t* _base)
+{
+	while (true) {
+		TeamLocker teamLocker(team);
+
+		int32 index = team->cached_user_stack_count - 1;
+		while (index >= 0 && (team->cached_user_stacks[index].size != size
+				|| team->cached_user_stacks[index].guard_size != guardSize)) {
+			index--;
+		}
+		if (index < 0)
+			return -1;
+
+		cached_user_stack stack = team->cached_user_stacks[index];
+		team->cached_user_stacks[index]
+			= team->cached_user_stacks[--team->cached_user_stack_count];
+		teamLocker.Unlock();
+
+		if (vm_reuse_stack_area(team->id, stack.area, stack.base, size, name)
+				== B_OK) {
+			*_base = stack.base;
+			return stack.area;
+		}
+
+		// The area was changed or deleted since (e.g. by an exec()).
+		vm_delete_area(team->id, stack.area, true);
+	}
+}
+
+
+/*!	Keeps the user stack area of an exited thread for a new thread of the
+	team \a teamID, if the team is still running and has room for it.
+	\return \c true, if the team took the area, \c false, if the caller has
+		to delete it.
+*/
+static bool
+put_cached_user_stack(team_id teamID, const cached_user_stack& stack)
+{
+	if (stack.size - stack.guard_size
+			> PAGE_ALIGN(kMaxCachedUserStackSize + TLS_SIZE)) {
+		return false;
+	}
+
+	Team* team = Team::Get(teamID);
+	if (team == NULL)
+		return false;
+	BReference<Team> teamReference(team, true);
+
+	TeamLocker teamLocker(team);
+	if (team->state != TEAM_STATE_NORMAL
+		|| team->cached_user_stack_count == MAX_CACHED_USER_STACKS) {
+		return false;
+	}
+
+	team->cached_user_stacks[team->cached_user_stack_count++] = stack;
+	return true;
+}
+
+
 // #pragma mark - Thread
 
 
@@ -290,6 +362,8 @@ Thread::Thread(const char* name, thread_id threadID, struct cpu_ent* cpu)
 	kernel_stack_base(0),
 	user_stack_area(-1),
 	user_stack_base(0),
+	user_stack_size(0),
+	user_stack_guard_size(0),
 	user_local_storage(0),
 	kernel_errno(0),
 	user_time(0),
@@ -937,20 +1011,34 @@ create_thread_user_stack(Team* team, Thread* thread, void* _stackBase,
 		snprintf(nameBuffer, B_OS_NAME_LENGTH, "%s_%" B_PRId32 "_stack",
 			thread->name, thread->id);
 
-		stackBase = (uint8*)USER_STACK_REGION;
+		// Take the stack of an exited thread, if the team kept one that fits:
+		// that saves creating the area, faulting in its first pages, and
+		// deleting it again.
+		if (additionalSize == 0) {
+			addr_t base;
+			stackArea = get_cached_user_stack(team, areaSize, guardSize,
+				nameBuffer, &base);
+			if (stackArea >= 0)
+				stackBase = (uint8*)base;
+		}
 
-		virtual_address_restrictions virtualRestrictions = {};
-		virtualRestrictions.address_specification = B_RANDOMIZED_BASE_ADDRESS;
-		virtualRestrictions.address = (void*)stackBase;
+		if (stackArea < 0) {
+			stackBase = (uint8*)USER_STACK_REGION;
 
-		physical_address_restrictions physicalRestrictions = {};
+			virtual_address_restrictions virtualRestrictions = {};
+			virtualRestrictions.address_specification
+				= B_RANDOMIZED_BASE_ADDRESS;
+			virtualRestrictions.address = (void*)stackBase;
 
-		stackArea = create_area_etc(team->id, nameBuffer,
-			areaSize, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA | B_STACK_AREA,
-			0, guardSize, &virtualRestrictions, &physicalRestrictions,
-			(void**)&stackBase);
-		if (stackArea < 0)
-			return stackArea;
+			physical_address_restrictions physicalRestrictions = {};
+
+			stackArea = create_area_etc(team->id, nameBuffer,
+				areaSize, B_NO_LOCK, B_READ_AREA | B_WRITE_AREA | B_STACK_AREA,
+				0, guardSize, &virtualRestrictions, &physicalRestrictions,
+				(void**)&stackBase);
+			if (stackArea < 0)
+				return stackArea;
+		}
 	}
 
 	// set the stack
@@ -961,6 +1049,7 @@ create_thread_user_stack(Team* team, Thread* thread, void* _stackBase,
 	thread->user_stack_base = (addr_t)stackBase;
 #endif
 	thread->user_stack_size = stackSize;
+	thread->user_stack_guard_size = guardSize;
 	thread->user_stack_area = stackArea;
 
 	return B_OK;
@@ -2463,7 +2552,20 @@ thread_exit(void)
 		// first.
 		// When the team is deleted, all areas are deleted anyway, so we don't
 		// need to do that explicitly in that case.
-		vm_delete_area(teamID, userStackArea, true);
+		// Unless the team keeps the area for a new thread: the thread won't
+		// touch it anymore, as it already left the team's address space.
+		cached_user_stack stack;
+		stack.area = userStackArea;
+		stack.guard_size = thread->user_stack_guard_size;
+#ifdef STACK_GROWS_DOWNWARDS
+		stack.base = thread->user_stack_base - stack.guard_size;
+#else
+		stack.base = thread->user_stack_base;
+#endif
+		stack.size = PAGE_ALIGN(stack.guard_size + thread->user_stack_size
+			+ TLS_SIZE);
+		if (!put_cached_user_stack(teamID, stack))
+			vm_delete_area(teamID, userStackArea, true);
 	}
 
 	// notify the debugger
@@ -2580,6 +2682,7 @@ thread_reset_for_exec(void)
 	thread->user_stack_area = -1;
 	thread->user_stack_base = 0;
 	thread->user_stack_size = 0;
+	thread->user_stack_guard_size = 0;
 
 	// reset signals
 	thread->ResetSignalsOnExec();

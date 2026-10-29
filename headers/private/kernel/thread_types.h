@@ -154,6 +154,17 @@ struct free_user_thread {
 };
 
 
+#define MAX_CACHED_USER_STACKS	4
+	// user stack areas of exited threads a team keeps for new threads
+
+struct cached_user_stack {
+	area_id				area;
+	addr_t				base;
+	size_t				size;
+	size_t				guard_size;
+};
+
+
 class AssociatedDataOwner;
 
 class AssociatedData : public BReferenceable,
@@ -311,6 +322,7 @@ struct Thread : TeamThreadIteratorEntry<thread_id>, KernelReferenceable {
 	area_id			user_stack_area;	// protected by thread lock
 	addr_t			user_stack_base;	// protected by thread lock
 	size_t			user_stack_size;	// protected by thread lock
+	size_t			user_stack_guard_size;	// protected by thread lock
 
 	addr_t			user_local_storage;
 		// usually allocated at the safe side of the stack
@@ -482,6 +494,10 @@ struct Team : TeamThreadIteratorEntry<team_id>, KernelReferenceable,
 	size_t			user_data_size;
 	size_t			used_user_data;
 	struct free_user_thread* free_user_threads;
+
+	// protected by fLock
+	struct cached_user_stack cached_user_stacks[MAX_CACHED_USER_STACKS];
+	int32			cached_user_stack_count;
 
 	void*			commpage_address;
 

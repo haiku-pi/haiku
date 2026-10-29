@@ -113,6 +113,8 @@ area_id vm_clone_area(team_id team, const char *name, void **address,
 			area_id sourceArea, bool kernel);
 status_t vm_change_clones_to_null_areas(area_id area);
 status_t vm_delete_area(team_id teamID, area_id areaID, bool kernel);
+status_t vm_reuse_stack_area(team_id team, area_id id, addr_t base,
+			size_t size, const char* name);
 status_t vm_create_vnode_cache(struct vnode *vnode, struct ModifiedPageQueue* queue,
 			struct VMCache **_cache);
 status_t vm_set_area_memory_type(area_id id, phys_addr_t physicalBase,

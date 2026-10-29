@@ -2821,6 +2821,38 @@ vm_delete_area(team_id team, area_id id, bool kernel)
 }
 
 
+/*!	Checks whether the user stack area \a id of \a team, kept after its
+	thread exited, can be given to a new thread, and renames it to \a name.
+	It can, if it still is the area of \a size bytes at \a base it was created
+	as, readable, writable and without page protections, and is not wired.
+	\return \c B_OK, if the area can be reused, an error code otherwise.
+*/
+status_t
+vm_reuse_stack_area(team_id team, area_id id, addr_t base, size_t size,
+	const char* name)
+{
+	AddressSpaceWriteLocker locker;
+	VMArea* area;
+	status_t status = locker.SetFromArea(team, id, area);
+	if (status != B_OK)
+		return status;
+
+	const uint32 protection = B_READ_AREA | B_WRITE_AREA | B_STACK_AREA;
+	if (area->address_space != locker.AddressSpace() || area->Base() != base
+		|| area->Size() != size || (area->protection & protection) != protection
+		|| area->page_protections != NULL) {
+		return B_BAD_VALUE;
+	}
+
+	AreaCacheLocker cacheLocker(area);
+	if (area->IsWired())
+		return B_BUSY;
+
+	strlcpy(area->name, name, B_OS_NAME_LENGTH);
+	return B_OK;
+}
+
+
 /*!	Creates a new cache on top of given cache, moves all areas from
 	the old cache to the new one, and changes the protection of all affected
 	areas' pages to read-only. If requested, wired pages are moved up to the

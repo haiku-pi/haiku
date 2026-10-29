@@ -472,6 +472,8 @@ Team::Team(team_id id, bool kernel)
 	user_data_size = 0;
 	free_user_threads = NULL;
 
+	cached_user_stack_count = 0;
+
 	commpage_address = NULL;
 
 	clear_team_debug_info(&debug_info, true);
@@ -2026,6 +2028,12 @@ exec_team(const char* path, char**& _flatArgs, size_t flatArgsSize,
 
 	delete_team_user_data(team);
 	vm_delete_areas(team->address_space, false);
+
+	// the user stacks kept for reuse were among them
+	teamLocker.Lock();
+	team->cached_user_stack_count = 0;
+	teamLocker.Unlock();
+
 	xsi_sem_undo(team);
 	delete_owned_ports(team);
 	sem_delete_owned_sems(team);
@@ -2099,6 +2107,22 @@ exec_team(const char* path, char**& _flatArgs, size_t flatArgsSize,
 	// We return a status here since the signal that is sent by the
 	// call above is not immediately handled.
 	return B_ERROR;
+}
+
+
+/*!	Returns whether \a area is a stack of an exited thread that \a team keeps
+	for a new thread.
+*/
+static bool
+is_cached_user_stack(Team* team, area_id area)
+{
+	TeamLocker teamLocker(team);
+	for (int32 i = 0; i < team->cached_user_stack_count; i++) {
+		if (team->cached_user_stacks[i].area == area)
+			return true;
+	}
+
+	return false;
 }
 
 
@@ -2199,6 +2223,8 @@ fork_team(void)
 				break;
 
 			thread->user_thread = team_allocate_user_thread(team);
+		} else if (is_cached_user_stack(parentTeam, info.area)) {
+			// a stack kept for the parent's next thread: not needed here
 		} else {
 			void* address;
 			area_id area = vm_copy_area(team->address_space->ID(), info.name,
