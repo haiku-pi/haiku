@@ -1016,14 +1016,23 @@ XHCI::SubmitNormalRequest(Transfer* transfer)
 		trbSize = 0;
 		trbCount = 0;
 
-		for (size_t i = 0; i < transfer->VectorCount(); i++) {
+		// Only the current fragment: a fragmented transfer is submitted again
+		// for the rest after AdvanceByFragment(), which leaves the vectors it
+		// has used up with a length of 0.
+		generic_size_t left = transfer->FragmentLength();
+		for (size_t i = 0; i < transfer->VectorCount() && left > 0; i++) {
+			generic_size_t length = min_c(transferVec[i].length, left);
+			if (length == 0)
+				continue;
+
 			// There's an XHCI context parameter to indicate if the controller is
 			// 64-bit capable, but for consistency we require 32-bit DMA.
-			if ((transferVec[i].base + transferVec[i].length) > UINT32_MAX)
+			if ((transferVec[i].base + length) > UINT32_MAX)
 				return B_BAD_VALUE;
 
-			trbCount += (transferVec[i].length + endpoint->max_burst_payload - 1)
+			trbCount += (length + endpoint->max_burst_payload - 1)
 				/ endpoint->max_burst_payload;
+			left -= length;
 		}
 	}
 
@@ -1044,10 +1053,16 @@ XHCI::SubmitNormalRequest(Transfer* transfer)
 			else
 				trbLength = (remaining < trbSize) ? remaining : trbSize;
 		} else {
+			while (transferVecOffset == transferVec->length) {
+				transferVec++;
+				transferVecOffset = 0;
+			}
 			address = transferVec->base + transferVecOffset;
 			trbLength = transferVec->length - transferVecOffset;
 			if (trbLength > endpoint->max_burst_payload)
 				trbLength = endpoint->max_burst_payload;
+			if (trbLength > remaining)
+				trbLength = remaining;
 
 			transferVecOffset += trbLength;
 			if (transferVecOffset == transferVec->length) {
