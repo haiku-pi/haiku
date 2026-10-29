@@ -37,6 +37,7 @@ public:
 			void			FlushRx();
 
 			bool			EnableReceiveInterrupt();
+			void			ClearReceiveInterrupt();
 			bool			EnableTransmitInterrupt(bool enable);
 			bool			CanPutChar();
 

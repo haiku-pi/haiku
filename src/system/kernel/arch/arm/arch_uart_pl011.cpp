@@ -349,6 +349,17 @@ ArchUARTPL011::EnableReceiveInterrupt()
 }
 
 
+void
+ArchUARTPL011::ClearReceiveInterrupt()
+{
+	// The receive and receive timeout interrupts clear when the FIFO is read
+	// below its level on the real PL011, but an emulated one (QEMU) can keep
+	// them raised with the FIFO empty: clear them, as Linux's driver does.
+	Out32(PL011_ICR, PL011_RXIC | PL011_RTIC | PL011_OEIC | PL011_BEIC
+		| PL011_PEIC | PL011_FEIC);
+}
+
+
 bool
 ArchUARTPL011::EnableTransmitInterrupt(bool enable)
 {

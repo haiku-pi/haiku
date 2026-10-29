@@ -38,6 +38,9 @@ public:
 	// Raise the UART's interrupt when input arrives (reading all of it
 	// clears the interrupt). Returns false if not supported.
 	virtual	bool			EnableReceiveInterrupt() { return false; }
+	// Clear the receive interrupt before reading the input (where reading
+	// the data alone does not clear it).
+	virtual	void			ClearReceiveInterrupt() {}
 
 	// Raise the UART's interrupt when its transmit FIFO has drained to its
 	// trigger level (enable), or not. Returns false if not supported. While

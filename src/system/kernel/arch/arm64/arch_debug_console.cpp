@@ -119,6 +119,8 @@ tx_buffered()
 static int32
 debug_uart_interrupt(void* /*data*/)
 {
+	// (cleared first: input arriving meanwhile raises it again)
+	sArchDebugUART->ClearReceiveInterrupt();
 	int c;
 	bool any = false;
 	while ((c = sArchDebugUART->GetChar(false)) >= 0) {
@@ -127,11 +129,11 @@ debug_uart_interrupt(void* /*data*/)
 	}
 
 	if (sTxBuffered) {
-		// (also when a CPU that printed has sent the rest meanwhile)
 		SpinLocker locker(sTxLock);
-		if (sTxInterruptEnabled)
+		if (sTxInterruptEnabled) {
 			tx_fill_fifo();
-		any = true;
+			any = true;
+		}
 	}
 
 	return any ? B_HANDLED_INTERRUPT : B_UNHANDLED_INTERRUPT;
