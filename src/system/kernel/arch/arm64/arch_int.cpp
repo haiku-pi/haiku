@@ -5,6 +5,7 @@
 #include <interrupts.h>
 
 #include <arch/smp.h>
+#include <arch/user_debugger.h>
 #include <boot/kernel_args.h>
 #include <device_manager.h>
 #include <kscheduler.h>
@@ -250,6 +251,7 @@ public:
 				frame->x[0] = thread_get_current_thread()->arch_info.old_x0;
 				frame->elr -= 4;
 			}
+			arm64_init_user_debug_at_kernel_exit(frame);
 		}
 		arm64_pop_iframe(&fThread->arch_info.iframes);
 	}
@@ -353,6 +355,13 @@ do_sync_handler(iframe * frame)
 			if (isUser && emulate_user_id_register_read(frame))
 				return;
 			exceptionType = B_INVALID_OPCODE_EXCEPTION;
+			break;
+		case EXCP_BRK:
+		case EXCP_BRKPT_EL0:
+		case EXCP_SOFTSTP_EL0:
+		case EXCP_WATCHPT_EL0:
+			if (isUser && arm64_handle_user_debug_exception(frame))
+				return;
 			break;
 		case EXCP_PC_ALIGN:
 			exceptionType = B_ALIGNMENT_EXCEPTION;

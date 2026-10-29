@@ -130,6 +130,12 @@ typedef struct arch_cpu_info {
 	uint64						mpidr;	// multiprocessor affinity register
 	uint64						midr;	// main ID register
 	BKernel::Thread*			last_vfp_user;
+
+	// the user break- and watchpoints in the debug registers
+	// (arch_team_debug_info::generation; 0: none) and whether MDSCR_EL1.SS
+	// is set (see arm64_init_user_debug_at_kernel_exit())
+	uint64						user_debug_generation;
+	bool						user_single_step;
 } arch_cpu_info;
 #endif
 

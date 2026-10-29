@@ -17,6 +17,7 @@
 #include <arch_vm.h>
 #include <arch/vm.h>
 #include <arch/vm_translation_map.h>
+#include <arch/user_debugger.h>
 
 #include <string.h>
 
@@ -131,6 +132,8 @@ arch_thread_enter_userspace(Thread *thread, addr_t entry,
 
 	thread->arch_info.iframes.index = 0;
 
+	disable_interrupts();
+	arm64_init_user_debug_at_kernel_exit(&frame);
 	_eret_with_iframe(&frame, thread->kernel_stack_top - 1);
 	return B_ERROR;
 }
@@ -254,5 +257,7 @@ arch_store_fork_frame(struct arch_fork_arg *arg)
 void
 arch_restore_fork_frame(struct arch_fork_arg *arg)
 {
+	disable_interrupts();
+	arm64_init_user_debug_at_kernel_exit(&arg->frame);
 	_eret_with_iframe(&arg->frame, thread_get_current_thread()->kernel_stack_top - 1);
 }

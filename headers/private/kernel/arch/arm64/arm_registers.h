@@ -141,10 +141,14 @@
 #define	 EXCP_SP_ALIGN		0x26	/* SP slignment fault */
 #define	 EXCP_TRAP_FP		0x2c	/* Trapped FP exception */
 #define	 EXCP_SERROR		0x2f	/* SError interrupt */
+#define	 EXCP_BRKPT_EL0		0x30	/* Hardware breakpoint, from lower EL */
+#define	 EXCP_BRKPT_EL1		0x31	/* Hardware breakpoint, from same EL */
 #define	 EXCP_SOFTSTP_EL0	0x32	/* Software Step, from lower EL */
 #define	 EXCP_SOFTSTP_EL1	0x33	/* Software Step, from same EL */
+#define	 EXCP_WATCHPT_EL0	0x34	/* Watchpoint, from lower EL */
 #define	 EXCP_WATCHPT_EL1	0x35	/* Watchpoint, from same EL */
 #define	 EXCP_BRK		0x3c	/* Breakpoint */
+#define	ISS_BRK_COMMENT(esr)	((esr) & 0xffff)	/* BRK #imm16 */
 
 /* ICC_CTLR_EL1 */
 #define	ICC_CTLR_EL1_EOIMODE	(1U << 1)
@@ -173,6 +177,23 @@
 /* ICC_SRE_EL2 */
 #define	ICC_SRE_EL2_SRE		(1U << 0)
 #define	ICC_SRE_EL2_EN		(1U << 3)
+
+/* MDSCR_EL1 - Monitor Debug System Control Register */
+#define	MDSCR_SS		(1U << 0)	/* Software step */
+#define	MDSCR_KDE		(1U << 13)	/* Debug exceptions at EL1 */
+#define	MDSCR_MDE		(1U << 15)	/* Breakpoint, watchpoint exceptions */
+
+/* DBGBCR<n>_EL1 - Breakpoint Control Registers */
+#define	DBGBCR_E		(1U << 0)	/* Enable */
+#define	DBGBCR_PMC_EL0		(2U << 1)	/* Match at EL0 only */
+#define	DBGBCR_BAS_A64		(0xfU << 5)	/* An A64 instruction */
+
+/* DBGWCR<n>_EL1 - Watchpoint Control Registers */
+#define	DBGWCR_E		(1U << 0)	/* Enable */
+#define	DBGWCR_PAC_EL0		(2U << 1)	/* Match at EL0 only */
+#define	DBGWCR_LSC_LOAD		(1U << 3)	/* Match loads */
+#define	DBGWCR_LSC_STORE	(2U << 3)	/* Match stores */
+#define	DBGWCR_BAS_SHIFT	5		/* Bytes of the doubleword */
 
 /* ID_AA64DFR0_EL1 */
 #define	ID_AA64DFR0_MASK		0x0000000ff0f0fffful

@@ -7,6 +7,7 @@
 #include <KernelExport.h>
 
 #include <arch/cpu.h>
+#include <arch/user_debugger.h>
 #include <boot/kernel_args.h>
 #include <commpage.h>
 #include <elf.h>
@@ -41,6 +42,8 @@ arch_cpu_init_percpu(kernel_args *args, int curr_cpu)
 
 	gCPU[curr_cpu].arch.mpidr = READ_SPECIALREG(MPIDR_EL1);
 	gCPU[curr_cpu].arch.midr = READ_SPECIALREG(MIDR_EL1);
+
+	arm64_init_user_debug_percpu(curr_cpu);
 
 	return 0;
 }
