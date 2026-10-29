@@ -423,7 +423,10 @@ BreakpointManager::WriteMemory(void* _address, const void* _buffer, size_t size,
 }
 
 
-void
+/*!	Replaces a software breakpoint at \a address, where a thread is about to
+	continue, by a hardware one. Returns whether it did.
+*/
+bool
 BreakpointManager::PrepareToContinue(void* _address)
 {
 	const addr_t address = (addr_t)_address;
@@ -433,24 +436,25 @@ BreakpointManager::PrepareToContinue(void* _address)
 	// Check whether there's a software breakpoint at the continuation address.
 	InstalledBreakpoint* installed = fBreakpoints.Lookup(address);
 	if (installed == NULL || !installed->breakpoint->software)
-		return;
+		return false;
 
 	// We need to replace the software breakpoint by a hardware one, or
 	// we can't continue the thread.
 	Breakpoint* breakpoint = _GetUnusedHardwareBreakpoint(true);
 	if (breakpoint == NULL) {
 		dprintf("Failed to allocate a hardware breakpoint.\n");
-		return;
+		return false;
 	}
 
 	status_t error = _InstallHardwareBreakpoint(breakpoint, address);
 	if (error != B_OK)
-		return;
+		return false;
 
 	_UninstallSoftwareBreakpoint(installed->breakpoint);
 
 	breakpoint->installedBreakpoint = installed;
 	installed->breakpoint = breakpoint;
+	return true;
 }
 
 

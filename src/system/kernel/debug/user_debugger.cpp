@@ -804,14 +804,21 @@ thread_hit_debug_event(debug_debugger_message event, const void *message,
 	debugChangeCondition.Init(team, "debug change condition");
 	prepare_debugger_change(team, debugChangeCondition);
 
+	bool hardwareBreakpointsChanged = false;
 	if (team->debug_info.breakpoint_manager != NULL) {
 		bool isSyscall;
 		void* pc = arch_debug_get_interrupt_pc(&isSyscall);
-		if (pc != NULL && !isSyscall)
-			team->debug_info.breakpoint_manager->PrepareToContinue(pc);
+		if (pc != NULL && !isSyscall) {
+			hardwareBreakpointsChanged = team->debug_info.breakpoint_manager
+				->PrepareToContinue(pc);
+		}
 	}
 
 	finish_debugger_change(team);
+
+	// The team may have had no hardware breakpoints before.
+	if (hardwareBreakpointsChanged)
+		update_threads_breakpoints_flag();
 
 	return result;
 }

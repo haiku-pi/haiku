@@ -36,7 +36,7 @@ public:
 			status_t			WriteMemory(void* _address, const void* _buffer,
 									size_t size, size_t& bytesWritten);
 
-			void				PrepareToContinue(void* address);
+			bool				PrepareToContinue(void* address);
 
 private:
 			struct InstalledBreakpoint;
