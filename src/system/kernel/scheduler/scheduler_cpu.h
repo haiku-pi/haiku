@@ -157,6 +157,7 @@ public:
 											bigtime_t activeTime);
 
 	inline				int32			GetLoad() const;
+	inline				int32			GetUncappedLoad() const;
 	inline				uint32			LoadMeasurementEpoch() const
 											{ return fLoadMeasurementEpoch; }
 
@@ -402,6 +403,19 @@ CoreEntry::GetLoad() const
 
 	ASSERT(fCPUCount > 0);
 	return std::min(fLoad / fCPUCount, kMaxLoad);
+}
+
+
+/*!	The load the core's threads need, which exceeds kMaxLoad when they need
+	more CPU time than the core has.
+*/
+inline int32
+CoreEntry::GetUncappedLoad() const
+{
+	SCHEDULER_ENTER_FUNCTION();
+
+	ASSERT(fCPUCount > 0);
+	return fLoad / fCPUCount;
 }
 
 

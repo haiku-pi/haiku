@@ -116,8 +116,11 @@ rebalance(const ThreadData* threadData)
 	ASSERT(other != NULL);
 
 	// Check if the least loaded core is significantly less loaded than
-	// the current one.
-	int32 coreLoad = core->GetLoad();
+	// the current one. The current core's load is taken uncapped: a thread
+	// that always runs needs kMaxLoad, and two of them on a single CPU core
+	// would otherwise make it look no more loaded than one, and neither would
+	// ever be moved to an idle core.
+	int32 coreLoad = core->GetUncappedLoad();
 	int32 otherLoad = other->GetLoad();
 	if (other == core || otherLoad + kLoadDifference >= coreLoad)
 		return core;
