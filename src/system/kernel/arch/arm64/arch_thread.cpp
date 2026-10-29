@@ -228,7 +228,10 @@ arch_restore_signal_frame(struct signal_frame_data* signalFrameData)
 	frame->fp = signalFrameData->context.uc_mcontext.x[29];
 	frame->lr = signalFrameData->context.uc_mcontext.lr;
 	frame->elr = signalFrameData->context.uc_mcontext.elr;
-	frame->spsr = signalFrameData->context.uc_mcontext.spsr;
+	// only the flags user code may set: the rest (the exception level to
+	// return to, the interrupt masks, the step state) stays the kernel's
+	frame->spsr = (frame->spsr & ~(uint64)PSR_USER_SETTABLE)
+		| (signalFrameData->context.uc_mcontext.spsr & PSR_USER_SETTABLE);
 	frame->sp = signalFrameData->context.uc_mcontext.sp;
 	memcpy(frame->fpu.regs, signalFrameData->context.uc_mcontext.fp_q,
 		sizeof(signalFrameData->context.uc_mcontext.fp_q));

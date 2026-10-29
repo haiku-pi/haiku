@@ -593,13 +593,20 @@
 #define	PSR_I		0x00000080
 #define	PSR_A		0x00000100
 #define	PSR_D		0x00000200
+#define	PSR_BTYPE	0x00000c00
+#define	PSR_SSBS	0x00001000
 #define	PSR_IL		0x00100000
 #define	PSR_SS		0x00200000
+#define	PSR_DIT		0x01000000
+#define	PSR_TCO		0x02000000
 #define	PSR_V		0x10000000
 #define	PSR_C		0x20000000
 #define	PSR_Z		0x40000000
 #define	PSR_N		0x80000000
 #define	PSR_FLAGS	0xf0000000
+/* The bits of an EL0 context user code may set (on sigreturn, by a debugger) */
+#define	PSR_USER_SETTABLE	(PSR_FLAGS | PSR_BTYPE | PSR_SSBS | PSR_DIT \
+	| PSR_TCO)
 
 /* TCR_EL1 - Translation Control Register */
 #define	TCR_ASID_16	(1UL << 36)
