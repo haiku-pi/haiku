@@ -21,7 +21,7 @@ CliStopCommand::CliStopCommand()
 		"%s [ <thread ID> ]\n"
 		"Stops the thread specified by <thread ID>, if supplied. Otherwise "
 			"stops\n"
-		"the current thread.")
+		"the current thread. Returns when the thread has stopped.")
 {
 }
 
@@ -68,6 +68,18 @@ CliStopCommand::Execute(int argc, const char* const* argv,
 		return;
 	}
 
-	context.GetUserInterfaceListener()->ThreadActionRequested(thread->ID(),
+	thread_id threadID = thread->ID();
+	context.GetUserInterfaceListener()->ThreadActionRequested(threadID,
 		MSG_THREAD_STOP);
+
+	// Wait until it has stopped, so that the next command (bt, say) finds it
+	// stopped, also when the commands come from a script.
+	while ((thread = context.GetTeam()->ThreadByID(threadID)) != NULL
+		&& thread->State() != THREAD_STATE_STOPPED) {
+		teamLocker.Unlock();
+		context.WaitForEvent(CliContext::MSG_THREAD_STATE_CHANGED);
+		if (context.IsTerminating())
+			return;
+		teamLocker.Lock();
+	}
 }

@@ -44,11 +44,19 @@ CliStackTraceCommand::Execute(int argc, const char* const* argv,
 	}
 
 	// get its stack trace
+	// (the team unlocked while waiting: computing the stack trace needs it)
+	BReference<Thread> threadReference(thread);
 	StackTrace* stackTrace = thread->GetStackTrace();
 	while (stackTrace == NULL) {
+		teamLocker.Unlock();
 		context.WaitForEvent(CliContext::MSG_THREAD_STACK_TRACE_CHANGED);
 		if (context.IsTerminating())
 			return;
+		teamLocker.Lock();
+		if (thread->State() != THREAD_STATE_STOPPED) {
+			printf("The thread is no longer stopped.\n");
+			return;
+		}
 		stackTrace = thread->GetStackTrace();
 	}
 	BReference<StackTrace> stackTraceReference(stackTrace);
