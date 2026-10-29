@@ -104,6 +104,8 @@ void call_single_cpu(uint32 targetCPU, void (*func)(void*, int), void* cookie);
 void call_single_cpu_sync(uint32 targetCPU, void (*func)(void*, int),
 	void* cookie);
 
+status_t _user_team_memory_barrier(uint32 flags);
+
 
 #ifdef __cplusplus
 }

@@ -42,6 +42,7 @@
 #include <real_time_clock.h>
 #include <safemode.h>
 #include <sem.h>
+#include <smp.h>
 #include <sys/resource.h>
 #include <system_profiler.h>
 #include <thread.h>

@@ -804,6 +804,7 @@ void __swprintf() {}
 void __swscanf() {}
 void __sysconf() {}
 void __sysconf_beos() {}
+void __team_memory_barrier() {}
 void __tens() {}
 void __terminate() {}
 void __test_executable() {}
@@ -1242,6 +1243,7 @@ void _kern_system_profiler_recorded() {}
 void _kern_system_profiler_start() {}
 void _kern_system_profiler_stop() {}
 void _kern_system_time() {}
+void _kern_team_memory_barrier() {}
 void _kern_thread_yield() {}
 void _kern_transfer_area() {}
 void _kern_unblock_thread() {}

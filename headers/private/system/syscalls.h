@@ -655,6 +655,9 @@ extern status_t		_kern_start_watching_disks(uint32 eventMask, port_id port,
 						int32 token);
 extern status_t		_kern_stop_watching_disks(port_id port, int32 token);
 
+// memory barrier on every CPU running a thread of the team
+extern status_t		_kern_team_memory_barrier(uint32 flags);
+
 
 // The end mark for gensyscallinfos.
 #ifdef GEN_SYSCALL_INFOS_PROCESSING

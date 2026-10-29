@@ -14,6 +14,7 @@ __BEGIN_DECLS
 
 status_t get_memory_properties(team_id teamID, const void* address,
 	uint32* _protected, uint32* _lock);
+status_t __team_memory_barrier(uint32 flags);
 
 __END_DECLS
 

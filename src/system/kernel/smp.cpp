@@ -30,6 +30,7 @@
 #include <spinlock_contention.h>
 #include <thread.h>
 #include <util/atomic.h>
+#include <util/ThreadAutoLock.h>
 
 #include "kernel_debug_config.h"
 
@@ -1543,6 +1544,77 @@ void
 call_all_cpus_sync(void (*func)(void*, int), void* cookie)
 {
 	call_all_cpus(func, cookie, true);
+}
+
+
+// #pragma mark - syscalls
+
+
+static void
+memory_barrier_ici(addr_t, int32, addr_t, addr_t)
+{
+	memory_full_barrier();
+}
+
+
+/*!	Executes a full memory barrier on every CPU that currently runs a thread
+	of the calling team, and on the calling CPU, and returns when all of them
+	have done so. Afterwards the memory accesses that any thread of the team
+	performed before the call are ordered before every access the caller
+	performs after it, without the other threads executing a barrier of their
+	own (an "asymmetric" fence: Linux' membarrier() with
+	MEMBARRIER_CMD_PRIVATE_EXPEDITED, Windows' FlushProcessWriteBuffers()).
+
+	Only CPUs running a thread of the team are interrupted. A thread that is
+	switched in or out while the team's threads are scanned is covered by the
+	barriers in the scheduler's switch_thread(), around the update of
+	Thread::cpu.
+*/
+status_t
+_user_team_memory_barrier(uint32 flags)
+{
+	if (flags != 0)
+		return B_BAD_VALUE;
+
+	// order the caller's earlier memory accesses before the scan
+	memory_full_barrier();
+
+	Thread* currentThread = thread_get_current_thread();
+	Team* team = currentThread->team;
+
+	CPUSet cpus;
+	bool otherCPUs = false;
+	{
+		TeamLocker teamLocker(team);
+		for (Thread* thread = team->thread_list.First(); thread != NULL;
+				thread = team->thread_list.GetNext(thread)) {
+			if (thread == currentThread)
+				continue;
+
+			cpu_ent* cpu = atomic_pointer_get(&thread->cpu);
+			if (cpu != NULL) {
+				cpus.SetBit(cpu->cpu_num);
+				otherCPUs = true;
+			}
+		}
+	}
+
+	if (otherCPUs) {
+		thread_pin_to_current_cpu(currentThread);
+
+		// this CPU executes the barrier below
+		cpus.ClearBit(smp_get_current_cpu());
+		if (!cpus.IsEmpty()) {
+			smp_multicast_ici(cpus, SMP_MSG_CALL_FUNCTION, 0, 0, 0,
+				(void*)&memory_barrier_ici, SMP_MSG_FLAG_SYNC);
+		}
+
+		thread_unpin_from_current_cpu(currentThread);
+	}
+
+	// order the other CPUs' barriers before the caller's later accesses
+	memory_full_barrier();
+	return B_OK;
 }
 
 

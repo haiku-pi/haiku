@@ -301,10 +301,16 @@ switch_thread(Thread* fromThread, Thread* toThread)
 
 	// update CPU and Thread structures and perform the context switch
 	cpu_ent* cpu = fromThread->cpu;
+
+	// The barriers order the memory accesses fromThread made before and
+	// toThread makes after the switch against the update of their "cpu"
+	// fields, which _user_team_memory_barrier() relies on.
+	memory_full_barrier();
 	toThread->previous_cpu = toThread->cpu = cpu;
 	fromThread->cpu = NULL;
 	cpu->running_thread = toThread;
 	cpu->previous_thread = fromThread;
+	memory_full_barrier();
 
 	arch_thread_set_current_thread(toThread);
 	arch_thread_context_switch(fromThread, toThread);
