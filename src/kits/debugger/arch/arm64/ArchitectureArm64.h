@@ -12,6 +12,9 @@
 #include "Register.h"
 
 
+class SourceLanguage;
+
+
 class ArchitectureArm64 : public Architecture {
 public:
 								ArchitectureArm64(TeamMemory* teamMemory);
@@ -85,6 +88,7 @@ private:
 
 private:
 			Array<Register>		fRegisters;
+			SourceLanguage*		fAssemblyLanguage;
 			ToDwarfRegisterMap*	fToDwarfRegisterMap;
 			FromDwarfRegisterMap* fFromDwarfRegisterMap;
 };

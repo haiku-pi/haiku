@@ -1,0 +1,15 @@
+SubDir HAIKU_TOP src kits debugger arch arm64 disasm ;
+
+UsePrivateHeaders shared ;
+
+UsePrivateHeaders [ FDirName debugger arch ] ;
+UsePrivateHeaders [ FDirName debugger types ] ;
+
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) ] ;
+SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) ] ;
+
+MergeObject Debugger_disasm_arm64.o
+	:
+	DisassemblerArm64.cpp
+	aarch64_disasm.c
+;

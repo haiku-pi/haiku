@@ -55,6 +55,7 @@ SEARCH_SOURCE += [ FDirName $(SUBDIR) settings ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) settings generic ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) source_language ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) source_language c_family ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) source_language arm64 ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) source_language x86 ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) target_host_interface ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) target_host_interface local ] ;
@@ -258,6 +259,9 @@ local sources =
 	CLanguageTokenizer.cpp
 	CppLanguage.cpp
 
+	# source_language/arm64
+	Arm64AssemblyLanguage.cpp
+
 	# source_language/x86
 	X86AssemblyLanguage.cpp
 
@@ -347,6 +351,7 @@ SharedLibrary libdebugger.so :
 	$(sources)
 	:
 	<nogrist>Debugger_demangler.o
+	<nogrist>Debugger_disasm_arm64.o
 	<nogrist>Debugger_disasm_x86.o
 	<nogrist>Debugger_disasm_x86_64.o
 	<nogrist>Debugger_dwarf.o
@@ -359,6 +364,7 @@ SharedLibrary libdebugger.so :
 	be package libbsd.so libdebug.so
 ;
 
+HaikuSubInclude arch arm64 disasm ;
 HaikuSubInclude arch x86 disasm ;
 HaikuSubInclude arch x86_64 disasm ;
 HaikuSubInclude demangler ;

@@ -12,9 +12,11 @@
 
 #include <AutoDeleter.h>
 
+#include "Arm64AssemblyLanguage.h"
 #include "CfaContext.h"
 #include "CpuStateArm64.h"
 #include "DisassembledCode.h"
+#include "disasm/DisassemblerArm64.h"
 #include "FunctionDebugInfo.h"
 #include "InstructionInfo.h"
 #include "NoOpStackFrameDebugInfo.h"
@@ -121,6 +123,7 @@ struct ArchitectureArm64::FromDwarfRegisterMap : RegisterMap {
 ArchitectureArm64::ArchitectureArm64(TeamMemory* teamMemory)
 	:
 	Architecture(teamMemory, 8, sizeof(arm64_debug_cpu_state), false),
+	fAssemblyLanguage(NULL),
 	fToDwarfRegisterMap(NULL),
 	fFromDwarfRegisterMap(NULL)
 {
@@ -129,6 +132,8 @@ ArchitectureArm64::ArchitectureArm64(TeamMemory* teamMemory)
 
 ArchitectureArm64::~ArchitectureArm64()
 {
+	if (fAssemblyLanguage != NULL)
+		fAssemblyLanguage->ReleaseReference();
 	if (fToDwarfRegisterMap != NULL)
 		fToDwarfRegisterMap->ReleaseReference();
 	if (fFromDwarfRegisterMap != NULL)
@@ -139,6 +144,10 @@ ArchitectureArm64::~ArchitectureArm64()
 status_t
 ArchitectureArm64::Init()
 {
+	fAssemblyLanguage = new(std::nothrow) Arm64AssemblyLanguage;
+	if (fAssemblyLanguage == NULL)
+		return B_NO_MEMORY;
+
 	try {
 		// in the order of their indices: the base class takes a register's
 		// index for its position in Registers()
@@ -425,8 +434,37 @@ status_t
 ArchitectureArm64::DisassembleCode(FunctionDebugInfo* function,
 	const void* buffer, size_t bufferSize, DisassembledCode*& _sourceCode)
 {
-	// TODO: there is no AArch64 disassembler yet
-	return B_UNSUPPORTED;
+	DisassembledCode* source = new(std::nothrow) DisassembledCode(
+		fAssemblyLanguage);
+	if (source == NULL)
+		return B_NO_MEMORY;
+	BReference<DisassembledCode> sourceReference(source, true);
+
+	DisassemblerArm64 disassembler;
+	status_t error = disassembler.Init(function->Address(), buffer, bufferSize);
+	if (error != B_OK)
+		return error;
+
+	// add a function name line
+	BString functionName(function->PrettyName());
+	if (!source->AddCommentLine((functionName << ':').String()))
+		return B_NO_MEMORY;
+
+	// disassemble the instructions
+	BString line;
+	target_addr_t instructionAddress;
+	target_size_t instructionSize;
+	bool breakpointAllowed;
+	while (disassembler.GetNextInstruction(line, instructionAddress,
+			instructionSize, breakpointAllowed) == B_OK) {
+		if (!source->AddInstructionLine(line, instructionAddress,
+				instructionSize)) {
+			return B_NO_MEMORY;
+		}
+	}
+
+	_sourceCode = sourceReference.Detach();
+	return B_OK;
 }
 
 
@@ -456,7 +494,7 @@ ArchitectureArm64::GetInstructionInfo(target_addr_t address,
 		return B_ERROR;
 	}
 
-	// tell calls (bl, blr) from the rest; there is no disassembler yet
+	// tell calls (bl, blr) and jumps from the rest
 	instruction_type type = INSTRUCTION_TYPE_OTHER;
 	target_addr_t targetAddress = 0;
 	if ((instruction & 0xfc000000) == 0x94000000) {
@@ -472,10 +510,27 @@ ArchitectureArm64::GetInstructionInfo(target_addr_t address,
 			targetAddress = cpuState->IntRegisterValue(
 				ARM64_REGISTER_X0 + ((instruction >> 5) & 0x1f));
 		}
+	} else if ((instruction & 0xfc000000) == 0x14000000) {
+		// b: a signed 26 bit word offset
+		int64 offset = (int64)((int32)(instruction << 6) >> 6) * 4;
+		type = INSTRUCTION_TYPE_JUMP;
+		targetAddress = address + offset;
+	} else if ((instruction & 0xfffffc1f) == 0xd61f0000
+		|| (instruction & 0xfffffc1f) == 0xd65f0000) {
+		// br xN, ret xN
+		type = INSTRUCTION_TYPE_JUMP;
+		CpuStateArm64* cpuState = dynamic_cast<CpuStateArm64*>(state);
+		if (cpuState != NULL) {
+			targetAddress = cpuState->IntRegisterValue(
+				ARM64_REGISTER_X0 + ((instruction >> 5) & 0x1f));
+		}
 	}
 
 	BString line;
-	line.SetToFormat("%08" B_PRIx32, instruction);
+	status_t error = DisassemblerArm64::Disassemble(address, instruction, line);
+	if (error != B_OK)
+		return error;
+
 	if (!_info.SetTo(address, targetAddress, kInstructionSize, type, true,
 			line)) {
 		return B_NO_MEMORY;
@@ -489,8 +544,38 @@ status_t
 ArchitectureArm64::ResolvePICFunctionAddress(target_addr_t instructionAddress,
 	CpuState* state, target_addr_t& _targetAddress)
 {
-	// TODO: decode the PLT stub (adrp/ldr/br)
-	return B_UNSUPPORTED;
+	// A PLT entry loads the function's address from its GOT slot:
+	//   adrp x16, <page of the slot>
+	//   ldr x17, [x16, #<offset of the slot in the page>]
+	//   add x16, x16, #<offset>
+	//   br x17
+	uint32 code[2];
+	if (fTeamMemory->ReadMemory(instructionAddress, code, sizeof(code))
+			!= (ssize_t)sizeof(code)) {
+		return B_BAD_VALUE;
+	}
+
+	const uint32 adrp = code[0];
+	const uint32 ldr = code[1];
+	if ((adrp & 0x9f00001f) != 0x90000010
+		|| (ldr & 0xffc003ff) != 0xf9400211) {
+		return B_BAD_VALUE;
+	}
+
+	// immhi:immlo: a signed 21 bit count of 4 KiB pages
+	uint64 pages = (((uint64)(adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 0x3);
+	int64 pageOffset = (int64)(pages << 43) >> 31;
+	target_addr_t slot = (instructionAddress & ~(target_addr_t)0xfff)
+		+ pageOffset + ((ldr >> 10) & 0xfff) * 8;
+
+	target_addr_t address;
+	if (fTeamMemory->ReadMemory(slot, &address, sizeof(address))
+			!= (ssize_t)sizeof(address)) {
+		return B_BAD_VALUE;
+	}
+
+	_targetAddress = address;
+	return B_OK;
 }
 
 
@@ -498,10 +583,14 @@ status_t
 ArchitectureArm64::GetWatchpointDebugCapabilities(int32& _maxRegisterCount,
 	int32& _maxBytesPerRegister, uint8& _watchpointCapabilityFlags)
 {
-	// the kernel does not support watchpoints on arm64 yet
-	_maxRegisterCount = 0;
-	_maxBytesPerRegister = 0;
-	_watchpointCapabilityFlags = 0;
+	// The Cortex-A53, -A72 and QEMU have 4 watchpoints (at least 2 are
+	// architectural); one watches up to 8 bytes of an aligned doubleword
+	// (the kernel checks that), loads, stores or both.
+	_maxRegisterCount = 4;
+	_maxBytesPerRegister = 8;
+	_watchpointCapabilityFlags = WATCHPOINT_CAPABILITY_FLAG_READ
+		| WATCHPOINT_CAPABILITY_FLAG_WRITE
+		| WATCHPOINT_CAPABILITY_FLAG_READ_WRITE;
 	return B_OK;
 }
 
