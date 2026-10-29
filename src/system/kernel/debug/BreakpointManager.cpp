@@ -9,6 +9,7 @@
 
 #include <AutoDeleter.h>
 
+#include <arch/cpu.h>
 #include <kernel.h>
 #include <util/AutoLock.h>
 #include <vm/vm.h>
@@ -748,6 +749,11 @@ BreakpointManager::_WriteMemory(addr_t _address, const void* _buffer,
 
 		// copy the memory
 		error = user_memcpy(address, buffer, toWrite);
+
+		// the memory may be code (a software breakpoint): make the
+		// instruction cache see the change
+		if (error == B_OK)
+			arch_cpu_sync_icache(address, toWrite);
 
 		// reset the area protection
 		if (protectionChanged)
