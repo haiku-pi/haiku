@@ -90,6 +90,15 @@ FUNCTION(drop_to_el1):
 	/* Don't trap to EL2 for CP15 traps */
 	msr	hstr_el2, xzr
 
+	/*
+	 * Don't trap debug, trace or performance monitor register accesses to
+	 * EL2 nor route debug exceptions there (its reset value is partly
+	 * unknown); EL1 gets all event counters (HPMN = PMCR_EL0.N).
+	 */
+	mrs	x2, pmcr_el0
+	ubfx	x2, x2, #11, #5
+	msr	mdcr_el2, x2
+
 	/* Enable access to the physical timers at EL1 */
 	mrs	x2, cnthctl_el2
 	orr	x2, x2, #(CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN)
