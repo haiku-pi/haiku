@@ -28,7 +28,8 @@
 	rate with the maximum. Turbo also kept the core clock (the VPU, the AXI
 	side of the hardware decoders and the GPU) at its maximum; without it the
 	core idles at 200 MHz, which cost HEVC decoding a fifth of its frame rate:
-	the core clock is set to its maximum here, once, and stays there.
+	the core clock is set to its maximum here, once (before turbo goes off),
+	and stays there.
 */
 
 
@@ -187,6 +188,23 @@ init_cpufreq()
 	if (sMaxRate > sMinRate)
 		sRates[sRateCount++] = sMaxRate;
 
+	// The core clock to its maximum first, while the firmware's boot-time
+	// turbo still holds it there: switching turbo off with the core clock
+	// left to the firmware let it drop the core clock, which also clocks the
+	// peripheral bus, while the CPUs used it, and on a Pi that had been off
+	// for minutes that froze the bus (a CPU stopped inside a UART access, the
+	// others behind it: the whole system, the kernel debugger too). In that
+	// order 4 of 16 network boots after 4 minutes off stopped so; in this
+	// one 0 of 15.
+	uint32 coreMax[2] = { BCM2835_CLOCK_CORE, 0 };
+	if (sMailbox->property_tag(BCM2835_TAG_GET_MAX_CLOCK_RATE, coreMax,
+			sizeof(coreMax), sizeof(uint32), NULL) == B_OK && coreMax[1] != 0) {
+		// [clock ID, rate, skip setting turbo] -> [clock ID, rate]
+		uint32 values[3] = { BCM2835_CLOCK_CORE, coreMax[1], 1 };
+		sMailbox->property_tag(BCM2835_TAG_SET_CLOCK_RATE, values,
+			sizeof(values), sizeof(values), NULL);
+	}
+
 	// turbo off (the firmware's, or a previous system's), [ID, level] -> [ID,
 	// level]; then start at the maximum: the boot is busy
 	uint32 turbo[2] = { 0, 0 };
@@ -200,14 +218,6 @@ init_cpufreq()
 	for (int32 cpu = 0; cpu < SMP_MAX_CPUS; cpu++)
 		sLevel[cpu] = kCPUPerformanceScaleMax;
 	set_arm_rate(sMaxRate);
-	uint32 coreMax[2] = { BCM2835_CLOCK_CORE, 0 };
-	if (sMailbox->property_tag(BCM2835_TAG_GET_MAX_CLOCK_RATE, coreMax,
-			sizeof(coreMax), sizeof(uint32), NULL) == B_OK && coreMax[1] != 0) {
-		// [clock ID, rate, skip setting turbo] -> [clock ID, rate]
-		uint32 values[3] = { BCM2835_CLOCK_CORE, coreMax[1], 1 };
-		sMailbox->property_tag(BCM2835_TAG_SET_CLOCK_RATE, values,
-			sizeof(values), sizeof(values), NULL);
-	}
 
 	sQuit = false;
 	sThread = spawn_kernel_thread(&clock_thread, "bcm2835 cpufreq",
