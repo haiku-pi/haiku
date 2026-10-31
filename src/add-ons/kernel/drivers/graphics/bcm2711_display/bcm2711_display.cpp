@@ -122,9 +122,11 @@ struct display_info {
 	uint32			boot_bytes_per_row;
 	uint32			depth;
 
-	// a smaller mode's frame buffer, scaled up by a firmware plane
+	// a smaller mode's frame buffer, scaled up by a firmware plane: one of the
+	// native mode's size, allocated once and kept (see reserve_mode_buffer())
 	area_id			mode_area;
 	addr_t			mode_frame_buffer;
+	phys_addr_t		mode_physical;
 
 	uint32			display_id;
 
@@ -433,6 +435,9 @@ read_edid(display_info& info)
 }
 
 
+static status_t reserve_mode_buffer(display_info& info);
+
+
 static status_t
 display_init(display_info& info)
 {
@@ -488,6 +493,9 @@ display_init(display_info& info)
 	sharedInfo.current_mode.virtual_width = bufferInfo->width;
 	sharedInfo.current_mode.virtual_height = bufferInfo->height;
 	sharedInfo.current_mode.space = color_space_for_depth(bufferInfo->depth);
+
+	// while memory is not yet fragmented (a failure is retried by set_mode())
+	reserve_mode_buffer(info);
 
 	// the firmware's id of the first display (HDMI 0)
 	uint32 display = 0;
@@ -569,8 +577,45 @@ blank_firmware_frame_buffer(bool blank)
 }
 
 
+/*!	Allocates the frame buffer of the smaller modes: physically contiguous
+	below kScanOutLimit, the native mode's size, so that every smaller mode fits.
+	It is allocated once, early, and kept: a contiguous run of a few MB in the
+	first GB is often no longer to be had after the system has run for a while
+	(a game's mode change then failed with B_NO_MEMORY: KNOWN-ISSUES W15).
+*/
+static status_t
+reserve_mode_buffer(display_info& info)
+{
+	if (info.mode_area >= 0)
+		return B_OK;
+
+	bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const size_t size = (sharedInfo.native_width * 4 * sharedInfo.native_height
+		+ B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
+	virtual_address_restrictions virtualRestrictions = {};
+	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+	physical_address_restrictions physicalRestrictions = {};
+	physicalRestrictions.high_address = kScanOutLimit;
+	void* address;
+	area_id area = create_area_etc(B_SYSTEM_TEAM,
+		"bcm2711 display mode frame buffer", size, B_CONTIGUOUS,
+		B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
+		&physicalRestrictions, &address);
+	if (area < 0)
+		return area;
+	physical_entry entry;
+	get_memory_map(address, B_PAGE_SIZE, &entry, 1);
+	vm_set_area_memory_type(area, entry.address, B_WRITE_COMBINING_MEMORY);
+
+	info.mode_area = area;
+	info.mode_frame_buffer = (addr_t)address;
+	info.mode_physical = entry.address;
+	return B_OK;
+}
+
+
 /*!	Switches to \a width x \a height: the native mode is the firmware's own
-	frame buffer, a smaller one gets a new buffer that a firmware plane scales
+	frame buffer, a smaller one the mode buffer that a firmware plane scales
 	up. The accelerant's clone of the old buffer becomes a null area.
 */
 static status_t
@@ -589,46 +634,28 @@ set_mode(display_info& info, uint32 width, uint32 height)
 
 	const bool native = width == sharedInfo.native_width
 		&& height == sharedInfo.native_height;
-	area_id oldModeArea = info.mode_area;
+	area_id oldArea = info.frame_buffer_area;
 
 	if (native) {
 		set_plane(info, 0, 0, 0);
 		blank_firmware_frame_buffer(false);
-		info.mode_area = -1;
 		info.frame_buffer_area = info.boot_area;
 		info.frame_buffer = info.boot_frame_buffer;
 		sharedInfo.bytes_per_row = info.boot_bytes_per_row;
 	} else {
-		const uint32 bytesPerRow = width * 4;
-		const size_t size = (bytesPerRow * height + B_PAGE_SIZE - 1)
-			& ~(B_PAGE_SIZE - 1);
-		virtual_address_restrictions virtualRestrictions = {};
-		virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
-		physical_address_restrictions physicalRestrictions = {};
-		physicalRestrictions.high_address = kScanOutLimit;
-		void* address;
-		area_id area = create_area_etc(B_SYSTEM_TEAM,
-			"bcm2711 display mode frame buffer", size, B_CONTIGUOUS,
-			B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
-			&physicalRestrictions, &address);
-		if (area < 0)
-			return area;
-		physical_entry entry;
-		get_memory_map(address, B_PAGE_SIZE, &entry, 1);
-		vm_set_area_memory_type(area, entry.address, B_WRITE_COMBINING_MEMORY);
-		memset(address, 0, size);
-
-		status_t status = set_plane(info, width, height, entry.address);
-		if (status != B_OK) {
-			delete_area(area);
+		status_t status = reserve_mode_buffer(info);
+		if (status != B_OK)
 			return status;
-		}
+
+		const uint32 bytesPerRow = width * 4;
+		memset((void*)info.mode_frame_buffer, 0, bytesPerRow * height);
+		status = set_plane(info, width, height, info.mode_physical);
+		if (status != B_OK)
+			return status;
 		blank_firmware_frame_buffer(true);
 
-		info.mode_area = area;
-		info.mode_frame_buffer = (addr_t)address;
-		info.frame_buffer_area = area;
-		info.frame_buffer = (addr_t)address;
+		info.frame_buffer_area = info.mode_area;
+		info.frame_buffer = info.mode_frame_buffer;
 		sharedInfo.bytes_per_row = bytesPerRow;
 	}
 
@@ -636,11 +663,9 @@ set_mode(display_info& info, uint32 width, uint32 height)
 	frame_buffer_update(info.frame_buffer, width, height, info.depth,
 		sharedInfo.bytes_per_row);
 
-	if (oldModeArea >= 0) {
-		vm_change_clones_to_null_areas(oldModeArea);
-		delete_area(oldModeArea);
-	} else
-		vm_change_clones_to_null_areas(info.boot_area);
+	// the clones of the old buffer (the accelerant clones the new one): of the
+	// mode buffer too when only the size changed, as its layout did
+	vm_change_clones_to_null_areas(oldArea);
 
 	sharedInfo.current_mode.virtual_width = width;
 	sharedInfo.current_mode.virtual_height = height;
@@ -779,6 +804,11 @@ display_uninit(display_info& info)
 	stop_vertical_blank(info);
 	delete_sem(info.shared_info->vblank_semaphore);
 	vm_change_clones_to_null_areas(info.boot_area);
+	if (info.mode_area >= 0) {
+		vm_change_clones_to_null_areas(info.mode_area);
+		delete_area(info.mode_area);
+		info.mode_area = -1;
+	}
 	delete_area(info.boot_area);
 	delete_area(info.shared_area);
 	put_module(BCM2835_MAILBOX_MODULE_NAME);
