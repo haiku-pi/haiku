@@ -127,6 +127,7 @@ section_table:
 	.short	0		// NumberOfRelocations  (0 for executables)
 	.short	0		// NumberOfLineNumbers  (0 for executables)
 	.long	0xe0500020	// Characteristics (section flags)
+pe_header_end:
 
 	.align		12
 
@@ -134,6 +135,28 @@ section_table:
 _start:
 	stp		x29, x30, [sp, #-32]!
 	mov		x29, sp
+
+	/*
+	 * Clear the rest of the header page. SizeOfHeaders makes it part of the
+	 * image, but a firmware need not load it: U-Boot copies only the header
+	 * structures, so the bytes after them are whatever the RAM held (garbage
+	 * after a cold start), and a Pi 4 booted with garbage there froze early
+	 * in the kernel. Clean it to the point of coherency too: CPUs that start
+	 * with their caches off read it from memory.
+	 */
+	adr		x9, pe_header_end
+	adr		x10, _start
+1:	cmp		x9, x10
+	b.hs		2f
+	str		xzr, [x9], #8
+	b		1b
+2:	adr		x9, pe_header_end
+	bic		x9, x9, #63
+3:	dc		civac, x9
+	add		x9, x9, #64
+	cmp		x9, x10
+	b.lo		3b
+	dsb		sy
 
 	stp		x0, x1, [sp, #16]
 	mov		x2, x0
