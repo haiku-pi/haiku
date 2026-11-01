@@ -6,6 +6,12 @@ UseHeaders $(zlibSourceDirectory) : true ;
 
 SubDirCcFlags -Wno-error=missing-prototypes ;
 
+# zlib 1.2.13 still has K&R style function definitions, which C23 (the default
+# since GCC 15) no longer allows.
+if $(TARGET_CC_IS_LEGACY_GCC_$(TARGET_KERNEL_ARCH)) != 1 {
+	SubDirCcFlags -std=gnu17 ;
+}
+
 local zlibSources =
 	adler32.c
 	crc32.c

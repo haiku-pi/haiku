@@ -44,6 +44,13 @@ local libFDTSources =
 
 SubDirCcFlags -Wno-error=missing-prototypes -Wno-error=sign-compare -Wno-error=missing-braces ;
 
+# zlib 1.2.13 still has K&R style function definitions, which C23 (the default
+# since GCC 15) no longer allows.
+local zlibCcFlags ;
+if $(TARGET_CC_IS_LEGACY_GCC_$(TARGET_KERNEL_ARCH)) != 1 {
+	zlibCcFlags = -std=gnu17 ;
+}
+
 local platform ;
 for platform in [ MultiBootSubDirSetup ] {
 	on $(platform) {
@@ -57,6 +64,7 @@ for platform in [ MultiBootSubDirSetup ] {
 
 		BootStaticLibrary [ MultiBootGristFiles boot_zlib ] :
 			$(zlibSources)
+			: $(zlibCcFlags)
 			;
 
 		# zstd
