@@ -46,7 +46,7 @@ typedef Elf64_Half Elf64_Versym;
 
 #define EI_NIDENT	16
 
-typedef struct {
+typedef struct Elf32_Ehdr {
 	uint8		e_ident[EI_NIDENT];
 	Elf32_Half	e_type;
 	Elf32_Half	e_machine;
@@ -67,7 +67,7 @@ typedef struct {
 #endif
 } Elf32_Ehdr;
 
-typedef struct {
+typedef struct Elf64_Ehdr {
 	uint8		e_ident[EI_NIDENT];
 	Elf64_Half	e_type;
 	Elf64_Half	e_machine;
@@ -306,7 +306,7 @@ typedef struct {
 
 /*** program header ***/
 
-typedef struct {
+typedef struct Elf32_Phdr {
 	Elf32_Word	p_type;
 	Elf32_Off	p_offset;	/* offset from the beginning of the file of the segment */
 	Elf32_Addr	p_vaddr;	/* virtual address for the segment in memory */
@@ -322,7 +322,7 @@ typedef struct {
 #endif
 } Elf32_Phdr;
 
-typedef struct {
+typedef struct Elf64_Phdr {
 	Elf64_Word	p_type;
 	Elf64_Word	p_flags;
 	Elf64_Off	p_offset;	/* offset from the beginning of the file of the segment */
@@ -367,7 +367,7 @@ typedef struct {
 
 /* symbol table entry */
 
-typedef struct {
+typedef struct Elf32_Sym {
 	Elf32_Word	st_name;
 	Elf32_Addr	st_value;
 	Elf32_Word	st_size;
@@ -382,7 +382,7 @@ typedef struct {
 #endif
 } Elf32_Sym;
 
-typedef struct {
+typedef struct Elf64_Sym {
 	Elf64_Word	st_name;
 	uint8		st_info;
 	uint8		st_other;
@@ -452,7 +452,7 @@ typedef struct {
 
 /* relocation table entry */
 
-typedef struct {
+typedef struct Elf32_Rel {
 	Elf32_Addr r_offset;
 	Elf32_Word r_info;
 
@@ -462,7 +462,7 @@ typedef struct {
 #endif
 } Elf32_Rel;
 
-typedef struct {
+typedef struct Elf64_Rel {
 	Elf64_Addr	r_offset;
 	Elf64_Xword	r_info;
 
