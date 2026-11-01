@@ -14,6 +14,7 @@
 #include <ByteOrder.h>
 #include <KernelExport.h>
 #include <bcm2835_mailbox.h>
+#include <driver_settings.h>
 
 
 //#define TRACE_BRCM_PCI
@@ -35,6 +36,10 @@ enum {
 	kVendorSpecificReg1		= 0x0188,
 	kPriv1IdVal3			= 0x043c,
 	kPriv1LinkCapability	= 0x04dc,
+	kPriv1RootCap			= 0x04f8,
+	kDlMdioAddr				= 0x1100,
+	kDlMdioWriteData		= 0x1104,
+	kDlMdioReadData			= 0x1108,
 	kMiscCtrl				= 0x4008,
 	kMemWin0Lo				= 0x400c,
 	kMemWin0Hi				= 0x4010,
@@ -50,7 +55,14 @@ enum {
 	kHardDebug				= 0x4204,
 	kExtCfgData				= 0x8000,
 	kExtCfgIndex			= 0x9000,
+	kRgr1Timeout			= 0x9208,
 	kRgr1SwInit1			= 0x9210,
+
+	// the root port's PCI Express capability
+	kExpCap					= 0x00ac,
+	kExpLinkStatus			= kExpCap + 0x12,
+	kExpRootControl			= kExpCap + 0x1c,
+	kExpRootCapability		= kExpCap + 0x1e,
 };
 
 enum {
@@ -71,7 +83,27 @@ enum {
 	kStatusPhyLinkUp			= 1 << 4,
 
 	kHardDebugSerdesIddq		= 1 << 27,
+	kHardDebugClkreqDebugEnable	= 0x00000002,
+	kHardDebugRefclkOvrdEnable	= 0x00010000,
+	kHardDebugRefclkOvrdOut		= 0x00100000,
+	kHardDebugL1ssEnable		= 0x00200000,
 	kHardDebugClkreqMask		= 0x00310002,
+
+	kRootCapL1ssModeMask		= 0x000000f8,
+	kRootCapL1ssModeNone		= 2 << 3,
+
+	kRootCapCrsVisibility		= 1 << 0,
+	kRootControlCrsVisibility	= 1 << 4,
+
+	kMdioCmdRead				= 1 << 20,
+	kMdioDataDone				= 1u << 31,
+	kMdioSetAddr				= 0x1f,
+	kSscRegs					= 0x1100,
+	kSscControl					= 0x2,
+	kSscStatus					= 0x1,
+	kSscControlOverride			= 0xc000,
+	kSscStatusSsc				= 0x400,
+	kSscStatusPllLock			= 0x800,
 
 	kSwInitPerst				= 1 << 0,
 	kSwInitBridge				= 1 << 1,
@@ -314,10 +346,114 @@ BrcmPCIController::_ResetAndStartLink()
 	}
 
 	fLinkUp = true;
+	_ConfigureLink();
 	INFO("revision %#" B_PRIx32 "\n", _Read32(kRevision));
-	uint16 linkStatus = *(vuint16*)(fRegs + 0xac + 0x12);
+	uint16 linkStatus = *(vuint16*)(fRegs + kExpLinkStatus);
 	INFO("link up: gen %u, x%u\n", linkStatus & 0xf, (linkStatus >> 4) & 0x3f);
 	return B_OK;
+}
+
+
+/*!	The link settings Linux makes once the link is up (brcm_config_clkreq(),
+	brcm_pcie_set_ssc(), the CRS visibility at the end of
+	brcm_pcie_start_link()), each chosen in the driver settings file
+	"brcmstb_pci" (KNOWN-ISSUES C1: which of them the Pi needs is being
+	measured):
+		clkreq_mode none|safe|default	(default: none, all CLKREQ# bits clear)
+		ssc true|false					(default: false)
+		crs_visibility true|false		(default: false)
+*/
+void
+BrcmPCIController::_ConfigureLink()
+{
+	const char* clkreqMode = "none";
+	bool ssc = false;
+	void* settings = load_driver_settings("brcmstb_pci");
+	if (settings != NULL) {
+		const char* mode = get_driver_parameter(settings, "clkreq_mode", NULL,
+			NULL);
+		if (mode != NULL && (strcmp(mode, "safe") == 0
+				|| strcmp(mode, "default") == 0)) {
+			clkreqMode = strcmp(mode, "safe") == 0 ? "safe" : "default";
+		}
+		ssc = get_driver_boolean_parameter(settings, "ssc", false, true);
+		fCrsVisibility = get_driver_boolean_parameter(settings,
+			"crs_visibility", false, true);
+		unload_driver_settings(settings);
+	}
+
+	if (strcmp(clkreqMode, "safe") == 0) {
+		// refclk and CLKREQ# driven by the root complex; no L1 substates
+		_Modify32(kHardDebug, kHardDebugClkreqMask,
+			kHardDebugRefclkOvrdOut | kHardDebugRefclkOvrdEnable);
+		_Modify32(kPriv1RootCap, kRootCapL1ssModeMask, kRootCapL1ssModeNone);
+	} else if (strcmp(clkreqMode, "default") == 0) {
+		// Raspberry Pi OS's mode: L0s, L1 and L1 substates; a 4 s internal
+		// bus timeout (units of 1/216 MHz) for accesses during L1 substates
+		_Modify32(kHardDebug, kHardDebugClkreqMask, kHardDebugL1ssEnable);
+		_Write32(kRgr1Timeout, 216 * 4000000);
+	}
+
+	bool sscOn = false;
+	if (ssc) {
+		uint32 control;
+		if (_MdioWrite(kMdioSetAddr, kSscRegs) == B_OK
+			&& _MdioRead(kSscControl, control) == B_OK
+			&& _MdioWrite(kSscControl, control | kSscControlOverride) == B_OK) {
+			snooze(2000);
+			uint32 status;
+			sscOn = _MdioRead(kSscStatus, status) == B_OK
+				&& (status & kSscStatusSsc) != 0
+				&& (status & kSscStatusPllLock) != 0;
+		}
+		if (!sscOn)
+			INFO("could not enable spread spectrum clocking\n");
+	}
+
+	uint16 rootCap = *(vuint16*)(fRegs + kExpRootCapability);
+	if (fCrsVisibility && (rootCap & kRootCapCrsVisibility) != 0) {
+		*(vuint16*)(fRegs + kExpRootControl) = *(vuint16*)(fRegs
+			+ kExpRootControl) | kRootControlCrsVisibility;
+	} else
+		fCrsVisibility = false;
+
+	INFO("CLKREQ# %s%s%s; HARD_DEBUG %#" B_PRIx32 ", status %#" B_PRIx32
+		", root cap %#x control %#x, bus timeout %#" B_PRIx32 "\n",
+		clkreqMode, sscOn ? ", SSC" : "", fCrsVisibility ? ", CRS visible" : "",
+		_Read32(kHardDebug), _Read32(kPcieStatus), rootCap,
+		*(vuint16*)(fRegs + kExpRootControl), _Read32(kRgr1Timeout));
+}
+
+
+status_t
+BrcmPCIController::_MdioRead(uint8 reg, uint32& value)
+{
+	_Write32(kDlMdioAddr, kMdioCmdRead | reg);
+	_Read32(kDlMdioAddr);
+	for (int i = 0; i < 10; i++) {
+		uint32 data = _Read32(kDlMdioReadData);
+		if ((data & kMdioDataDone) != 0) {
+			value = data & ~kMdioDataDone;
+			return B_OK;
+		}
+		spin(10);
+	}
+	return B_TIMED_OUT;
+}
+
+
+status_t
+BrcmPCIController::_MdioWrite(uint8 reg, uint16 value)
+{
+	_Write32(kDlMdioAddr, reg);
+	_Read32(kDlMdioAddr);
+	_Write32(kDlMdioWriteData, kMdioDataDone | value);
+	for (int i = 0; i < 10; i++) {
+		if ((_Read32(kDlMdioWriteData) & kMdioDataDone) == 0)
+			return B_OK;
+		spin(10);
+	}
+	return B_TIMED_OUT;
 }
 
 
@@ -477,19 +613,38 @@ BrcmPCIController::ReadConfig(uint8 bus, uint8 device, uint8 function,
 	if (size != 1 && size != 2 && size != 4)
 		return B_BAD_VALUE;
 
-	InterruptsSpinLocker locker(fLock);
+	// With CRS visibility a function that is not ready yet answers a vendor
+	// ID read with 0x0001 instead of being retried by the root complex
+	// forever; retry it here, for up to a second (Linux: up to 60 s).
+	const bool retryCrs = fCrsVisibility && bus != 0 && offset == PCI_vendor_id
+		&& size >= 2;
+	for (int attempt = 0;; attempt++) {
+		{
+			InterruptsSpinLocker locker(fLock);
 
-	addr_t address = _ConfigAddress(bus, device, function, offset);
-	if (address == 0) {
-		// like a master abort
-		value = size == 4 ? 0xffffffff : (1u << (size * 8)) - 1;
-		return B_OK;
-	}
+			addr_t address = _ConfigAddress(bus, device, function, offset);
+			if (address == 0) {
+				// like a master abort
+				value = size == 4 ? 0xffffffff : (1u << (size * 8)) - 1;
+				return B_OK;
+			}
 
-	switch (size) {
-		case 1: value = *(vuint8*)address; break;
-		case 2: value = *(vuint16*)address; break;
-		case 4: value = *(vuint32*)address; break;
+			switch (size) {
+				case 1: value = *(vuint8*)address; break;
+				case 2: value = *(vuint16*)address; break;
+				case 4: value = *(vuint32*)address; break;
+			}
+		}
+		if (!retryCrs || (value & 0xffff) != 0x0001)
+			break;
+		if (attempt == 0)
+			INFO("%u:%u.%u not ready (CRS), retrying\n", bus, device, function);
+		if (attempt >= 1000) {
+			value = size == 4 ? 0xffffffff : 0xffff;
+			INFO("%u:%u.%u still not ready after 1 s\n", bus, device, function);
+			break;
+		}
+		spin(1000);
 	}
 	return B_OK;
 }

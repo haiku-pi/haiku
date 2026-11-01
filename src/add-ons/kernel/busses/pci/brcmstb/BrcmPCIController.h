@@ -50,6 +50,9 @@ private:
 			void				_ProgramOutboundWindow(phys_addr_t cpuAddress,
 									phys_addr_t pciAddress, uint64 size);
 			void				_ConfigureRootPort();
+			void				_ConfigureLink();
+			status_t			_MdioRead(uint8 reg, uint32& value);
+			status_t			_MdioWrite(uint8 reg, uint16 value);
 			void				_StartVl805();
 			bool				_LinkUp();
 			addr_t				_ConfigAddress(uint8 bus, uint8 device,
@@ -75,6 +78,7 @@ private:
 			addr_t				fRegs = 0;
 			Vector<pci_resource_range> fResourceRanges;
 			bool				fLinkUp = false;
+			bool				fCrsVisibility = false;
 };
 
 
