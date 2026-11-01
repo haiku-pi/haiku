@@ -526,7 +526,7 @@ ApplicationTypeWindow::~ApplicationTypeWindow()
 }
 
 BRect
-ApplicationTypeWindow::_Frame(const BMessage& settings) const
+ApplicationTypeWindow::_Frame(const BMessage& settings)
 {
 	BRect rect;
 	if (settings.FindRect("app_type_next_frame", &rect) == B_OK)

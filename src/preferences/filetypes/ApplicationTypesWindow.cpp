@@ -273,7 +273,7 @@ ApplicationTypesWindow::~ApplicationTypesWindow()
 
 
 BRect
-ApplicationTypesWindow::_Frame(const BMessage& settings) const
+ApplicationTypesWindow::_Frame(const BMessage& settings)
 {
 	BRect rect;
 	if (settings.FindRect("app_types_frame", &rect) == B_OK)

@@ -996,7 +996,7 @@ FileTypesWindow::PlaceSubWindow(BWindow* window)
 
 
 BRect
-FileTypesWindow::_Frame(const BMessage& settings) const
+FileTypesWindow::_Frame(const BMessage& settings)
 {
 	BRect rect;
 	if (settings.FindRect("file_types_frame", &rect) == B_OK)

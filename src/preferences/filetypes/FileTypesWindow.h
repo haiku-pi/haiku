@@ -44,7 +44,7 @@ public:
 			void				PlaceSubWindow(BWindow* window);
 
 private:
-			BRect				_Frame(const BMessage& settings) const;
+	static	BRect				_Frame(const BMessage& settings);
 			void				_ShowSnifferRule(bool show);
 			void				_UpdateExtensions(BMimeType* type);
 			void				_AdoptPreferredApplication(BMessage* message,

@@ -34,7 +34,7 @@ public:
 	virtual	bool 				QuitRequested();
 
 private:
-			BRect 				_Frame(const BMessage& settings) const;
+	static	BRect 				_Frame(const BMessage& settings);
 			BString 			_Title(const BEntry& entry);
 			void 				_SetTo(const BEntry& entry);
 			void 				_UpdateAppFlagsEnabled();
