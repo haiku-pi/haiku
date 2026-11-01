@@ -272,7 +272,7 @@ typedef struct {
 } _PACKED usb_video_standard_video_interface_collection_iad;
 
 
-typedef struct {
+typedef struct usb_video_selector_unit_descriptor {
 	uint8 length; // 6 bytes + nr_in_pins
 	uint8 descriptor_type;
 	uint8 descriptor_sub_type;
@@ -318,7 +318,7 @@ typedef struct {
 } _PACKED usb_videocontrol_header_descriptor;
 
 
-typedef struct {
+typedef struct usb_video_extension_unit_descriptor {
 	uint8 length; // 24 bytes + nr_in_pins + control_size
 	uint8 descriptor_type;
 	uint8 descriptor_sub_type;
@@ -493,7 +493,7 @@ typedef struct {
 
 // Processing unit descriptor
 // 1.5: Table 3-8, page 54
-typedef struct {
+typedef struct usb_video_processing_unit_descriptor {
 	uint8	length;
 	uint8	descriptor_type;
 	uint8	descriptor_subtype;
@@ -733,7 +733,7 @@ typedef struct {
 } _PACKED usb_video_video_still_probe_control_and_still_commit_control;
 
 
-typedef struct {
+typedef struct usb_video_still_image_frame_descriptor {
 	// 10 bytes + (4 * num_image_size_patterns) - 4 + num_compression_pattern
 	uint8 length;
 	uint8 descriptor_type;
