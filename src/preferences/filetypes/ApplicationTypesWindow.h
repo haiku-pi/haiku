@@ -31,7 +31,7 @@ class ApplicationTypesWindow : public BWindow {
 		virtual bool QuitRequested();
 
 	private:
-		BRect _Frame(const BMessage& settings) const;
+		static BRect _Frame(const BMessage& settings);
 		void _SetType(BMimeType* type, int32 forceUpdate = 0);
 		void _UpdateCounter();
 		void _RemoveUninstalled();
