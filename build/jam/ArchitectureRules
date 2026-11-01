@@ -61,6 +61,16 @@ rule ArchitectureSetup architecture
 
 	HAIKU_CCFLAGS_$(architecture) += $(ccBaseFlags) -nostdinc ;
 	HAIKU_C++FLAGS_$(architecture) += $(ccBaseFlags) -nostdinc ;
+
+	if $(HAIKU_CC_IS_LEGACY_GCC_$(architecture)) != 1
+			&& $(HAIKU_CC_IS_CLANG_$(architecture)) != 1 {
+		# GCC 16 defaults to C++20, which a good part of our code is not ready
+		# for (arithmetic between enums, ++ on volatiles, implicit capture of
+		# "this", reversed comparison operators, "requires" as a name). Stay
+		# with the C++17 that older GCCs default to, until we move to C++20
+		# deliberately.
+		HAIKU_C++FLAGS_$(architecture) += -std=gnu++17 ;
+	}
 	HAIKU_LINKFLAGS_$(architecture) += $(ccBaseFlags) ;
 	HAIKU_ASFLAGS_$(architecture) += $(archFlags) -nostdinc ;
 
