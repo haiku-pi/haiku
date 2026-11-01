@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <ACPI.h>
+#include <boot_item.h>
 #include <dpc.h>
 #include <KernelExport.h>
 #include <PCI.h>
@@ -204,6 +205,13 @@ acpi_std_ops(int32 op,...)
 				ERROR("ACPI disabled\n");
 				return ENOSYS;
 			}
+
+#if !defined(__i386__) && !defined(__x86_64__)
+			// Only x86 can search memory for the root pointer; elsewhere the
+			// boot loader passes it, and a device tree machine has none.
+			if (get_boot_item("ACPI_ROOT_POINTER", NULL) == NULL)
+				return ENODEV;
+#endif
 
 			if (gDPC->new_dpc_queue(&gDPCHandle, "acpi_task",
 					B_URGENT_DISPLAY_PRIORITY + 1) != B_OK) {
