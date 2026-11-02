@@ -24,6 +24,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			localeconv.cpp
 			nl_langinfo.cpp
 			setlocale.cpp
+			strtod_l.cpp
 			wctype_l.cpp
 			wctype.cpp
 			;

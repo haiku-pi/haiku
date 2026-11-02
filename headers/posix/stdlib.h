@@ -9,6 +9,7 @@
 #include <alloca.h>
 #include <div_t.h>
 #include <limits.h>
+#include <locale_t.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <wchar_t.h>
@@ -89,6 +90,11 @@ extern unsigned long	atoul(const char *string);
 extern double			strtod(const char *string, char **end);
 extern long double		strtold(const char *string, char **end);
 extern float			strtof(const char *string, char **end);
+#ifdef _DEFAULT_SOURCE
+extern double			strtod_l(const char *string, char **end, locale_t locale);
+extern long double		strtold_l(const char *string, char **end, locale_t locale);
+extern float			strtof_l(const char *string, char **end, locale_t locale);
+#endif
 extern long				strtol(const char *string, char **end, int base);
 extern unsigned long	strtoul(const char *string, char **end, int base);
 extern long long		strtoll(const char *string, char **end, int base);
