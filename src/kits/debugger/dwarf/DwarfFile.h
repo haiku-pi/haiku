@@ -154,6 +154,10 @@ private:
 			status_t			_ParseLineInfoFormatUint(CompilationUnit* unit,
 									DataReader &dataReader,
 									uint64 format, uint64 &value);
+			status_t			_SkipLineInfoFormatValue(
+									CompilationUnit* unit,
+									DataReader &dataReader,
+									uint64 format);
 			status_t			_ParseLineInfo(CompilationUnit* unit);
 
 			status_t			_UnwindCallFrame(CompilationUnit* unit,

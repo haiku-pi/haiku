@@ -24,6 +24,16 @@ struct CompilationUnit::File {
 		dirName(dirName)
 	{
 	}
+
+	BString Path() const
+	{
+		if (dirName == NULL || fileName.ByteAt(0) == '/')
+			return fileName;
+
+		BString path(dirName);
+		path << '/' << fileName;
+		return path;
+	}
 };
 
 
@@ -37,7 +47,7 @@ CompilationUnit::CompilationUnit(off_t headerOffset, off_t contentOffset,
 	fAddressRanges(NULL),
 	fDirectories(10),
 	fFiles(10),
-	fLineNumberProgram(addressSize, isBigEndian)
+	fLineNumberProgram(addressSize, isBigEndian, this)
 {
 }
 
@@ -134,6 +144,42 @@ CompilationUnit::FileAt(int32 index, const char** _directory) const
 	}
 
 	return NULL;
+}
+
+
+bool
+CompilationUnit::AddFileEntry(const char* fileName, int32 dirIndex)
+{
+	// (the same file may be named relative to different directories)
+	BString path = File(fileName, DirectoryAt(dirIndex)).Path();
+	int32 index = 0;
+	for (int32 i = 0; File* file = fFiles.ItemAt(i); i++) {
+		if (file->Path() == path) {
+			index = i + 1;
+			break;
+		}
+	}
+
+	if (index == 0) {
+		if (!AddFile(fileName, dirIndex))
+			return false;
+		index = fFiles.CountItems();
+	}
+
+	return fFileEntries.Add(index);
+}
+
+
+int32
+CompilationUnit::FileIndex(uint64 fileNumber) const
+{
+	if (fFileEntries.Count() == 0) {
+		// DWARF 2-4 line number program
+		return fileNumber <= (uint64)fFiles.CountItems() ? fileNumber : 0;
+	}
+
+	return fileNumber < (uint64)fFileEntries.Count()
+		? fFileEntries[fileNumber] : 0;
 }
 
 

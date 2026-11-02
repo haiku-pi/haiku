@@ -6,6 +6,7 @@
 #ifndef COMPILATION_UNIT_H
 #define COMPILATION_UNIT_H
 
+#include <Array.h>
 #include <ObjectList.h>
 #include <String.h>
 
@@ -52,6 +53,19 @@ public:
 			const char*			FileAt(int32 index,
 									const char** _directory = NULL) const;
 
+			// File numbers (DW_LNS_set_file, DW_AT_decl_file, ...) count from
+			// 1 in DWARF 2-4 line number programs, where they are indices into
+			// the file list (FileAt(number - 1)). A DWARF 5 line number
+			// program header (which GCC also emits for DWARF 4 units) numbers
+			// its file entries from 0, and the primary source file usually is
+			// both entry 0 and 1: AddFileEntry() adds such an entry, sharing
+			// the file of an earlier entry with the same name and directory.
+			// FileIndex() maps a file number to the one-based index into the
+			// file list (0, if there is no such file).
+			bool				AddFileEntry(const char* fileName,
+									int32 dirIndex);
+			int32				FileIndex(uint64 fileNumber) const;
+
 	virtual	dwarf_unit_kind		Kind() const;
 
 private:
@@ -64,6 +78,8 @@ private:
 			TargetAddressRangeList* fAddressRanges;
 			DirectoryList		fDirectories;
 			FileList			fFiles;
+			Array<int32>		fFileEntries;
+				// DWARF 5: file entry -> one-based index into fFiles
 			LineNumberProgram	fLineNumberProgram;
 };
 

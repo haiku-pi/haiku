@@ -1596,14 +1596,6 @@ DwarfFile::_FinishUnit(BaseUnit* unit)
 		ranges->ReleaseReference();
 	}
 
-	// add compilation dir to directory list
-	const char* compilationDir = compilationUnit->UnitEntry()
-		->CompilationDir();
-	if (!compilationUnit->AddDirectory(compilationDir != NULL
-				? compilationDir : ".")) {
-		return B_NO_MEMORY;
-	}
-
 	// parse line info header
 	if (fDebugLineSection != NULL)
 		_ParseLineInfo(compilationUnit);
@@ -2121,6 +2113,17 @@ DwarfFile::_ParseLineInfoFormatString(CompilationUnit* unit, DataReader &dataRea
 			value = (const char*)fDebugStringSection->Data() + offset;
 			break;
 		}
+		case DW_FORM_strx:
+		case DW_FORM_strx1:
+		case DW_FORM_strx2:
+		case DW_FORM_strx3:
+		case DW_FORM_strx4:
+		{
+			uint64 index = format == DW_FORM_strx
+				? dataReader.ReadUnsignedLEB128(0)
+				: dataReader.ReadUInt(format - DW_FORM_strx1 + 1, 0);
+			return _ReadStringIndirect(unit, index, value);
+		}
 		case DW_FORM_strp_sup:
 			return B_UNSUPPORTED;
 			break;
@@ -2162,6 +2165,54 @@ DwarfFile::_ParseLineInfoFormatUint(CompilationUnit* unit, DataReader &dataReade
 	}
 
 	return B_OK;
+}
+
+
+status_t
+DwarfFile::_SkipLineInfoFormatValue(CompilationUnit* unit,
+	DataReader &dataReader, uint64 format)
+{
+	// skips the value of a field we don't need (or know)
+	switch (format) {
+		case DW_FORM_block:
+			dataReader.Skip(dataReader.ReadUnsignedLEB128(0));
+			break;
+		case DW_FORM_block1:
+			dataReader.Skip(dataReader.Read<uint8>(0));
+			break;
+		case DW_FORM_block2:
+			dataReader.Skip(dataReader.Read<uint16>(0));
+			break;
+		case DW_FORM_block4:
+			dataReader.Skip(dataReader.Read<uint32>(0));
+			break;
+		case DW_FORM_data16:
+			dataReader.Skip(16);
+			break;
+		case DW_FORM_sdata:
+			dataReader.ReadSignedLEB128(0);
+			break;
+		case DW_FORM_string:
+		case DW_FORM_line_strp:
+		case DW_FORM_strp:
+		case DW_FORM_strx:
+		case DW_FORM_strx1:
+		case DW_FORM_strx2:
+		case DW_FORM_strx3:
+		case DW_FORM_strx4:
+		{
+			const char* string;
+			return _ParseLineInfoFormatString(unit, dataReader, format,
+				string);
+		}
+		default:
+		{
+			uint64 value;
+			return _ParseLineInfoFormatUint(unit, dataReader, format, value);
+		}
+	}
+
+	return dataReader.HasOverflow() ? B_BAD_DATA : B_OK;
 }
 
 
@@ -2286,29 +2337,30 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 		DataReader dirEntryFormatReader = dataReader.RestrictedReader(-dirEntryFormatLength,
 			dirEntryFormatLength);
 
-		uint8 dirCount = dataReader.Read<uint8>(0);
-		TRACE_LINES("  dirCount:             %u\n", dirCount);
+		uint64 dirCount = dataReader.ReadUnsignedLEB128(0);
+		TRACE_LINES("  dirCount:             %" B_PRIu64 "\n", dirCount);
 
-		for (unsigned int i = 0; i < dirCount; i++) {
+		// directory entry 0 is the compilation directory
+		for (uint64 i = 0; i < dirCount; i++) {
+			const char* directory = NULL;
 			dirEntryFormatReader.SeekAbsolute(0);
 			for (unsigned int j = 0; j < dirEntryFormatCount; j++) {
 				uint64 content = dirEntryFormatReader.ReadUnsignedLEB128(0);
 				uint64 format = dirEntryFormatReader.ReadUnsignedLEB128(0);
-				if (content != DW_LNCT_path) {
-					WARNING("DwarfFile::_ParseLineInfo(\"%s\"): unsupported "
-						"field in dirs %" PRIu64 "\n", fName, content);
-					return B_UNSUPPORTED;
-				}
-
-				const char* directory;
-				status_t res = _ParseLineInfoFormatString(unit, dataReader, format, directory);
+				status_t res = content == DW_LNCT_path
+					? _ParseLineInfoFormatString(unit, dataReader, format,
+						directory)
+					: _SkipLineInfoFormatValue(unit, dataReader, format);
 				if (res != B_OK)
 					return res;
-				TRACE_LINES("    \"%s\"\n", directory);
+			}
+			if (dataReader.HasOverflow())
+				return B_BAD_DATA;
+			TRACE_LINES("    \"%s\"\n", directory);
 
-				if (!unit->AddDirectory(directory))
-					return B_NO_MEMORY;
-
+			if (!unit->AddDirectory(directory != NULL && directory[0] != '\0'
+					? directory : ".")) {
+				return B_NO_MEMORY;
 			}
 		}
 
@@ -2329,10 +2381,11 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 		DataReader fileNameEntryFormatReader = dataReader.RestrictedReader(-fileNameEntryFormatLength,
 			fileNameEntryFormatLength);
 
-		uint8 fileNameCount = dataReader.Read<uint8>(0);
-		TRACE_LINES("  fileNameCount:        %u\n", dirCount);
+		uint64 fileNameCount = dataReader.ReadUnsignedLEB128(0);
+		TRACE_LINES("  fileNameCount:        %" B_PRIu64 "\n", fileNameCount);
 
-		for (unsigned int i = 0; i < fileNameCount; i++) {
+		// file entry 0 is the primary source file
+		for (uint64 i = 0; i < fileNameCount; i++) {
 			const char* fileName = NULL;
 			uint64 dirIndex = 0xffffffffffffffffull;
 			uint64 modificationTime = 0;
@@ -2369,29 +2422,37 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 						if (res != B_OK)
 							return res;
 						break;
-					case DW_LNCT_MD5:
-						if (format != DW_FORM_data16)
-							return B_BAD_DATA;
-
-						dataReader.Skip(16);
-						break;
 					default:
-						WARNING("DwarfFile::_ParseLineInfo(\"%s\"): unsupported "
-							"field in files %" PRIu64 "\n",
-							fName, content);
-						return B_UNSUPPORTED;
+						// DW_LNCT_MD5, vendor extensions
+						res = _SkipLineInfoFormatValue(unit, dataReader,
+							format);
+						if (res != B_OK)
+							return res;
+						break;
 				}
 			}
+			if (dataReader.HasOverflow())
+				return B_BAD_DATA;
 
-			if ((fileName != NULL) && (dirIndex != 0xffffffffffffffffull)) {
-				TRACE_LINES("    \"%s\", dir index: %" B_PRIu64 "\n",
-					fileName, dirIndex);
+			if (fileName == NULL)
+				return B_BAD_DATA;
+			if (dirIndex == 0xffffffffffffffffull)
+				dirIndex = 0;
+			TRACE_LINES("    \"%s\", dir index: %" B_PRIu64 "\n",
+				fileName, dirIndex);
 
-				if (!unit->AddFile(fileName, dirIndex))
-					return B_NO_MEMORY;
-			}
+			// every entry gets a file number, so all have to be added
+			if (!unit->AddFileEntry(fileName, dirIndex))
+				return B_NO_MEMORY;
 		}
 	} else {
+		// directory 0 is the compilation directory
+		const char* compilationDir = unit->UnitEntry()->CompilationDir();
+		if (!unit->AddDirectory(compilationDir != NULL
+				? compilationDir : ".")) {
+			return B_NO_MEMORY;
+		}
+
 		// include directories
 		TRACE_LINES("  include directories:\n");
 		while (const char* directory = dataReader.ReadString()) {
@@ -2427,12 +2488,14 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 	}
 
 	off_t readerOffset = dataReader.Offset();
-	if ((uint64)readerOffset > readerOffset + headerLength)
+	if (readerOffset > headerOffset + (off_t)headerLength
+		|| headerOffset + headerLength > unitOffset + unitLength) {
 		return B_BAD_DATA;
+	}
 	off_t offsetToProgram = headerOffset + headerLength - readerOffset;
 
 	const uint8* program = (uint8*)dataReader.Data() + offsetToProgram;
-	size_t programSize = unitLength - (readerOffset - unitOffset);
+	size_t programSize = unitLength - (headerOffset + headerLength - unitOffset);
 
 	return unit->GetLineNumberProgram().Init(program, programSize,
 		minInstructionLength, defaultIsStatement, lineBase, lineRange,
