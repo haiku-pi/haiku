@@ -161,6 +161,9 @@ CompilationUnit::FileAt(int32 index, const char** _directory) const
 bool
 CompilationUnit::AddFileEntry(const char* fileName, int32 dirIndex)
 {
+	if (fileName == NULL)
+		return fFileEntries.Add(0);
+
 	// (the same file may be named relative to different directories)
 	BString path = File(fileName, DirectoryAt(dirIndex)).Path();
 	int32 index = 0;
@@ -185,7 +188,7 @@ int32
 CompilationUnit::FileIndex(uint64 fileNumber) const
 {
 	if (fFileEntries.Count() == 0) {
-		// DWARF 2-4 line number program
+		// no line number program header (read)
 		return fileNumber <= (uint64)fFiles.CountItems() ? fileNumber : 0;
 	}
 

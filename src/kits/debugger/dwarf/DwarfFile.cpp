@@ -2559,8 +2559,10 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 				return B_NO_MEMORY;
 		}
 
-		// file names
+		// file names (numbered from 1)
 		TRACE_LINES("  files:\n");
+		if (!unit->AddFileEntry(NULL, 0))
+			return B_NO_MEMORY;
 		while (const char* file = dataReader.ReadString()) {
 			if (*file == '\0')
 				break;
@@ -2577,7 +2579,7 @@ DwarfFile::_ParseLineInfo(CompilationUnit* unit)
 				", length: %" B_PRIu64 "\n", file, dirIndex, modificationTime,
 				fileLength);
 
-			if (!unit->AddFile(file, dirIndex))
+			if (!unit->AddFileEntry(file, dirIndex))
 				return B_NO_MEMORY;
 		}
 	}

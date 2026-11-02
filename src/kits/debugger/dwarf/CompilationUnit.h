@@ -53,15 +53,16 @@ public:
 			const char*			FileAt(int32 index,
 									const char** _directory = NULL) const;
 
-			// File numbers (DW_LNS_set_file, DW_AT_decl_file, ...) count from
-			// 1 in DWARF 2-4 line number programs, where they are indices into
-			// the file list (FileAt(number - 1)). A DWARF 5 line number
-			// program header (which GCC also emits for DWARF 4 units) numbers
-			// its file entries from 0, and the primary source file usually is
-			// both entry 0 and 1: AddFileEntry() adds such an entry, sharing
-			// the file of an earlier entry with the same name and directory.
-			// FileIndex() maps a file number to the one-based index into the
-			// file list (0, if there is no such file).
+			// File numbers (DW_LNS_set_file, DW_AT_decl_file, ...) number the
+			// file entries of the line number program header: from 1 in DWARF
+			// 2-4, from 0 in DWARF 5 (which GCC also writes for DWARF 4 units),
+			// and the same file may have several entries (DWARF 5's primary
+			// source file is usually both entry 0 and 1). AddFileEntry() adds
+			// the entry with the next number, sharing the file of an earlier
+			// entry with the same path; a NULL fileName adds a number without
+			// a file (DWARF 2-4's 0). FileIndex() maps a file number to the
+			// one-based index into the file list (FileAt(index - 1)), 0 if
+			// there is no such file.
 			bool				AddFileEntry(const char* fileName,
 									int32 dirIndex);
 			int32				FileIndex(uint64 fileNumber) const;
