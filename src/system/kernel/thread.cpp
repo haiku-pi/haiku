@@ -1576,6 +1576,24 @@ common_setrlimit(int resource, const struct rlimit * rlp)
 		case RLIMIT_NOVMON:
 			return vfs_setrlimit(resource, rlp);
 
+		case RLIMIT_AS:
+		case RLIMIT_CORE:
+		case RLIMIT_DATA:
+		case RLIMIT_FSIZE:
+		case RLIMIT_STACK:
+		{
+			// These limits are fixed; setting them to what they are already
+			// (e.g. a core size of 0 before a crash test) is not an error.
+			struct rlimit current;
+			status_t status = common_getrlimit(resource, &current);
+			if (status != B_OK)
+				return status;
+			if (rlp->rlim_cur == current.rlim_cur
+				&& rlp->rlim_max == current.rlim_max)
+				return B_OK;
+			return EINVAL;
+		}
+
 		default:
 			return EINVAL;
 	}
