@@ -39,6 +39,14 @@ struct bcm2711_display_shared_info {
 	bool			vblank_from_interrupt;
 		// the firmware's SMI interrupt; otherwise a thread waiting for the
 		// firmware's vertical sync (the SET_VSYNC property)
+	bigtime_t		vblank_time;
+		// system_time() of the last vertical blank
+
+	uint32			overlay_planes;
+		// firmware planes available for overlays (0: no overlay support)
+	bool			overlays_keyed;
+		// the desktop covers the overlays, transparent where its alpha is 0
+		// (B_OVERLAY_KEYING_USES_ALPHA); else they lie on top of it
 };
 
 
@@ -55,6 +63,14 @@ enum {
 		// struct bcm2711_display_cursor_position
 	BCM2711_DISPLAY_SHOW_CURSOR,
 		// a bool
+	BCM2711_DISPLAY_ALLOCATE_OVERLAY_BUFFER,
+		// struct bcm2711_display_overlay_buffer
+	BCM2711_DISPLAY_FREE_OVERLAY_BUFFER,
+		// an area_id; a plane showing the buffer is hidden first
+	BCM2711_DISPLAY_SET_OVERLAY,
+		// struct bcm2711_display_overlay
+	BCM2711_DISPLAY_HIDE_OVERLAY,
+		// a uint32: the plane
 };
 
 
@@ -82,6 +98,57 @@ struct bcm2711_display_cursor_position {
 struct bcm2711_display_mode {
 	uint32			width;
 	uint32			height;
+};
+
+
+/*!	An overlay buffer: physically contiguous, scanned out by the firmware,
+	write-combining. A kernel area that every team may access (the overlay API
+	hands its address to the clients as it is), and clone.
+*/
+struct bcm2711_display_overlay_buffer {
+	uint32			size;		// in: bytes
+	area_id			area;		// out
+	void*			address;	// out: valid in every team
+	uint32			physical;	// out: below 1 GiB
+};
+
+
+#define BCM2711_DISPLAY_FIRST_OVERLAY_PLANE	1
+#define BCM2711_DISPLAY_OVERLAY_PLANES		6
+
+// the firmware's image types (VC_IMAGE_*) of the overlay color spaces
+#define BCM2711_DISPLAY_IMAGE_YUV420		3
+	// planar: Y, then U and V of half the pitch and height
+#define BCM2711_DISPLAY_IMAGE_XRGB8888		44
+#define BCM2711_DISPLAY_IMAGE_YUV422_YUYV	45
+
+// the firmware's color encodings of YUV images
+#define BCM2711_DISPLAY_ENCODING_BT601		1
+#define BCM2711_DISPLAY_ENCODING_BT709		2
+
+
+/*!	Shows a buffer on an overlay plane:  source (16.16 fixed point, in
+	buffer pixels) scaled to  destination (the current mode's coordinates;
+	clipped to the screen by the driver).
+*/
+struct bcm2711_display_overlay {
+	uint32			plane;
+		// BCM2711_DISPLAY_FIRST_OVERLAY_PLANE ... + OVERLAY_PLANES - 1
+	uint32			image_type;
+	uint32			color_encoding;
+	uint32			physical;	// the buffer (all of its planes)
+	uint16			width;		// of the buffer, in pixels
+	uint16			height;
+	uint32			bytes_per_row;
+		// of the (first) plane
+	uint32			source_x;
+	uint32			source_y;
+	uint32			source_width;
+	uint32			source_height;
+	int32			x;
+	int32			y;
+	uint32			destination_width;
+	uint32			destination_height;
 };
 
 

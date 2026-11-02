@@ -9,6 +9,12 @@
 	it, and a vertical blank semaphore. The firmware signals each vertical
 	blank through the SMI block's interrupt (as Linux's vc4_firmware_kms
 	expects); without it, a thread waits on the firmware's SET_VSYNC call.
+
+	Overlays are firmware planes 1-6 showing buffers this driver allocates
+	(contiguous, below 1 GiB). The firmware has no color key, but blends with
+	per-pixel alpha: while an overlay is visible, the desktop is scanned out on
+	plane 0 as ARGB8888 above the overlays, and app_server writes it opaque
+	except where the overlay's key color is (B_OVERLAY_KEYING_USES_ALPHA).
 */
 
 
@@ -19,6 +25,7 @@
 #include <string.h>
 
 #include <boot_item.h>
+#include <driver_settings.h>
 #include <frame_buffer_console.h>
 #include <graphic_driver.h>
 #include <KernelExport.h>
@@ -26,6 +33,7 @@
 #include <util/AutoLock.h>
 #include <AutoDeleter.h>
 #include <arch/cpu.h>
+#include <kernel.h>
 #include <team.h>
 #include <vm/vm.h>
 
@@ -69,11 +77,29 @@ static const uint8 kPrimaryPlane = 0;
 static const int8 kPrimaryLayer = 0;
 static const uint8 kCursorPlane = 7;
 static const int8 kCursorLayer = 127;
+// Overlays lie under the desktop while it is keyed (scanned out with alpha),
+// or above it (the "overlay_above_desktop" setting)
+static const int8 kOverlayLayer = 16;
+static const int8 kKeyedDesktopLayer = 64;
+static const int8 kOverlayAboveLayer = 100;
 // VC_IMAGE_XRGB8888 / ARGB8888: B, G, R, X/A in memory, as B_RGB32 / B_RGBA32
-static const uint8 kImageXRGB8888 = 44;
+static const uint8 kImageXRGB8888 = BCM2711_DISPLAY_IMAGE_XRGB8888;
 static const uint8 kImageARGB8888 = 43;
 // The firmware scans out from the low 1 GiB only (it keeps 30 address bits)
 static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
+
+// overlay buffers: how many of the native mode's size are reserved when the
+// device is opened (the "overlay_reserve" setting), and at most in all
+static const uint32 kDefaultOverlayReserve = 3;
+static const uint32 kMaxOverlayBuffers = 32;
+static const size_t kMaxOverlayBufferSize = 64 * 1024 * 1024;
+
+// a plane update within this time before the predicted vertical blank may
+// be latched one frame late: the firmware takes it at an update point ~1.6 ms
+// before the blank (measured on the Phoenix-RTOS port of this board)
+static const bigtime_t kLateUpdateMargin = 2000;
+// the per-plane statistics are logged this often while the plane changes
+static const bigtime_t kOverlayReportInterval = 10000000;
 
 
 /*!	The value buffer of the firmware's SET_PLANE property (as Linux's
@@ -142,6 +168,37 @@ struct display_info {
 	uint16			cursor_x;
 	uint16			cursor_y;
 	bool			cursor_visible;
+
+	// the boot loader's frame buffer, when the desktop is plane 0 (keyed)
+	phys_addr_t		boot_physical;
+
+	struct overlay_memory {
+		area_id		area;		// < 0: unused slot
+		void*		address;
+		phys_addr_t	physical;
+		size_t		size;
+		bool		reserved;	// kept for the next allocation when freed
+		bool		in_use;
+	} overlay_buffers[kMaxOverlayBuffers];
+
+	struct overlay_plane {
+		bool		visible;
+		phys_addr_t	physical;
+		size_t		size;		// of what it scans out from physical
+
+		// statistics of the plane's updates since the last report
+		uint32		updates;
+		int64		first_vblank;
+		int64		last_vblank;
+		uint32		late;
+		uint32		gaps;
+		uint32		superseded;
+		bigtime_t	last_report;
+	} overlays[BCM2711_DISPLAY_OVERLAY_PLANES];
+	uint32			visible_overlays;
+
+	bigtime_t		vblank_period;
+		// measured, in microseconds
 
 	volatile uint32* smi;
 	area_id			smi_area;
@@ -259,6 +316,11 @@ find_smi(phys_addr_t& registers, int32& interrupt)
 static void
 vertical_blank(display_info& info)
 {
+	const bigtime_t now = system_time();
+	const bigtime_t period = now - info.shared_info->vblank_time;
+	if (period > 5000 && period < 50000)
+		info.vblank_period = (info.vblank_period * 7 + period) / 8;
+	info.shared_info->vblank_time = now;
 	atomic_add64(&info.shared_info->vblank_count, 1);
 
 	int32 count;
@@ -437,6 +499,8 @@ read_edid(display_info& info)
 
 
 static status_t reserve_mode_buffer(display_info& info);
+static void overlays_init(display_info& info, void* settings);
+static void overlays_uninit(display_info& info);
 
 
 static status_t
@@ -479,6 +543,7 @@ display_init(display_info& info)
 	}
 	vm_set_area_memory_type(info.boot_area, bufferInfo->physical_frame_buffer,
 		B_WRITE_COMBINING_MEMORY);
+	info.boot_physical = bufferInfo->physical_frame_buffer;
 	info.boot_bytes_per_row = bufferInfo->bytes_per_row;
 	info.depth = bufferInfo->depth;
 	info.frame_buffer_area = info.boot_area;
@@ -497,6 +562,10 @@ display_init(display_info& info)
 
 	// while memory is not yet fragmented (a failure is retried by set_mode())
 	reserve_mode_buffer(info);
+
+	void* settings = load_driver_settings("bcm2711_display");
+	overlays_init(info, settings);
+	unload_driver_settings(settings);
 
 	// the firmware's id of the first display (HDMI 0)
 	uint32 display = 0;
@@ -526,46 +595,91 @@ display_init(display_info& info)
 
 
 static status_t update_cursor(display_info& info);
+static void blank_firmware_frame_buffer(bool blank);
 
 
-static status_t
-set_plane(display_info& info, uint32 width, uint32 height, phys_addr_t buffer)
+/*!	Where the current mode appears on the native one: scaled up as far as it
+	fits, centered (black borders).
+*/
+static void
+mode_on_screen(const display_info& info, int32& offsetX, int32& offsetY,
+	int32& width, int32& height)
 {
+	const bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const int32 modeWidth = sharedInfo.current_mode.virtual_width;
+	const int32 modeHeight = sharedInfo.current_mode.virtual_height;
+	const int32 nativeWidth = sharedInfo.native_width;
+	const int32 nativeHeight = sharedInfo.native_height;
+
+	width = nativeWidth;
+	height = (int64)modeHeight * nativeWidth / modeWidth;
+	if (height > nativeHeight) {
+		height = nativeHeight;
+		width = (int64)modeWidth * nativeHeight / modeHeight;
+	}
+	offsetX = (nativeWidth - width) / 2;
+	offsetY = (nativeHeight - height) / 2;
+}
+
+
+static bool
+desktop_keyed(const display_info& info)
+{
+	return info.visible_overlays > 0 && info.shared_info->overlays_keyed;
+}
+
+
+/*!	Scans the desktop out as the mode and the overlays need it: the native
+	mode without visible overlays is the firmware's own frame buffer; a smaller
+	mode is the mode buffer on plane 0, scaled up; with an overlay under it,
+	the desktop is plane 0 with per-pixel alpha (in the native mode, the boot
+	loader's frame buffer, the firmware's own blanked).
+*/
+static status_t
+update_primary_plane(display_info& info)
+{
+	const bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const uint32 width = sharedInfo.current_mode.virtual_width;
+	const uint32 height = sharedInfo.current_mode.virtual_height;
+	const bool native = width == sharedInfo.native_width
+		&& height == sharedInfo.native_height;
+	const bool keyed = desktop_keyed(info);
+
 	firmware_plane plane = {};
 	plane.display = info.display_id;
 	plane.plane_id = kPrimaryPlane;
-	if (width != 0) {
-		const uint32 nativeWidth = info.shared_info->native_width;
-		const uint32 nativeHeight = info.shared_info->native_height;
-
-		// scaled up as far as it fits, centered (black borders)
-		uint32 dstWidth = nativeWidth;
-		uint32 dstHeight = (uint64)height * nativeWidth / width;
-		if (dstHeight > nativeHeight) {
-			dstHeight = nativeHeight;
-			dstWidth = (uint64)width * nativeHeight / height;
-		}
-
-		plane.image_type = kImageXRGB8888;
-		plane.layer = kPrimaryLayer;
-		plane.width = width;
-		plane.height = height;
-		plane.pitch = width * 4;
-		plane.vpitch = height;
-		plane.src_w = width << 16;
-		plane.src_h = height << 16;
-		plane.dst_x = (nativeWidth - dstWidth) / 2;
-		plane.dst_y = (nativeHeight - dstHeight) / 2;
-		plane.dst_w = dstWidth;
-		plane.dst_h = dstHeight;
-		plane.alpha = 0xff;
-		plane.num_planes = 1;
-		plane.planes[0] = buffer;
+	if (native && !keyed) {
+		// only display and plane: unsets the plane
+		status_t status = sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane,
+			sizeof(plane), sizeof(plane), NULL);
+		blank_firmware_frame_buffer(false);
+		return status;
 	}
-		// else: only display and plane: unsets the plane
 
-	return sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane, sizeof(plane),
-		sizeof(plane), NULL);
+	int32 dstX, dstY, dstWidth, dstHeight;
+	mode_on_screen(info, dstX, dstY, dstWidth, dstHeight);
+
+	plane.image_type = keyed ? kImageARGB8888 : kImageXRGB8888;
+	plane.layer = keyed ? kKeyedDesktopLayer : kPrimaryLayer;
+	plane.width = width;
+	plane.height = height;
+	plane.pitch = native ? info.boot_bytes_per_row : width * 4;
+	plane.vpitch = height;
+	plane.src_w = width << 16;
+	plane.src_h = height << 16;
+	plane.dst_x = dstX;
+	plane.dst_y = dstY;
+	plane.dst_w = dstWidth;
+	plane.dst_h = dstHeight;
+	plane.alpha = 0xff;
+	plane.num_planes = 1;
+	plane.planes[0] = native ? info.boot_physical : info.mode_physical;
+
+	status_t status = sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane,
+		sizeof(plane), sizeof(plane), NULL);
+	if (status == B_OK)
+		blank_firmware_frame_buffer(true);
+	return status;
 }
 
 
@@ -642,6 +756,413 @@ reserve_mode_buffer(display_info& info)
 }
 
 
+//	#pragma mark - overlays
+
+
+/*!	Hands out an overlay buffer of at least \a size bytes: a reserved one
+	that fits, or a new one. Either is a kernel area that every team may
+	access: the overlay API gives the clients its address as it is.
+*/
+static status_t
+allocate_overlay_buffer(display_info& info,
+	bcm2711_display_overlay_buffer& request)
+{
+	if (info.shared_info->overlay_planes == 0)
+		return B_NOT_SUPPORTED;
+	const size_t size = ROUNDUP((size_t)request.size, B_PAGE_SIZE);
+	if (size == 0 || size > kMaxOverlayBufferSize)
+		return B_BAD_VALUE;
+
+	display_info::overlay_memory* buffer = NULL;
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
+		display_info::overlay_memory& slot = info.overlay_buffers[i];
+		if (slot.area >= 0 && !slot.in_use && slot.size >= size
+			&& (buffer == NULL || slot.size < buffer->size)) {
+			buffer = &slot;
+		}
+	}
+	if (buffer != NULL) {
+		// what its last user left in it
+		memset(buffer->address, 0, size);
+	} else {
+		for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
+			if (info.overlay_buffers[i].area < 0) {
+				buffer = &info.overlay_buffers[i];
+				break;
+			}
+		}
+		if (buffer == NULL)
+			return B_NO_MEMORY;
+
+		buffer->area = create_scan_out_area("bcm2711 display overlay buffer",
+			size, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA,
+			&buffer->address, &buffer->physical);
+		if (buffer->area < 0) {
+			status_t status = buffer->area;
+			buffer->area = -1;
+			return status;
+		}
+		buffer->size = size;
+		buffer->reserved = false;
+	}
+
+	buffer->in_use = true;
+	request.area = buffer->area;
+	request.address = buffer->address;
+	request.physical = buffer->physical;
+	return B_OK;
+}
+
+
+static display_info::overlay_memory*
+find_overlay_buffer(display_info& info, phys_addr_t physical, size_t size)
+{
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
+		display_info::overlay_memory& buffer = info.overlay_buffers[i];
+		if (buffer.area >= 0 && buffer.in_use && physical >= buffer.physical
+			&& physical - buffer.physical <= buffer.size
+			&& size <= buffer.size - (physical - buffer.physical)) {
+			return &buffer;
+		}
+	}
+	return NULL;
+}
+
+
+static void
+report_overlay(display_info& info, uint32 index)
+{
+	display_info::overlay_plane& overlay = info.overlays[index];
+	if (overlay.updates > 0) {
+		TRACE_ALWAYS("plane %" B_PRIu32 ": %" B_PRIu32 " updates in %" B_PRId64
+			" vblanks, %" B_PRIu32 " late, %" B_PRIu32 " gaps, %" B_PRIu32
+			" superseded (vblank %" B_PRId64 " us)\n",
+			index + BCM2711_DISPLAY_FIRST_OVERLAY_PLANE, overlay.updates,
+			overlay.last_vblank - overlay.first_vblank + 1, overlay.late,
+			overlay.gaps, overlay.superseded, info.vblank_period);
+	}
+	overlay.updates = 0;
+	overlay.late = 0;
+	overlay.gaps = 0;
+	overlay.superseded = 0;
+	overlay.last_report = system_time();
+}
+
+
+/*!	Counts a plane update (after SET_PLANE returned) against the vertical
+	blanks: one per blank is a flip on time; an update shortly before the
+	predicted blank may be latched a frame late; blanks without an update
+	in a run of them are missed flips (when the client meant to flip every
+	frame); several in one blank are superseded flips (unsynchronized).
+*/
+static void
+count_overlay_update(display_info& info, uint32 index)
+{
+	display_info::overlay_plane& overlay = info.overlays[index];
+	const bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const int64 vblank = atomic_get64(&info.shared_info->vblank_count);
+	const bigtime_t now = system_time();
+
+	const bigtime_t sinceBlank = now - sharedInfo.vblank_time;
+	if (sinceBlank < info.vblank_period
+		&& info.vblank_period - sinceBlank < kLateUpdateMargin) {
+		overlay.late++;
+	}
+
+	if (overlay.updates == 0)
+		overlay.first_vblank = vblank;
+	else if (vblank == overlay.last_vblank)
+		overlay.superseded++;
+	else if (vblank - overlay.last_vblank > 1
+		&& vblank - overlay.last_vblank <= 30) {
+		// (a longer pause is not a run of flips)
+		overlay.gaps += vblank - overlay.last_vblank - 1;
+	}
+	overlay.last_vblank = vblank;
+	overlay.updates++;
+
+	if (now - overlay.last_report >= kOverlayReportInterval)
+		report_overlay(info, index);
+}
+
+
+static status_t
+hide_overlay(display_info& info, uint32 plane)
+{
+	if (plane < BCM2711_DISPLAY_FIRST_OVERLAY_PLANE
+		|| plane >= BCM2711_DISPLAY_FIRST_OVERLAY_PLANE
+			+ BCM2711_DISPLAY_OVERLAY_PLANES) {
+		return B_BAD_VALUE;
+	}
+	const uint32 index = plane - BCM2711_DISPLAY_FIRST_OVERLAY_PLANE;
+	display_info::overlay_plane& overlay = info.overlays[index];
+	if (!overlay.visible)
+		return B_OK;
+
+	firmware_plane request = {};
+	request.display = info.display_id;
+	request.plane_id = plane;
+	status_t status = sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &request,
+		sizeof(request), sizeof(request), NULL);
+
+	overlay.visible = false;
+	report_overlay(info, index);
+	if (--info.visible_overlays == 0 && info.shared_info->overlays_keyed) {
+		// the desktop is opaque again
+		update_primary_plane(info);
+	}
+	return status;
+}
+
+
+static uint32
+overlay_extent(const bcm2711_display_overlay& request)
+{
+	const uint32 size = request.bytes_per_row * request.height;
+	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV420)
+		return size + size / 2;
+	return size;
+}
+
+
+/*!	Shows a buffer on an overlay plane: the destination rectangle (the
+	mode's coordinates, unclipped) is clipped to the mode, with the source
+	cropped in proportion, then scaled to the native coordinates the
+	firmware works in.
+*/
+static status_t
+set_overlay(display_info& info, const bcm2711_display_overlay& request)
+{
+	if (request.plane < BCM2711_DISPLAY_FIRST_OVERLAY_PLANE
+		|| request.plane >= BCM2711_DISPLAY_FIRST_OVERLAY_PLANE
+			+ BCM2711_DISPLAY_OVERLAY_PLANES
+		|| info.shared_info->overlay_planes == 0) {
+		return B_BAD_VALUE;
+	}
+	switch (request.image_type) {
+		case BCM2711_DISPLAY_IMAGE_XRGB8888:
+		case BCM2711_DISPLAY_IMAGE_YUV422_YUYV:
+		case BCM2711_DISPLAY_IMAGE_YUV420:
+			break;
+		default:
+			return B_BAD_VALUE;
+	}
+	if (request.width == 0 || request.height == 0
+		|| request.bytes_per_row > UINT16_MAX
+		|| request.source_width == 0 || request.source_height == 0
+		|| request.source_x + request.source_width
+			> ((uint32)request.width << 16)
+		|| request.source_y + request.source_height
+			> ((uint32)request.height << 16)
+		|| request.destination_width == 0
+		|| request.destination_height == 0) {
+		return B_BAD_VALUE;
+	}
+	// only what we handed out scans out
+	const uint32 extent = overlay_extent(request);
+	if (find_overlay_buffer(info, request.physical, extent) == NULL)
+		return B_BAD_ADDRESS;
+
+	const uint32 index = request.plane - BCM2711_DISPLAY_FIRST_OVERLAY_PLANE;
+	display_info::overlay_plane& overlay = info.overlays[index];
+
+	// clip the destination to the mode, crop the source in proportion
+	const bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	const int64 modeWidth = sharedInfo.current_mode.virtual_width;
+	const int64 modeHeight = sharedInfo.current_mode.virtual_height;
+	int64 left = request.x;
+	int64 top = request.y;
+	int64 right = left + request.destination_width;
+	int64 bottom = top + request.destination_height;
+	int64 srcX = request.source_x;
+	int64 srcY = request.source_y;
+	int64 srcWidth = request.source_width;
+	int64 srcHeight = request.source_height;
+	if (left < 0) {
+		const int64 crop = -left * srcWidth / request.destination_width;
+		srcX += crop;
+		srcWidth -= crop;
+		left = 0;
+	}
+	if (top < 0) {
+		const int64 crop = -top * srcHeight / request.destination_height;
+		srcY += crop;
+		srcHeight -= crop;
+		top = 0;
+	}
+	if (right > modeWidth) {
+		srcWidth -= (right - modeWidth) * request.source_width
+			/ request.destination_width;
+		right = modeWidth;
+	}
+	if (bottom > modeHeight) {
+		srcHeight -= (bottom - modeHeight) * request.source_height
+			/ request.destination_height;
+		bottom = modeHeight;
+	}
+	if (right <= left || bottom <= top || srcWidth <= 0 || srcHeight <= 0)
+		return hide_overlay(info, request.plane);
+
+	// the keyed desktop goes up before the overlay shows under it
+	const bool shown = !overlay.visible;
+	if (shown) {
+		overlay.visible = true;
+		overlay.last_report = system_time();
+		if (info.visible_overlays++ == 0 && sharedInfo.overlays_keyed)
+			update_primary_plane(info);
+	}
+
+	int32 offsetX, offsetY, screenWidth, screenHeight;
+	mode_on_screen(info, offsetX, offsetY, screenWidth, screenHeight);
+
+	firmware_plane plane = {};
+	plane.display = info.display_id;
+	plane.plane_id = request.plane;
+	plane.image_type = request.image_type;
+	plane.layer = (sharedInfo.overlays_keyed ? kOverlayLayer
+		: kOverlayAboveLayer) + request.plane;
+	plane.width = request.width;
+	plane.height = request.height;
+	plane.pitch = request.bytes_per_row;
+	plane.vpitch = request.height;
+	plane.src_x = srcX;
+	plane.src_y = srcY;
+	plane.src_w = srcWidth;
+	plane.src_h = srcHeight;
+	plane.dst_x = offsetX + left * screenWidth / modeWidth;
+	plane.dst_y = offsetY + top * screenHeight / modeHeight;
+	plane.dst_w = max_c((right - left) * screenWidth / modeWidth, 1);
+	plane.dst_h = max_c((bottom - top) * screenHeight / modeHeight, 1);
+	plane.alpha = 0xff;
+	plane.color_encoding = request.color_encoding;
+	plane.planes[0] = request.physical;
+	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV420) {
+		// Y, then U and V at half the pitch and height (the firmware has
+		// one pitch: it derives theirs)
+		const uint32 lumaSize = request.bytes_per_row * request.height;
+		plane.num_planes = 3;
+		plane.planes[1] = request.physical + lumaSize;
+		plane.planes[2] = plane.planes[1] + lumaSize / 4;
+	} else
+		plane.num_planes = 1;
+
+	status_t status = sMailbox->property_tag(BCM2835_TAG_SET_PLANE, &plane,
+		sizeof(plane), sizeof(plane), NULL);
+	if (status != B_OK) {
+		if (shown) {
+			overlay.visible = false;
+			if (--info.visible_overlays == 0 && sharedInfo.overlays_keyed)
+				update_primary_plane(info);
+		}
+		return status;
+	}
+
+	overlay.physical = request.physical;
+	overlay.size = extent;
+	count_overlay_update(info, index);
+	return B_OK;
+}
+
+
+static status_t
+free_overlay_buffer(display_info& info, area_id area)
+{
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
+		display_info::overlay_memory& buffer = info.overlay_buffers[i];
+		if (buffer.area != area || !buffer.in_use)
+			continue;
+
+		// never scan out what is freed
+		for (uint32 j = 0; j < BCM2711_DISPLAY_OVERLAY_PLANES; j++) {
+			const display_info::overlay_plane& overlay = info.overlays[j];
+			if (overlay.visible && overlay.physical >= buffer.physical
+				&& overlay.physical < buffer.physical + buffer.size) {
+				hide_overlay(info, j + BCM2711_DISPLAY_FIRST_OVERLAY_PLANE);
+			}
+		}
+
+		buffer.in_use = false;
+		if (!buffer.reserved) {
+			delete_area(buffer.area);
+			buffer.area = -1;
+		}
+		return B_OK;
+	}
+	return B_BAD_VALUE;
+}
+
+
+/*!	Overlays need every plane buffer below kScanOutLimit, and for the keyed
+	desktop in the native mode the boot loader's frame buffer too. The
+	reserved buffers are allocated while memory is not yet fragmented.
+*/
+static void
+overlays_init(display_info& info, void* settings)
+{
+	bcm2711_display_shared_info& sharedInfo = *info.shared_info;
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++)
+		info.overlay_buffers[i].area = -1;
+	info.vblank_period = 16667;
+
+	const bool above = get_driver_boolean_parameter(settings,
+		"overlay_above_desktop", false, true);
+	if (info.depth != 32 || (!above && (info.boot_physical >= kScanOutLimit
+			|| info.boot_physical + (phys_addr_t)info.boot_bytes_per_row
+				* sharedInfo.native_height > kScanOutLimit))) {
+		TRACE_ALWAYS("no overlays: the frame buffer is not below 1 GiB\n");
+		return;
+	}
+	sharedInfo.overlay_planes = BCM2711_DISPLAY_OVERLAY_PLANES;
+	sharedInfo.overlays_keyed = !above;
+
+	const char* value = get_driver_parameter(settings, "overlay_reserve",
+		NULL, NULL);
+	uint32 reserve = value != NULL ? strtoul(value, NULL, 0)
+		: kDefaultOverlayReserve;
+	reserve = min_c(reserve, kMaxOverlayBuffers / 2);
+	const size_t size = ROUNDUP((size_t)sharedInfo.native_width * 4
+		* sharedInfo.native_height, B_PAGE_SIZE);
+	uint32 reserved = 0;
+	for (; reserved < reserve; reserved++) {
+		display_info::overlay_memory& buffer = info.overlay_buffers[reserved];
+		buffer.area = create_scan_out_area("bcm2711 display overlay buffer",
+			size, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA,
+			&buffer.address, &buffer.physical);
+		if (buffer.area < 0) {
+			buffer.area = -1;
+			break;
+		}
+		buffer.size = size;
+		buffer.reserved = true;
+		buffer.in_use = false;
+	}
+
+	TRACE_ALWAYS("overlays: planes %d-%d %s the desktop, %" B_PRIu32
+		" buffers of %" B_PRIuSIZE " KiB reserved\n",
+		BCM2711_DISPLAY_FIRST_OVERLAY_PLANE,
+		BCM2711_DISPLAY_FIRST_OVERLAY_PLANE + BCM2711_DISPLAY_OVERLAY_PLANES
+			- 1, above ? "above" : "under (keyed)", reserved, size / 1024);
+}
+
+
+static void
+overlays_uninit(display_info& info)
+{
+	for (uint32 plane = BCM2711_DISPLAY_FIRST_OVERLAY_PLANE;
+			plane < BCM2711_DISPLAY_FIRST_OVERLAY_PLANE
+				+ BCM2711_DISPLAY_OVERLAY_PLANES; plane++) {
+		hide_overlay(info, plane);
+	}
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
+		display_info::overlay_memory& buffer = info.overlay_buffers[i];
+		if (buffer.area >= 0) {
+			delete_area(buffer.area);
+			buffer.area = -1;
+		}
+	}
+}
+
+
 /*!	Switches to \a width x \a height: the native mode is the firmware's own
 	frame buffer, a smaller one the mode buffer that a firmware plane scales
 	up. The accelerant's clone of the old buffer becomes a null area.
@@ -664,27 +1185,33 @@ set_mode(display_info& info, uint32 width, uint32 height)
 		&& height == sharedInfo.native_height;
 	area_id oldArea = info.frame_buffer_area;
 
+	if (!native) {
+		status_t status = reserve_mode_buffer(info);
+		if (status != B_OK)
+			return status;
+		memset((void*)info.mode_frame_buffer, 0, width * 4 * height);
+	}
+
+	const uint32 oldWidth = sharedInfo.current_mode.virtual_width;
+	const uint32 oldHeight = sharedInfo.current_mode.virtual_height;
+	sharedInfo.current_mode.virtual_width = width;
+	sharedInfo.current_mode.virtual_height = height;
+	status_t status = update_primary_plane(info);
+	if (status != B_OK) {
+		sharedInfo.current_mode.virtual_width = oldWidth;
+		sharedInfo.current_mode.virtual_height = oldHeight;
+		update_primary_plane(info);
+		return status;
+	}
+
 	if (native) {
-		set_plane(info, 0, 0, 0);
-		blank_firmware_frame_buffer(false);
 		info.frame_buffer_area = info.boot_area;
 		info.frame_buffer = info.boot_frame_buffer;
 		sharedInfo.bytes_per_row = info.boot_bytes_per_row;
 	} else {
-		status_t status = reserve_mode_buffer(info);
-		if (status != B_OK)
-			return status;
-
-		const uint32 bytesPerRow = width * 4;
-		memset((void*)info.mode_frame_buffer, 0, bytesPerRow * height);
-		status = set_plane(info, width, height, info.mode_physical);
-		if (status != B_OK)
-			return status;
-		blank_firmware_frame_buffer(true);
-
 		info.frame_buffer_area = info.mode_area;
 		info.frame_buffer = info.mode_frame_buffer;
-		sharedInfo.bytes_per_row = bytesPerRow;
+		sharedInfo.bytes_per_row = width * 4;
 	}
 
 	// the kernel debugger's console follows
@@ -695,8 +1222,6 @@ set_mode(display_info& info, uint32 width, uint32 height)
 	// mode buffer too when only the size changed, as its layout did
 	vm_change_clones_to_null_areas(oldArea);
 
-	sharedInfo.current_mode.virtual_width = width;
-	sharedInfo.current_mode.virtual_height = height;
 	if (info.cursor_visible)
 		update_cursor(info);
 	TRACE_ALWAYS("mode %" B_PRIu32 "x%" B_PRIu32 "%s\n", width, height,
@@ -719,17 +1244,9 @@ update_cursor(display_info& info)
 	const int32 modeWidth = sharedInfo.current_mode.virtual_width;
 	const int32 modeHeight = sharedInfo.current_mode.virtual_height;
 	if (info.cursor_visible && info.cursor_width != 0 && modeWidth > 0) {
-		// the mode as the primary plane shows it (see set_plane())
-		int32 nativeWidth = sharedInfo.native_width;
-		int32 nativeHeight = sharedInfo.native_height;
-		int32 dstWidth = nativeWidth;
-		int32 dstHeight = (int64)modeHeight * nativeWidth / modeWidth;
-		if (dstHeight > nativeHeight) {
-			dstHeight = nativeHeight;
-			dstWidth = (int64)modeWidth * nativeHeight / modeHeight;
-		}
-		const int32 offsetX = (nativeWidth - dstWidth) / 2;
-		const int32 offsetY = (nativeHeight - dstHeight) / 2;
+		// the mode as the primary plane shows it
+		int32 offsetX, offsetY, dstWidth, dstHeight;
+		mode_on_screen(info, offsetX, offsetY, dstWidth, dstHeight);
 
 		// the cursor's rectangle in mode coordinates, clipped to the mode
 		int32 left = (int32)info.cursor_x - info.cursor_hot_x;
@@ -811,6 +1328,7 @@ set_cursor(display_info& info, const bcm2711_display_cursor& cursor)
 static void
 display_uninit(display_info& info)
 {
+	overlays_uninit(info);
 	set_mode(info, info.shared_info->native_width,
 		info.shared_info->native_height);
 	if (info.cursor_area >= 0) {
@@ -954,6 +1472,49 @@ device_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 			info.cursor_visible = visible;
 			TRACE_ALWAYS("hardware cursor %s\n", visible ? "shown" : "hidden");
 			return update_cursor(info);
+		}
+
+		case BCM2711_DISPLAY_ALLOCATE_OVERLAY_BUFFER:
+		{
+			bcm2711_display_overlay_buffer request;
+			if (user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			status_t status = allocate_overlay_buffer(info, request);
+			if (status != B_OK)
+				return status;
+			if (user_memcpy(buffer, &request, sizeof(request)) != B_OK) {
+				free_overlay_buffer(info, request.area);
+				return B_BAD_ADDRESS;
+			}
+			return B_OK;
+		}
+
+		case BCM2711_DISPLAY_FREE_OVERLAY_BUFFER:
+		{
+			area_id area;
+			if (user_memcpy(&area, buffer, sizeof(area)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			return free_overlay_buffer(info, area);
+		}
+
+		case BCM2711_DISPLAY_SET_OVERLAY:
+		{
+			bcm2711_display_overlay request;
+			if (user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			return set_overlay(info, request);
+		}
+
+		case BCM2711_DISPLAY_HIDE_OVERLAY:
+		{
+			uint32 plane;
+			if (user_memcpy(&plane, buffer, sizeof(plane)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			return hide_overlay(info, plane);
 		}
 
 		case BCM2711_DISPLAY_GET_DEVICE_NAME:
