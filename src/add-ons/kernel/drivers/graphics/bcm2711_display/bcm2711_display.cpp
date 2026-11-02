@@ -25,6 +25,7 @@
 #include <lock.h>
 #include <util/AutoLock.h>
 #include <AutoDeleter.h>
+#include <arch/cpu.h>
 #include <team.h>
 #include <vm/vm.h>
 
@@ -577,11 +578,48 @@ blank_firmware_frame_buffer(bool blank)
 }
 
 
-/*!	Allocates the frame buffer of the smaller modes: physically contiguous
-	below kScanOutLimit, the native mode's size, so that every smaller mode fits.
-	It is allocated once, early, and kept: a contiguous run of a few MB in the
-	first GB is often no longer to be had after the system has run for a while
-	(a game's mode change then failed with B_NO_MEMORY: KNOWN-ISSUES W15).
+/*!	Allocates memory the firmware scans out: physically contiguous below
+	kScanOutLimit, mapped write-combining. The pages were cleared through a
+	cacheable mapping: their lines are written back and dropped first, so that
+	the firmware never scans stale memory and no dirty line is evicted later
+	over what was written through the write-combining mapping.
+*/
+static area_id
+create_scan_out_area(const char* name, size_t size, uint32 protection,
+	void** _address, phys_addr_t* _physical)
+{
+	virtual_address_restrictions virtualRestrictions = {};
+	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
+	physical_address_restrictions physicalRestrictions = {};
+	physicalRestrictions.high_address = kScanOutLimit;
+	area_id area = create_area_etc(B_SYSTEM_TEAM, name, size, B_CONTIGUOUS,
+		protection, 0, 0, &virtualRestrictions, &physicalRestrictions,
+		_address);
+	if (area < 0)
+		return area;
+
+	physical_entry entry;
+	status_t status = get_memory_map(*_address, B_PAGE_SIZE, &entry, 1);
+	if (status == B_OK) {
+		arm64_dcache_flush_range((addr_t)*_address, size);
+		status = vm_set_area_memory_type(area, entry.address,
+			B_WRITE_COMBINING_MEMORY);
+	}
+	if (status != B_OK) {
+		delete_area(area);
+		return status;
+	}
+
+	*_physical = entry.address;
+	return area;
+}
+
+
+/*!	Allocates the frame buffer of the smaller modes: the native mode's size,
+	so that every smaller mode fits. It is allocated once, early, and kept: a
+	contiguous run of a few MB in the first GB is often no longer to be had
+	after the system has run for a while (a game's mode change then failed
+	with B_NO_MEMORY: KNOWN-ISSUES W15).
 */
 static status_t
 reserve_mode_buffer(display_info& info)
@@ -592,24 +630,14 @@ reserve_mode_buffer(display_info& info)
 	bcm2711_display_shared_info& sharedInfo = *info.shared_info;
 	const size_t size = (sharedInfo.native_width * 4 * sharedInfo.native_height
 		+ B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
-	virtual_address_restrictions virtualRestrictions = {};
-	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
-	physical_address_restrictions physicalRestrictions = {};
-	physicalRestrictions.high_address = kScanOutLimit;
 	void* address;
-	area_id area = create_area_etc(B_SYSTEM_TEAM,
-		"bcm2711 display mode frame buffer", size, B_CONTIGUOUS,
-		B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
-		&physicalRestrictions, &address);
+	area_id area = create_scan_out_area("bcm2711 display mode frame buffer",
+		size, B_READ_AREA | B_WRITE_AREA, &address, &info.mode_physical);
 	if (area < 0)
 		return area;
-	physical_entry entry;
-	get_memory_map(address, B_PAGE_SIZE, &entry, 1);
-	vm_set_area_memory_type(area, entry.address, B_WRITE_COMBINING_MEMORY);
 
 	info.mode_area = area;
 	info.mode_frame_buffer = (addr_t)address;
-	info.mode_physical = entry.address;
 	return B_OK;
 }
 
@@ -759,21 +787,11 @@ set_cursor(display_info& info, const bcm2711_display_cursor& cursor)
 	}
 
 	if (info.cursor_area < 0) {
-		virtual_address_restrictions virtualRestrictions = {};
-		virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
-		physical_address_restrictions physicalRestrictions = {};
-		physicalRestrictions.high_address = kScanOutLimit;
-		info.cursor_area = create_area_etc(B_SYSTEM_TEAM,
-			"bcm2711 display cursor", sizeof(cursor.bits), B_CONTIGUOUS,
-			B_READ_AREA | B_WRITE_AREA, 0, 0, &virtualRestrictions,
-			&physicalRestrictions, (void**)&info.cursor_bits);
+		info.cursor_area = create_scan_out_area("bcm2711 display cursor",
+			sizeof(cursor.bits), B_READ_AREA | B_WRITE_AREA,
+			(void**)&info.cursor_bits, &info.cursor_physical);
 		if (info.cursor_area < 0)
 			return info.cursor_area;
-		physical_entry entry;
-		get_memory_map(info.cursor_bits, B_PAGE_SIZE, &entry, 1);
-		info.cursor_physical = entry.address;
-		vm_set_area_memory_type(info.cursor_area, entry.address,
-			B_WRITE_COMBINING_MEMORY);
 	}
 
 	// rows of the full cursor size: an aligned pitch for the plane
