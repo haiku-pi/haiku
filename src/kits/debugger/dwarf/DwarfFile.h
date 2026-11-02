@@ -202,6 +202,11 @@ private:
 									uint64 offset, target_addr_t address,
 									const void*& _expression,
 									off_t& _length) const;
+			status_t			_FindLocationExpressionV5(
+									CompilationUnit* unit,
+									uint64 offset, target_addr_t address,
+									const void*& _expression,
+									off_t& _length) const;
 
 			status_t			_LocateDebugInfo(
 									BString& _requiredExternalFileName,

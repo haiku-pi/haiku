@@ -732,6 +732,9 @@ DwarfFile::CompilationUnitForDIE(const DebugInfoEntry* entry) const
 TargetAddressRangeList*
 DwarfFile::ResolveRangeList(CompilationUnit* unit, uint64 offset) const
 {
+	if (unit != NULL && unit->Version() >= 5)
+		return _ResolveRangeListV5(unit, offset);
+
 	if (unit == NULL || fDebugRangesSection == NULL)
 		return NULL;
 
@@ -766,6 +769,98 @@ DwarfFile::ResolveRangeList(CompilationUnit* unit, uint64 offset) const
 			continue;
 
 		if (!ranges->AddRange(baseAddress + start, end - start)) {
+			ERROR("Out of memory.\n");
+			return NULL;
+		}
+	}
+
+	return rangesReference.Detach();
+}
+
+
+TargetAddressRangeList*
+DwarfFile::_ResolveRangeListV5(CompilationUnit* unit, uint64 offset) const
+{
+	// a DWARF 5 range list in .debug_rnglists
+	if (fDebugRangeListsSection == NULL
+		|| offset >= (uint64)fDebugRangeListsSection->Size()) {
+		return NULL;
+	}
+
+	TargetAddressRangeList* ranges = new(std::nothrow) TargetAddressRangeList;
+	if (ranges == NULL) {
+		ERROR("Out of memory.\n");
+		return NULL;
+	}
+	BReference<TargetAddressRangeList> rangesReference(ranges, true);
+
+	target_addr_t baseAddress = unit->AddressRangeBase();
+
+	DataReader dataReader((uint8*)fDebugRangeListsSection->Data() + offset,
+		fDebugRangeListsSection->Size() - offset, unit->AddressSize(),
+		unit->IsBigEndian());
+	while (true) {
+		uint8 kind = dataReader.Read<uint8>(DW_RLE_end_of_list);
+		if (kind == DW_RLE_end_of_list)
+			break;
+
+		target_addr_t start = 0;
+		target_addr_t end = 0;
+		bool isRange = true;
+		switch (kind) {
+			case DW_RLE_base_addressx:
+				if (_ReadAddressIndirect(unit,
+						dataReader.ReadUnsignedLEB128(0), baseAddress) != B_OK) {
+					return NULL;
+				}
+				isRange = false;
+				break;
+			case DW_RLE_startx_endx:
+			{
+				uint64 startIndex = dataReader.ReadUnsignedLEB128(0);
+				uint64 endIndex = dataReader.ReadUnsignedLEB128(0);
+				if (_ReadAddressIndirect(unit, startIndex, start) != B_OK
+					|| _ReadAddressIndirect(unit, endIndex, end) != B_OK) {
+					return NULL;
+				}
+				break;
+			}
+			case DW_RLE_startx_length:
+				if (_ReadAddressIndirect(unit,
+						dataReader.ReadUnsignedLEB128(0), start) != B_OK) {
+					return NULL;
+				}
+				end = start + dataReader.ReadUnsignedLEB128(0);
+				break;
+			case DW_RLE_offset_pair:
+				start = baseAddress + dataReader.ReadUnsignedLEB128(0);
+				end = baseAddress + dataReader.ReadUnsignedLEB128(0);
+				break;
+			case DW_RLE_base_address:
+				baseAddress = dataReader.ReadAddress(0);
+				isRange = false;
+				break;
+			case DW_RLE_start_end:
+				start = dataReader.ReadAddress(0);
+				end = dataReader.ReadAddress(0);
+				break;
+			case DW_RLE_start_length:
+				start = dataReader.ReadAddress(0);
+				end = start + dataReader.ReadUnsignedLEB128(0);
+				break;
+			default:
+				WARNING("\"%s\": Unsupported range list entry kind: %u\n",
+					fName, kind);
+				return NULL;
+		}
+
+		if (dataReader.HasOverflow())
+			return NULL;
+
+		if (!isRange || end <= start)
+			continue;
+
+		if (!ranges->AddRange(start, end - start)) {
 			ERROR("Out of memory.\n");
 			return NULL;
 		}
@@ -3376,6 +3471,11 @@ DwarfFile::_FindLocationExpression(CompilationUnit* unit, uint64 offset,
 	if (unit == NULL)
 		return B_BAD_VALUE;
 
+	if (unit->Version() >= 5) {
+		return _FindLocationExpressionV5(unit, offset, address, _expression,
+			_length);
+	}
+
 	if (fDebugLocationSection == NULL)
 		return B_ENTRY_NOT_FOUND;
 
@@ -3418,6 +3518,121 @@ DwarfFile::_FindLocationExpression(CompilationUnit* unit, uint64 offset,
 			return B_OK;
 		}
 	}
+}
+
+
+status_t
+DwarfFile::_FindLocationExpressionV5(CompilationUnit* unit, uint64 offset,
+	target_addr_t address, const void*& _expression, off_t& _length) const
+{
+	// a DWARF 5 location list in .debug_loclists
+	if (fDebugLocationListsSection == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	if (offset >= (uint64)fDebugLocationListsSection->Size())
+		return B_BAD_DATA;
+
+	target_addr_t baseAddress = unit->AddressRangeBase();
+	const void* defaultExpression = NULL;
+	uint64 defaultExpressionLength = 0;
+
+	DataReader dataReader((uint8*)fDebugLocationListsSection->Data() + offset,
+		fDebugLocationListsSection->Size() - offset, unit->AddressSize(),
+		unit->IsBigEndian());
+	while (true) {
+		uint8 kind = dataReader.Read<uint8>(DW_LLE_end_of_list);
+		if (dataReader.HasOverflow())
+			return B_BAD_DATA;
+		if (kind == DW_LLE_end_of_list)
+			break;
+
+		target_addr_t start = 0;
+		target_addr_t end = 0;
+		bool hasExpression = true;
+		bool isDefault = false;
+		switch (kind) {
+			case DW_LLE_base_addressx:
+				if (_ReadAddressIndirect(unit,
+						dataReader.ReadUnsignedLEB128(0), baseAddress) != B_OK) {
+					return B_BAD_DATA;
+				}
+				hasExpression = false;
+				break;
+			case DW_LLE_startx_endx:
+			{
+				uint64 startIndex = dataReader.ReadUnsignedLEB128(0);
+				uint64 endIndex = dataReader.ReadUnsignedLEB128(0);
+				if (_ReadAddressIndirect(unit, startIndex, start) != B_OK
+					|| _ReadAddressIndirect(unit, endIndex, end) != B_OK) {
+					return B_BAD_DATA;
+				}
+				break;
+			}
+			case DW_LLE_startx_length:
+				if (_ReadAddressIndirect(unit,
+						dataReader.ReadUnsignedLEB128(0), start) != B_OK) {
+					return B_BAD_DATA;
+				}
+				end = start + dataReader.ReadUnsignedLEB128(0);
+				break;
+			case DW_LLE_offset_pair:
+				start = baseAddress + dataReader.ReadUnsignedLEB128(0);
+				end = baseAddress + dataReader.ReadUnsignedLEB128(0);
+				break;
+			case DW_LLE_default_location:
+				isDefault = true;
+				break;
+			case DW_LLE_base_address:
+				baseAddress = dataReader.ReadAddress(0);
+				hasExpression = false;
+				break;
+			case DW_LLE_start_end:
+				start = dataReader.ReadAddress(0);
+				end = dataReader.ReadAddress(0);
+				break;
+			case DW_LLE_start_length:
+				start = dataReader.ReadAddress(0);
+				end = start + dataReader.ReadUnsignedLEB128(0);
+				break;
+			case DW_LLE_GNU_view_pair:
+				// location view numbers (-gvariable-location-views=incompat5)
+				dataReader.ReadUnsignedLEB128(0);
+				dataReader.ReadUnsignedLEB128(0);
+				hasExpression = false;
+				break;
+			default:
+				WARNING("\"%s\": Unsupported location list entry kind: %u\n",
+					fName, kind);
+				return B_BAD_DATA;
+		}
+
+		if (!hasExpression) {
+			if (dataReader.HasOverflow())
+				return B_BAD_DATA;
+			continue;
+		}
+
+		uint64 expressionLength = dataReader.ReadUnsignedLEB128(0);
+		const void* expression = dataReader.Data();
+		if (!dataReader.Skip(expressionLength) || dataReader.HasOverflow())
+			return B_BAD_DATA;
+
+		if (isDefault) {
+			defaultExpression = expression;
+			defaultExpressionLength = expressionLength;
+		} else if (address >= start && address < end) {
+			_expression = expression;
+			_length = expressionLength;
+			return B_OK;
+		}
+	}
+
+	if (defaultExpression == NULL)
+		return B_ENTRY_NOT_FOUND;
+
+	_expression = defaultExpression;
+	_length = defaultExpressionLength;
+	return B_OK;
 }
 
 
