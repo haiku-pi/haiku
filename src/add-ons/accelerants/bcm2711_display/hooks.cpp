@@ -59,6 +59,30 @@ get_accelerant_hook(uint32 feature, void* data)
 			return (void*)bcm2711_show_cursor;
 	}
 
+	/* overlays: firmware planes, when the driver offers them */
+	if (gInfo == NULL || gInfo->shared_info->overlay_planes == 0)
+		return NULL;
+	switch (feature) {
+		case B_OVERLAY_COUNT:
+			return (void*)bcm2711_overlay_count;
+		case B_OVERLAY_SUPPORTED_SPACES:
+			return (void*)bcm2711_overlay_supported_spaces;
+		case B_OVERLAY_SUPPORTED_FEATURES:
+			return (void*)bcm2711_overlay_supported_features;
+		case B_ALLOCATE_OVERLAY_BUFFER:
+			return (void*)bcm2711_allocate_overlay_buffer;
+		case B_RELEASE_OVERLAY_BUFFER:
+			return (void*)bcm2711_release_overlay_buffer;
+		case B_GET_OVERLAY_CONSTRAINTS:
+			return (void*)bcm2711_get_overlay_constraints;
+		case B_ALLOCATE_OVERLAY:
+			return (void*)bcm2711_allocate_overlay;
+		case B_RELEASE_OVERLAY:
+			return (void*)bcm2711_release_overlay;
+		case B_CONFIGURE_OVERLAY:
+			return (void*)bcm2711_configure_overlay;
+	}
+
 	return NULL;
 }
 
