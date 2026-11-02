@@ -10,5 +10,6 @@ Addon bcm2711_display.accelerant :
 	cursor.cpp
 	hooks.cpp
 	mode.cpp
+	overlay.cpp
 	: libaccelerantscommon.a
 ;
