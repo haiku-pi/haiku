@@ -434,6 +434,14 @@ AccelerantHWInterface::_UpdateHooksAfterModeChange()
 		= (release_overlay)fAccelerantHook(B_RELEASE_OVERLAY, NULL);
 	fAccConfigureOverlay
 		= (configure_overlay)fAccelerantHook(B_CONFIGURE_OVERLAY, NULL);
+
+	// an accelerant whose overlays are keyed by the alpha of the frame
+	// buffer's pixels needs every front buffer write opaque, except the key
+	_SetOverlayKeying(fAccOverlaySupportedFeatures != NULL
+		&& fAccConfigureOverlay != NULL
+		&& (fDisplayMode.space == B_RGB32 || fDisplayMode.space == B_RGBA32)
+		&& (fAccOverlaySupportedFeatures(fDisplayMode.space)
+			& B_OVERLAY_KEYING_USES_ALPHA) != 0);
 }
 
 
@@ -1118,6 +1126,7 @@ AccelerantHWInterface::ReleaseOverlayChannel(overlay_token token)
 	if (token == NULL)
 		return;
 
+	_RemoveOverlayKey(token);
 	fAccReleaseOverlay(token);
 }
 
@@ -1204,8 +1213,15 @@ AccelerantHWInterface::FreeOverlayBuffer(const overlay_buffer* buffer)
 void
 AccelerantHWInterface::ConfigureOverlay(Overlay* overlay)
 {
+	if (fAccConfigureOverlay == NULL)
+		return;
+
 	// TODO: this only needs to be done on mode changes!
 	overlay->SetColorSpace(fDisplayMode.space);
+
+	// the key pixels app_server writes next are keyed in the new place
+	_SetOverlayKey(overlay->OverlayToken(), *overlay->OverlayWindow(),
+		overlay->Color());
 
 	fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
 		overlay->OverlayWindow(), overlay->OverlayView());
@@ -1215,6 +1231,11 @@ AccelerantHWInterface::ConfigureOverlay(Overlay* overlay)
 void
 AccelerantHWInterface::HideOverlay(Overlay* overlay)
 {
+	_RemoveOverlayKey(overlay->OverlayToken());
+
+	if (fAccConfigureOverlay == NULL)
+		return;
+
 	fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
 		NULL, NULL);
 }
