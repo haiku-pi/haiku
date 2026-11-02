@@ -156,10 +156,29 @@ arm64_secondary_startup()
 }
 
 
+static uint32
+arm64_current_cpu_index()
+{
+	uint64 mpidr;
+	asm volatile("mrs %0, MPIDR_EL1" : "=r" (mpidr));
+	mpidr &= ~(uint64)((1 << 31) | (1 << 24));
+	for (uint32 i = 0; i < sCpuCount; i++) {
+		if (sCpus[i].mpidr == mpidr)
+			return sCpus[i].id;
+	}
+	return 0;
+}
+
+
 extern "C" void
 arm64_secondary_startup2(uint32 cpu)
 {
 	arm64_common_cpu_startup();
+
+	// What this CPU stored with its caches off (the compiler may keep "cpu"
+	// on the stack) need not be what it reads now that they are on: look the
+	// index up again.
+	cpu = arm64_current_cpu_index();
 
 	arch_enter_kernel(sKernelArgs, sKernelEntry,
 		gKernelArgs.cpu_kstack[cpu].start + gKernelArgs.cpu_kstack[cpu].size,
@@ -177,6 +196,23 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
 	// read sCpus and sSecondaryStacks from memory: make sure everything
 	// written so far has reached it.
 	_arch_cache_clean_poc();
+
+	// They also write their stacks with the caches off and read them back
+	// once they are on. A line of a stack still in a cache (the memset() in
+	// arch_smp_init_other_cpus(); the clean above keeps it there) would then
+	// return the zeroes instead of what was written: no cache may keep one.
+	uint64 ctr;
+	asm volatile("mrs %0, CTR_EL0" : "=r" (ctr));
+	const uint64 lineSize = 4 << ((ctr >> 16) & 0xf);
+	const size_t stackSize = KERNEL_STACK_SIZE
+		+ KERNEL_STACK_GUARD_PAGES * B_PAGE_SIZE;
+	for (uint32 i = 1; i < gKernelArgs.num_cpus; i++) {
+		for (uint64 line = sSecondaryStacks[i] - stackSize;
+				line < sSecondaryStacks[i]; line += lineSize) {
+			asm volatile("dc civac, %0" : : "r" (line) : "memory");
+		}
+	}
+	asm volatile("dsb sy" : : : "memory");
 
 	for (uint32 i = 0; i < sCpuCount; i++) {
 		platform_cpu_info* cpu = &sCpus[i];
