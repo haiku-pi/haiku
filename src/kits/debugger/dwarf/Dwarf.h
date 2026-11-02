@@ -477,6 +477,11 @@ enum {
 	DW_LANG_Fortran08		= 0x0023,
 	DW_LANG_RenderScript	= 0x0024,
 	DW_LANG_BLISS			= 0x0025,
+	DW_LANG_C_plus_plus_17	= 0x002a,	// added after DWARF 5
+	DW_LANG_C_plus_plus_20	= 0x002b,
+	DW_LANG_C17				= 0x002c,
+	DW_LANG_C_plus_plus_23	= 0x003a,
+	DW_LANG_C23				= 0x003e,
 	DW_LANG_lo_user			= 0x8000,
 	DW_LANG_hi_user			= 0xffff
 };
