@@ -229,10 +229,11 @@ struct v3d_bo {
 };
 
 
-/*!	A fence is a job's sequence number: jobs complete in submission order
-	(one queue), so it signals once completed_seqno reaches it, and of two
-	fences the later one implies the earlier (merging sync files keeps the
-	maximum). Running the queues concurrently will need a fence per queue.
+/*!	A fence is a job's sequence number. It signals once completed_seqno
+	reaches it, and completed_seqno only moves past jobs that have all
+	completed (jobs.cpp), so of two fences the later one implies the earlier
+	(merging sync files keeps the maximum) - with concurrent queues a fence
+	may signal a little later than its own job completed, never earlier.
 */
 struct v3d_syncobj {
 	int32				references;
@@ -268,9 +269,28 @@ enum v3d_job_type {
 enum v3d_job_stage {
 	V3D_JOB_QUEUED,
 	V3D_JOB_BIN,
+	V3D_JOB_BINNED,
+		// a control list's bin stage is done, its render stage not started
 	V3D_JOB_RENDER,
 	V3D_JOB_TFU,
 	V3D_JOB_CSD,
+};
+
+
+/*!	The job queues: one per unit of the GPU, numbered as the uAPI's enum
+	v3d_queue (the multisync extension's wait_stage), and one for the CPU
+	jobs. Each runs one job at a time, in submission order (as Linux with
+	credit_limit = 1); a control list with a binner list is on the binner's
+	queue until its bin stage is done, and on the render queue all along.
+*/
+enum {
+	kQueueBin		= V3D_BIN,
+	kQueueRender	= V3D_RENDER,
+	kQueueTfu		= V3D_TFU,
+	kQueueCsd		= V3D_CSD,
+	kQueueCpu,
+	kQueueCount,
+	kHardwareQueues	= kQueueCpu
 };
 
 
@@ -279,9 +299,22 @@ struct v3d_cpu_job;
 
 struct v3d_job {
 	v3d_job*			next;
+		// the next job of the same submission, until they are queued
+	v3d_job*			queue_next[kQueueCount];
+		// the next job of each queue the job is on
 	uint64				seqno;
 	v3d_job_type		type;
 	v3d_job_stage		stage;
+
+	uint32				bin_in_sync;
+	uint32				in_sync;
+		// the single in-syncs of the submission (handles), until queued
+	uint64				bin_wait_seqno;
+	uint64				wait_seqno;
+		// the bin stage, and the job (a control list: its render stage),
+		// may start once completed_seqno has reached these
+	uint32				restarts;
+		// started over after a GPU reset another job caused
 
 	drm_v3d_submit_tfu	tfu;
 	uint32				csd_config[7];
@@ -311,8 +344,9 @@ struct v3d_job {
 	bigtime_t			started;
 		// queued, and first kicked (for the statistics)
 	bigtime_t			kicked;
+	bigtime_t			bin_done;
 	bigtime_t			render_started;
-		// a control list's render stage kicked (its bin stage ends there)
+		// a control list's bin stage completed, its render stage kicked
 	bigtime_t			last_progress;
 	bigtime_t			next_check;
 	uint32				current_address;
@@ -375,11 +409,24 @@ struct v3d_device {
 	uint32				mmu_control_seen;
 
 	// jobs
-	v3d_job*			queue_head;
-	v3d_job*			queue_tail;
-	v3d_job*			active;
+	struct {
+		v3d_job*		head;
+		v3d_job*		tail;
+			// oldest first; a job on the GPU stays at the head
+		v3d_job*		active;
+			// the head, while the unit runs it
+	}					queues[kQueueCount];
+	int32				hardware_busy;
+		// queues with a job on the GPU
+	bool				concurrent;
+		// one job per unit at a time (driver setting "queues concurrent"),
+		// else one job on the GPU at a time, the oldest first
+	bool				settings_read;
+	int32				oom_deferred;
+		// the binner waits for overflow memory a render job still holds
 	uint64				submitted_seqno;
 	uint64				completed_seqno;
+		// every job up to this one has completed
 	ConditionVariable	job_done;
 	v3d_bo*				quarantine;
 	uint32				resets;
@@ -394,6 +441,12 @@ struct v3d_device {
 		uint32			cpu_jobs;
 		bigtime_t		gpu_time;
 			// first kick to completion
+		bigtime_t		busy_time;
+		bigtime_t		overlap_time;
+		bigtime_t		busy_since;
+		bigtime_t		overlap_since;
+			// at least one, and at least two, units running a job
+		uint32			restarts;
 		bigtime_t		bin_time;
 		bigtime_t		render_time;
 			// of the control lists: the two stages apart
@@ -423,6 +476,11 @@ struct v3d_device {
 /*!	The extensions of a submit ioctl (DRM_V3D_SUBMIT_EXTENSION). */
 struct v3d_submit_ext {
 	bool				multisync;
+	uint32*				in_syncs;
+	uint32				in_sync_count;
+	uint32				wait_stage;
+		// syncobj handles the job waits for (its stage wait_stage, for a
+		// control list)
 	uint32*				out_syncs;
 	uint32				out_sync_count;
 		// syncobj handles that get the (last) job's fence
@@ -464,6 +522,8 @@ void v3d_file_close_bos(v3d_file* file);
 // jobs.cpp
 status_t v3d_jobs_start(v3d_device* device);
 void v3d_jobs_stop(v3d_device* device);
+void v3d_jobs_read_settings(v3d_device* device);
+bool v3d_jobs_on_gpu(v3d_device* device);
 status_t v3d_submit_cl(v3d_file* file, drm_v3d_submit_cl* args);
 status_t v3d_submit_tfu(v3d_file* file, drm_v3d_submit_tfu* args);
 status_t v3d_submit_csd(v3d_file* file, drm_v3d_submit_csd* args);
