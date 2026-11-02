@@ -14,16 +14,21 @@
 
 BaseUnit::BaseUnit(off_t headerOffset, off_t contentOffset,
 	off_t totalSize, off_t abbreviationOffset, uint8 addressSize,
-	bool isBigEndian, bool isDwarf64)
+	bool isBigEndian, bool isDwarf64, uint16 version)
 	:
 	fHeaderOffset(headerOffset),
 	fContentOffset(contentOffset),
 	fTotalSize(totalSize),
 	fAbbreviationOffset(abbreviationOffset),
+	fStrOffsetsBase(-1),
+	fAddrBase(-1),
+	fRangeListsBase(-1),
+	fLocationListsBase(-1),
 	fAbbreviationTable(NULL),
 	fAddressSize(addressSize),
 	fIsBigEndian(isBigEndian),
-	fIsDwarf64(isDwarf64)
+	fIsDwarf64(isDwarf64),
+	fVersion(version)
 {
 }
 

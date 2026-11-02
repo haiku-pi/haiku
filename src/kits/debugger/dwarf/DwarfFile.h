@@ -125,16 +125,24 @@ private:
 									bool ehFrame, FDEInfoList& infos);
 			status_t			_ParseCompilationUnit(CompilationUnit* unit);
 			status_t			_ParseTypeUnit(TypeUnit* unit);
+			status_t			_AddTypeUnit(TypeUnit* unit);
 			status_t			_ParseDebugInfoEntry(DataReader& dataReader,
 									BaseUnit* unit,
 									AbbreviationTable* abbreviationTable,
 									DebugInfoEntry*& _entry,
 									bool& _endOfEntryList, int level = 0);
 			status_t			_FinishUnit(BaseUnit* unit);
+			ElfSection*			_UnitSection(BaseUnit* unit) const;
 			status_t			_ReadStringIndirect(BaseUnit* unit,
 									uint64 index, const char*& value) const;
 			status_t			_ReadAddressIndirect(BaseUnit* unit,
 									uint64 index, uint64& value) const;
+			status_t			_ReadListIndirect(BaseUnit* unit,
+									ElfSection* section, off_t base,
+									uint64 index, uint64& _offset) const;
+			TargetAddressRangeList* _ResolveRangeListV5(
+									CompilationUnit* unit,
+									uint64 offset) const;
 			status_t			_ParseEntryAttributes(DataReader& dataReader,
 									BaseUnit* unit,
 									DebugInfoEntry* entry,
@@ -223,11 +231,13 @@ private:
 			ElfSection*			fDebugStringSection;
 			ElfSection*			fDebugStrOffsetsSection;
 			ElfSection*			fDebugRangesSection;
+			ElfSection*			fDebugRangeListsSection;
 			ElfSection*			fDebugLineSection;
 			ElfSection*			fDebugLineStrSection;
 			ElfSection*			fDebugFrameSection;
 			ElfSection*			fEHFrameSection;
 			ElfSection*			fDebugLocationSection;
+			ElfSection*			fDebugLocationListsSection;
 			ElfSection*			fDebugPublicTypesSection;
 			ElfSection*			fDebugTypesSection;
 			AbbreviationTableList fAbbreviationTables;

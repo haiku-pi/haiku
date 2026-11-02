@@ -502,11 +502,13 @@ DwarfFile::DwarfFile()
 	fDebugStringSection(NULL),
 	fDebugStrOffsetsSection(NULL),
 	fDebugRangesSection(NULL),
+	fDebugRangeListsSection(NULL),
 	fDebugLineSection(NULL),
 	fDebugLineStrSection(NULL),
 	fDebugFrameSection(NULL),
 	fEHFrameSection(NULL),
 	fDebugLocationSection(NULL),
+	fDebugLocationListsSection(NULL),
 	fDebugPublicTypesSection(NULL),
 	fDebugTypesSection(NULL),
 	fCompilationUnits(20),
@@ -536,11 +538,13 @@ DwarfFile::~DwarfFile()
 		debugInfoFile->PutSection(fDebugStringSection);
 		debugInfoFile->PutSection(fDebugStrOffsetsSection);
 		debugInfoFile->PutSection(fDebugRangesSection);
+		debugInfoFile->PutSection(fDebugRangeListsSection);
 		debugInfoFile->PutSection(fDebugLineSection);
 		debugInfoFile->PutSection(fDebugLineStrSection);
 		debugInfoFile->PutSection(fDebugFrameSection);
 		fElfFile->PutSection(fEHFrameSection);
 		debugInfoFile->PutSection(fDebugLocationSection);
+		debugInfoFile->PutSection(fDebugLocationListsSection);
 		debugInfoFile->PutSection(fDebugPublicTypesSection);
 		delete fElfFile;
 		delete fAlternateElfFile;
@@ -602,6 +606,7 @@ DwarfFile::Load(uint8 addressSize, bool isBigEndian, const BString& externalInfo
 	fDebugStringSection = debugInfoFile->GetSection(".debug_str");
 	fDebugStrOffsetsSection = debugInfoFile->GetSection(".debug_str_offsets");
 	fDebugRangesSection = debugInfoFile->GetSection(".debug_ranges");
+	fDebugRangeListsSection = debugInfoFile->GetSection(".debug_rnglists");
 	fDebugLineSection = debugInfoFile->GetSection(".debug_line");
 	fDebugLineStrSection = debugInfoFile->GetSection(".debug_line_str");
 	fDebugFrameSection = debugInfoFile->GetSection(".debug_frame");
@@ -629,6 +634,7 @@ DwarfFile::Load(uint8 addressSize, bool isBigEndian, const BString& externalInfo
 	}
 
 	fDebugLocationSection = debugInfoFile->GetSection(".debug_loc");
+	fDebugLocationListsSection = debugInfoFile->GetSection(".debug_loclists");
 	fDebugPublicTypesSection = debugInfoFile->GetSection(".debug_pubtypes");
 
 	if (fDebugInfoSection == NULL) {
@@ -1003,19 +1009,12 @@ DwarfFile::_ParseDebugInfoSection(uint8 _addressSize, bool isBigEndian)
 		}
 
 		int version = dataReader.Read<uint16>(0);
-		if (version >= 5) {
-			uint8 unitType = dataReader.Read<uint8>(0);
-			if (unitType != DW_UT_compile) {
-				WARNING("\"%s\": Unsupported unit type %d\n",
-					fName, unitType);
-				return B_UNSUPPORTED;
-			}
-		}
-
+		uint8 unitType = DW_UT_compile;
 		off_t abbrevOffset;
 		uint8 addressSize;
 
 		if (version >= 5) {
+			unitType = dataReader.Read<uint8>(0);
 			addressSize = dataReader.Read<uint8>(0);
 			abbrevOffset = dwarf64
 				? dataReader.Read<uint64>(0)
@@ -1033,14 +1032,16 @@ DwarfFile::_ParseDebugInfoSection(uint8 _addressSize, bool isBigEndian)
 			break;
 		}
 
-		TRACE_DIE("DWARF%d compilation unit: version %d, length: %" B_PRIu64
-			", abbrevOffset: %" B_PRIdOFF ", address size: %d\n",
-			dwarf64 ? 64 : 32, version, unitLength, abbrevOffset, addressSize);
+		TRACE_DIE("DWARF%d compilation unit: version %d, unit type: %d, "
+			"length: %" B_PRIu64 ", abbrevOffset: %" B_PRIdOFF
+			", address size: %d\n", dwarf64 ? 64 : 32, version, unitType,
+			unitLength, abbrevOffset, addressSize);
 
-		if (version < 2 || version > 4) {
+		if (version < 2 || version > 5) {
 			WARNING("\"%s\": Unsupported compilation unit version: %d\n",
 				fName, version);
-			break;
+			dataReader.SeekAbsolute(unitLengthOffset + unitLength);
+			continue;
 		}
 
 		if (addressSize != 4 && addressSize != 8) {
@@ -1050,20 +1051,61 @@ DwarfFile::_ParseDebugInfoSection(uint8 _addressSize, bool isBigEndian)
 		}
 		dataReader.SetAddressSize(addressSize);
 
-		off_t unitContentOffset = dataReader.Offset();
+		status_t error = B_OK;
+		switch (unitType) {
+			case DW_UT_compile:
+			case DW_UT_partial:
+			{
+				off_t unitContentOffset = dataReader.Offset();
 
-		// create a compilation unit object
-		CompilationUnit* unit = new(std::nothrow) CompilationUnit(
-			unitHeaderOffset, unitContentOffset,
-			unitLength + (unitLengthOffset - unitHeaderOffset),
-			abbrevOffset, addressSize, isBigEndian, dwarf64);
-		if (unit == NULL || !fCompilationUnits.AddItem(unit)) {
-			delete unit;
-			return B_NO_MEMORY;
+				// create a compilation unit object
+				CompilationUnit* unit = new(std::nothrow) CompilationUnit(
+					unitHeaderOffset, unitContentOffset,
+					unitLength + (unitLengthOffset - unitHeaderOffset),
+					abbrevOffset, addressSize, isBigEndian, dwarf64, version);
+				if (unit == NULL || !fCompilationUnits.AddItem(unit)) {
+					delete unit;
+					return B_NO_MEMORY;
+				}
+
+				// parse the debug info for the unit
+				error = _ParseCompilationUnit(unit);
+				break;
+			}
+
+			case DW_UT_type:
+			{
+				// DWARF 5 type units live in .debug_info
+				uint64 signature = dataReader.Read<uint64>(0);
+				off_t typeOffset = dwarf64
+					? dataReader.Read<uint64>(0)
+					: dataReader.Read<uint32>(0);
+				if (dataReader.HasOverflow()) {
+					WARNING("\"%s\": Unexpected end of data in type unit "
+						"header.\n", fName);
+					return B_OK;
+				}
+
+				TypeUnit* unit = new(std::nothrow) TypeUnit(unitHeaderOffset,
+					dataReader.Offset(),
+					unitLength + (unitLengthOffset - unitHeaderOffset),
+					abbrevOffset, typeOffset, addressSize, isBigEndian,
+					signature, dwarf64, version);
+				if (unit == NULL)
+					return B_NO_MEMORY;
+
+				error = _AddTypeUnit(unit);
+				break;
+			}
+
+			default:
+				// skeleton and split units refer to separate .dwo files,
+				// which we don't support (yet)
+				WARNING("\"%s\": Unsupported unit type: %d\n", fName,
+					unitType);
+				break;
 		}
 
-		// parse the debug info for the unit
-		status_t error = _ParseCompilationUnit(unit);
 		if (error != B_OK)
 			return error;
 
@@ -1123,6 +1165,7 @@ DwarfFile::_ParseTypesSection(uint8 _addressSize, bool isBigEndian)
 			signature, typeOffset);
 
 		if (version > 4) {
+			// DWARF 5 type units are in .debug_info
 			WARNING("\"%s\": Unsupported type unit version: %d\n",
 				fName, version);
 			break;
@@ -1139,28 +1182,39 @@ DwarfFile::_ParseTypesSection(uint8 _addressSize, bool isBigEndian)
 			unitHeaderOffset, unitContentOffset,
 			unitLength + (unitLengthOffset - unitHeaderOffset),
 			abbrevOffset, typeOffset, addressSize, isBigEndian,
-			signature, dwarf64);
+			signature, dwarf64, version);
 		if (unit == NULL)
 			return B_NO_MEMORY;
 
-		// parse the debug info for the unit
-		status_t error = _ParseTypeUnit(unit);
+		status_t error = _AddTypeUnit(unit);
 		if (error != B_OK)
 			return error;
 
-		// TODO: it should theoretically never happen that we get a duplicate,
-		// but it wouldn't hurt to check since that situation would potentially
-		// be problematic.
-		if (fTypeUnits.Lookup(signature) == NULL) {
-			TypeUnitTableEntry* entry = new(std::nothrow)
-				TypeUnitTableEntry(signature, unit);
-			if (entry == NULL)
-				return B_NO_MEMORY;
-
-			fTypeUnits.Insert(entry);
-		}
-
 		dataReader.SeekAbsolute(unitLengthOffset + unitLength);
+	}
+
+	return B_OK;
+}
+
+
+status_t
+DwarfFile::_AddTypeUnit(TypeUnit* unit)
+{
+	// parse the debug info for the unit
+	status_t error = _ParseTypeUnit(unit);
+	if (error != B_OK)
+		return error;
+
+	// TODO: it should theoretically never happen that we get a duplicate,
+	// but it wouldn't hurt to check since that situation would potentially
+	// be problematic.
+	if (fTypeUnits.Lookup(unit->Signature()) == NULL) {
+		TypeUnitTableEntry* entry = new(std::nothrow)
+			TypeUnitTableEntry(unit->Signature(), unit);
+		if (entry == NULL)
+			return B_NO_MEMORY;
+
+		fTypeUnits.Insert(entry);
 	}
 
 	return B_OK;
@@ -1338,7 +1392,7 @@ DwarfFile::_ParseTypeUnit(TypeUnit* unit)
 	unit->SetAbbreviationTable(abbreviationTable);
 
 	DataReader dataReader(
-		(const uint8*)fDebugTypesSection->Data() + unit->ContentOffset(),
+		(const uint8*)_UnitSection(unit)->Data() + unit->ContentOffset(),
 		unit->ContentSize(), unit->AddressSize(), unit->IsBigEndian());
 
 	DebugInfoEntry* entry;
@@ -1350,7 +1404,7 @@ DwarfFile::_ParseTypeUnit(TypeUnit* unit)
 
 	DIETypeUnit* unitEntry = dynamic_cast<DIETypeUnit*>(entry);
 	if (unitEntry == NULL) {
-		WARNING("No type unit entry in .debug_types section.\n");
+		WARNING("No type unit entry in type unit.\n");
 		return B_BAD_DATA;
 	}
 
@@ -1481,8 +1535,7 @@ DwarfFile::_FinishUnit(BaseUnit* unit)
 
 	AbbreviationTable* abbreviationTable = unit->GetAbbreviationTable();
 
-	ElfSection* section = isTypeUnit
-			? fDebugTypesSection : fDebugInfoSection;
+	ElfSection* section = _UnitSection(unit);
 	DataReader dataReader(
 		(const uint8*)section->Data() + unit->HeaderOffset(),
 		unit->TotalSize(), unit->AddressSize(), unit->IsBigEndian());
@@ -1559,28 +1612,41 @@ DwarfFile::_FinishUnit(BaseUnit* unit)
 }
 
 
+ElfSection*
+DwarfFile::_UnitSection(BaseUnit* unit) const
+{
+	// type units are in .debug_types before DWARF 5
+	return unit->Kind() == dwarf_unit_kind_type && unit->Version() < 5
+		? fDebugTypesSection : fDebugInfoSection;
+}
+
+
 status_t
 DwarfFile::_ReadStringIndirect(BaseUnit* unit, uint64 index, const char*& value) const
 {
-	if (fDebugStrOffsetsSection == NULL) {
+	if (fDebugStrOffsetsSection == NULL || fDebugStringSection == NULL) {
 		WARNING("Invalid DW_FORM_strx*: no debug_str_offsets section!\n");
 		return B_BAD_DATA;
 	}
 
-	uint64 strOffsetsBase = unit->IsDwarf64() ? 16 : 8;
+	// DW_AT_str_offsets_base points behind the header of the unit's
+	// contribution; without it assume the section's first contribution
 	uint64 offsetSize = unit->IsDwarf64() ? 8 : 4;
-
-	if (strOffsetsBase + index * offsetSize >= fDebugStrOffsetsSection->Size()) {
+	uint64 strOffsetsBase = unit->StrOffsetsBase() >= 0
+		? unit->StrOffsetsBase() : (unit->IsDwarf64() ? 16 : 8);
+	uint64 sectionSize = fDebugStrOffsetsSection->Size();
+	if (strOffsetsBase > sectionSize
+		|| index >= (sectionSize - strOffsetsBase) / offsetSize) {
 		WARNING("Invalid DW_FORM_strx* index: %" B_PRIu64 "\n", index);
 		return B_BAD_DATA;
 	}
 
-	const char *strOffsets = (const char*)fDebugStrOffsetsSection->Data() + strOffsetsBase;
-	uint64 offset = unit->IsDwarf64()
-		? ((uint64*)strOffsets)[index]
-		: ((uint32*)strOffsets)[index];
+	DataReader dataReader((const uint8*)fDebugStrOffsetsSection->Data()
+			+ strOffsetsBase + index * offsetSize, offsetSize,
+		unit->AddressSize(), unit->IsBigEndian());
+	uint64 offset = dataReader.ReadUInt(offsetSize, 0);
 
-	if (offset >= fDebugStringSection->Size()) {
+	if (offset >= (uint64)fDebugStringSection->Size()) {
 		WARNING("Invalid DW_FORM_strx* offset: %" B_PRIu64 "\n", offset);
 		return B_BAD_DATA;
 	}
@@ -1598,21 +1664,54 @@ DwarfFile::_ReadAddressIndirect(BaseUnit* unit, uint64 index, uint64& value) con
 		return B_BAD_DATA;
 	}
 
-	uint64 addrBase = unit->IsDwarf64() ? 16 : 8;
-
-	if (addrBase + index * unit->AddressSize() >= fDebugAddressSection->Size()) {
+	// DW_AT_addr_base points behind the header of the unit's contribution;
+	// without it assume the section's first contribution
+	uint64 addressSize = unit->AddressSize();
+	uint64 addrBase = unit->AddrBase() >= 0
+		? unit->AddrBase() : (unit->IsDwarf64() ? 16 : 8);
+	uint64 sectionSize = fDebugAddressSection->Size();
+	if (addrBase > sectionSize
+		|| index >= (sectionSize - addrBase) / addressSize) {
 		WARNING("Invalid DW_FORM_addrx* index: %" B_PRIu64 "\n", index);
 		return B_BAD_DATA;
 	}
 
-	const char *addrPtr = (const char*)fDebugAddressSection->Data()
-		+ addrBase + index * unit->AddressSize();
+	DataReader dataReader((const uint8*)fDebugAddressSection->Data()
+			+ addrBase + index * addressSize, addressSize,
+		unit->AddressSize(), unit->IsBigEndian());
+	value = dataReader.ReadAddress(0);
 
-	if (unit->AddressSize() == 8)
-		value = *(uint64*)addrPtr;
-	else
-		value = *(uint32*)addrPtr;
+	return B_OK;
+}
 
+
+status_t
+DwarfFile::_ReadListIndirect(BaseUnit* unit, ElfSection* section, off_t base,
+	uint64 index, uint64& _offset) const
+{
+	// DW_FORM_rnglistx/loclistx: an index into the offset array that follows
+	// the header of the unit's contribution to .debug_rnglists/loclists
+	// (DW_AT_rnglists_base/loclists_base); the offsets are relative to it
+	if (section == NULL) {
+		WARNING("Invalid DW_FORM_rnglistx/loclistx: no section!\n");
+		return B_BAD_DATA;
+	}
+
+	uint64 offsetSize = unit->IsDwarf64() ? 8 : 4;
+	if (base < 0)
+		base = unit->IsDwarf64() ? 20 : 12;
+	uint64 sectionSize = section->Size();
+	if ((uint64)base > sectionSize
+		|| index >= (sectionSize - base) / offsetSize) {
+		WARNING("Invalid DW_FORM_rnglistx/loclistx index: %" B_PRIu64 "\n",
+			index);
+		return B_BAD_DATA;
+	}
+
+	DataReader dataReader((const uint8*)section->Data() + base
+			+ index * offsetSize, offsetSize, unit->AddressSize(),
+		unit->IsBigEndian());
+	_offset = base + dataReader.ReadUInt(offsetSize, 0);
 	return B_OK;
 }
 
@@ -1730,8 +1829,18 @@ DwarfFile::_ParseEntryAttributes(DataReader& dataReader,
 				attributeValue.SetToFlag(true);
 				break;
 			case DW_FORM_strx:
+			case DW_FORM_strx1:
+			case DW_FORM_strx2:
+			case DW_FORM_strx3:
+			case DW_FORM_strx4:
 			{
-				uint64 index = dataReader.ReadUnsignedLEB128(0);
+				uint64 index = attributeForm == DW_FORM_strx
+					? dataReader.ReadUnsignedLEB128(0)
+					: dataReader.ReadUInt(attributeForm - DW_FORM_strx1 + 1, 0);
+				// The unit's DW_AT_str_offsets_base is known only after the
+				// first pass (entry == NULL), which needs no values.
+				if (entry == NULL)
+					break;
 				const char* strValue;
 				status_t res = _ReadStringIndirect(unit, index, strValue);
 				if (res != B_OK)
@@ -1740,13 +1849,49 @@ DwarfFile::_ParseEntryAttributes(DataReader& dataReader,
 				break;
 			}
 			case DW_FORM_addrx:
+			case DW_FORM_addrx1:
+			case DW_FORM_addrx2:
+			case DW_FORM_addrx3:
+			case DW_FORM_addrx4:
 			{
-				uint64 index = dataReader.ReadUnsignedLEB128(0);
+				uint64 index = attributeForm == DW_FORM_addrx
+					? dataReader.ReadUnsignedLEB128(0)
+					: dataReader.ReadUInt(attributeForm - DW_FORM_addrx1 + 1, 0);
+				if (entry == NULL)
+					break;
 				status_t res = _ReadAddressIndirect(unit, index, value);
 				if (res != B_OK)
 					return res;
 				break;
 			}
+			case DW_FORM_rnglistx:
+			case DW_FORM_loclistx:
+			{
+				uint64 index = dataReader.ReadUnsignedLEB128(0);
+				if (entry == NULL)
+					break;
+				status_t res = attributeForm == DW_FORM_rnglistx
+					? _ReadListIndirect(unit, fDebugRangeListsSection,
+						unit->RangeListsBase(), index, value)
+					: _ReadListIndirect(unit, fDebugLocationListsSection,
+						unit->LocationListsBase(), index, value);
+				if (res != B_OK)
+					return res;
+				break;
+			}
+			case DW_FORM_data16:
+				// a 16 byte constant, handled like a block
+				blockLength = 16;
+				break;
+			case DW_FORM_ref_sup4:
+			case DW_FORM_ref_sup8:
+			case DW_FORM_strp_sup:
+				// references into a supplementary object file, which we
+				// don't support: skip the value, ignore the attribute
+				dataReader.Skip(attributeForm == DW_FORM_ref_sup8 ? 8
+					: attributeForm == DW_FORM_ref_sup4 || !unit->IsDwarf64()
+						? 4 : 8);
+				continue;
 			case DW_FORM_line_strp:
 			{
 				if (fDebugLineStrSection != NULL) {
@@ -1767,7 +1912,9 @@ DwarfFile::_ParseEntryAttributes(DataReader& dataReader,
 				break;
 			}
 			case DW_FORM_ref_sig8:
-				fTypesSectionRequired = true;
+				// DWARF 5 type units are in .debug_info
+				if (unit->Version() < 5)
+					fTypesSectionRequired = true;
 				value = dataReader.Read<uint64>(0);
 				refType = dwarf_reference_type_signature;
 				break;
@@ -1779,32 +1926,6 @@ DwarfFile::_ParseEntryAttributes(DataReader& dataReader,
 					? dataReader.Read<uint64>(0)
 					: (uint64)dataReader.Read<uint32>(0);
 				break;
-			case DW_FORM_strx1:
-			case DW_FORM_strx2:
-			case DW_FORM_strx3:
-			case DW_FORM_strx4:
-			{
-				size_t numBytes = attributeForm - DW_FORM_strx1 + 1;
-				uint64 index = dataReader.ReadUInt(numBytes, 0);
-				const char* strValue;
-				status_t res = _ReadStringIndirect(unit, index, strValue);
-				if (res != B_OK)
-					return res;
-				attributeValue.SetToString(strValue);
-				break;
-			}
-			case DW_FORM_addrx1:
-			case DW_FORM_addrx2:
-			case DW_FORM_addrx3:
-			case DW_FORM_addrx4:
-			{
-				size_t numBytes = attributeForm - DW_FORM_addrx1 + 1;
-				uint64 index = dataReader.ReadUInt(numBytes, 0);
-				status_t res = _ReadAddressIndirect(unit, index, value);
-				if (res != B_OK)
-					return res;
-				break;
-			}
 			case DW_FORM_indirect:
 			default:
 				WARNING("Unsupported attribute form: %" B_PRIu32 "\n",
@@ -1817,11 +1938,32 @@ DwarfFile::_ParseEntryAttributes(DataReader& dataReader,
 		uint8 attributeClass = get_attribute_class(attributeName,
 			attributeForm);
 
+		// The DWARF 5 section contribution bases of the unit (attributes of
+		// the unit entry) are needed to read other attributes of the unit,
+		// including the unit entry's: record them in the first pass.
+		if (entry == NULL) {
+			switch (attributeName) {
+				case DW_AT_str_offsets_base:
+					unit->SetStrOffsetsBase(value);
+					break;
+				case DW_AT_addr_base:
+					unit->SetAddrBase(value);
+					break;
+				case DW_AT_rnglists_base:
+					unit->SetRangeListsBase(value);
+					break;
+				case DW_AT_loclists_base:
+					unit->SetLocationListsBase(value);
+					break;
+			}
+		}
+
 		if (attributeClass == ATTRIBUTE_CLASS_UNKNOWN) {
 			TRACE_DIE("skipping attribute with unrecognized class: %s (%#"
 				B_PRIx32 ") %s (%#" B_PRIx32 ")\n",
 				get_attribute_name_name(attributeName), attributeName,
 				get_attribute_form_name(attributeForm), attributeForm);
+			dataReader.Skip(blockLength);
 			continue;
 		}
 

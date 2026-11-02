@@ -25,7 +25,7 @@ public:
 									uint8 addressSize,
 									bool isBigEndian,
 									uint64 typeSignature,
-									bool isDwarf64);
+									bool isDwarf64, uint16 version);
 								~TypeUnit();
 
 			uint64				Signature() const	{ return fSignature; }

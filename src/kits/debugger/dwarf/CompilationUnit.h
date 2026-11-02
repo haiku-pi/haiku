@@ -25,7 +25,7 @@ public:
 									off_t totalSize,
 									off_t abbreviationOffset,
 									uint8 addressSize, bool isBigEndian,
-									bool isDwarf64);
+									bool isDwarf64, uint16 version);
 	virtual						~CompilationUnit();
 
 	inline	target_addr_t		MaxAddress() const;
