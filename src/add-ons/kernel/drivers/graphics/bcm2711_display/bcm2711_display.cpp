@@ -915,12 +915,19 @@ hide_overlay(display_info& info, uint32 plane)
 }
 
 
-static uint32
+static uint64
 overlay_extent(const bcm2711_display_overlay& request)
 {
-	const uint32 size = request.bytes_per_row * request.height;
+	const uint64 size = (uint64)request.bytes_per_row * request.height;
 	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV420)
 		return size + size / 2;
+	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV) {
+		// columns of the column height (bytes_per_row lines) of luma, the
+		// chroma (half of it) at chroma_offset: in the same columns or not
+		const uint64 columns = (request.width + 127) / 128;
+		const uint64 luma = columns * 128 * request.bytes_per_row;
+		return max_c(luma, request.chroma_offset + luma / 2);
+	}
 	return size;
 }
 
@@ -943,6 +950,7 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 		case BCM2711_DISPLAY_IMAGE_XRGB8888:
 		case BCM2711_DISPLAY_IMAGE_YUV422_YUYV:
 		case BCM2711_DISPLAY_IMAGE_YUV420:
+		case BCM2711_DISPLAY_IMAGE_YUV_UV:
 			break;
 		default:
 			return B_BAD_VALUE;
@@ -959,7 +967,9 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 		return B_BAD_VALUE;
 	}
 	// only what we handed out scans out
-	const uint32 extent = overlay_extent(request);
+	const uint64 extent = overlay_extent(request);
+	if (extent > kMaxOverlayBufferSize)
+		return B_BAD_VALUE;
 	if (find_overlay_buffer(info, request.physical, extent) == NULL)
 		return B_BAD_ADDRESS;
 
@@ -1024,7 +1034,7 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 	plane.width = request.width;
 	plane.height = request.height;
 	plane.pitch = request.bytes_per_row;
-	plane.vpitch = request.height;
+	plane.vpitch = request.vpitch != 0 ? request.vpitch : request.height;
 	plane.src_x = srcX;
 	plane.src_y = srcY;
 	plane.src_w = srcWidth;
@@ -1043,6 +1053,9 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 		plane.num_planes = 3;
 		plane.planes[1] = request.physical + lumaSize;
 		plane.planes[2] = plane.planes[1] + lumaSize / 4;
+	} else if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV) {
+		plane.num_planes = 2;
+		plane.planes[1] = request.physical + request.chroma_offset;
 	} else
 		plane.num_planes = 1;
 
