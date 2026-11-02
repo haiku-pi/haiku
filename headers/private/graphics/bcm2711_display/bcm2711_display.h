@@ -121,6 +121,10 @@ struct bcm2711_display_overlay_buffer {
 	// planar: Y, then U and V of half the pitch and height
 #define BCM2711_DISPLAY_IMAGE_XRGB8888		44
 #define BCM2711_DISPLAY_IMAGE_YUV422_YUYV	45
+#define BCM2711_DISPLAY_IMAGE_YUV_UV		19
+	// SAND128 NV12 (the HEVC decoder's output; experimental): columns of 128
+	// bytes, bytes_per_row is the column height in lines, the chroma at
+	// chroma_offset
 
 // the firmware's color encodings of YUV images
 #define BCM2711_DISPLAY_ENCODING_BT601		1
@@ -141,6 +145,11 @@ struct bcm2711_display_overlay {
 	uint16			height;
 	uint32			bytes_per_row;
 		// of the (first) plane
+	uint32			chroma_offset;
+		// BCM2711_DISPLAY_IMAGE_YUV_UV: from physical
+	uint32			vpitch;
+		// 0: the height (the firmware's "vpitch"; its meaning for SAND is
+		// unknown)
 	uint32			source_x;
 	uint32			source_y;
 	uint32			source_width;
