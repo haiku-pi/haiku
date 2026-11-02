@@ -83,8 +83,13 @@ arch_vm_translation_map_init(kernel_args* args, VMPhysicalPageMapper** _physical
 
 	*_physicalPageMapper = new (&sPhysicalPageMapperData) PMAPPhysicalPageMapper();
 
-	// Create an empty page table for use when we don't want a userspace page table.
+	// Create an empty page table for use when we don't want a userspace page
+	// table. Early pages are not cleared: whatever the RAM held would be walked
+	// as translation table entries (TTBR0 is installed for every kernel-only
+	// thread, and nothing disables walks through it).
 	sEmptyTable = vm_allocate_early_physical_page(args) << PAGE_SHIFT;
+	memset((void*)(KERNEL_PMAP_BASE + sEmptyTable), 0, B_PAGE_SIZE);
+	asm volatile("dsb ish" ::: "memory");
 
 	return B_OK;
 }
