@@ -17,46 +17,9 @@
    Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
    02111-1307 USA.  */
 
-#include <math.h>
-#include <wchar.h>
+/* The actual implementation for all floating point sizes is in strtod.c;
+   strtold.c configures it for the `long double' format.  */
 
-#ifndef __NO_LONG_DOUBLE_MATH
-/* The actual implementation for all floating point sizes is in strtod.c.
-   These macros tell it to produce the `long double' version, `wcstold'.  */
+#define	USE_WIDE_CHAR	1
 
-# define FLOAT		long double
-# define FLT		LDBL
-# ifdef USE_IN_EXTENDED_LOCALE_MODEL
-#  define STRTOF	__wcstold_l
-# else
-#  define STRTOF	wcstold
-# endif
-# define MPN2FLOAT	__mpn_construct_long_double
-# define FLOAT_HUGE_VAL	HUGE_VALL
-# define USE_WIDE_CHAR	1
-# define SET_MANTISSA(flt, mant) \
-  do { union ieee854_long_double u;					      \
-       u.d = (flt);							      \
-       if ((mant & 0x7fffffffffffffffULL) == 0)				      \
-	 mant = 0x4000000000000000ULL;					      \
-       u.ieee.mantissa0 = (((mant) >> 32) & 0x7fffffff) | 0x80000000;	      \
-       u.ieee.mantissa1 = (mant) & 0xffffffff;				      \
-       (flt) = u.d;							      \
-  } while (0)
-
-# include <stdlib/strtod.c>
-#else
-/* There is no `long double' type, use the `double' implementations.  */
-long double
-__wcstold_internal (const wchar_t *nptr, wchar_t **endptr, int group)
-{
-  return __wcstod_internal (nptr, endptr, group);
-}
-libc_hidden_def (__wcstold_internal)
-
-long double
-wcstold (const wchar_t *nptr, wchar_t **endptr)
-{
-  return __wcstod_internal (nptr, endptr, 0);
-}
-#endif
+#include <stdlib/strtold.c>
