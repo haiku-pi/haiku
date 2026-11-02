@@ -215,8 +215,8 @@ round_and_return (mp_limb_t *retval, int exponent, int negative,
 
       if (shift > MANT_DIG)
 	{
-	  __set_errno (EDOM);
-	  return 0.0;
+	  __set_errno (ERANGE);
+	  return negative ? -0.0 : 0.0;
 	}
 
       more_bits |= (round_limb & ((((mp_limb_t) 1) << round_bit) - 1)) != 0;
@@ -860,7 +860,7 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
 		    {
 		      /* Overflow or underflow.  */
 		      __set_errno (ERANGE);
-		      result = (exp_negative ? 0.0 :
+		      result = (exp_negative ? (negative ? -0.0 : 0.0) :
 				negative ? -FLOAT_HUGE_VAL : FLOAT_HUGE_VAL);
 		    }
 
@@ -1039,7 +1039,7 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
   if (exponent < MIN_10_EXP - (DIG + 1))
     {
       __set_errno (ERANGE);
-      return 0.0;
+      return negative ? -0.0 : 0.0;
     }
 
   if (int_no > 0)
