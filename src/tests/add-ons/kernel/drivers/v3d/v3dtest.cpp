@@ -21,6 +21,15 @@
 		orphan  submits a hanging job and exits without cleaning up; a
 		        later "areas" shows whether the driver freed everything
 		areas   prints the number of kernel areas of BOs
+		burst   eight clear jobs submitted at once, then checked: with
+		        concurrent queues the binner runs ahead of the renderer
+		overlap a render list that hangs, then a clear job: with
+		        concurrent queues the clear's binner list runs while the
+		        render list hangs, serialised only after the watchdog
+		        dropped it; the clear is right, the GPU resets once
+		restart a render list and a binner list that both hang: the GPU
+		        resets twice (with concurrent queues the first reset
+		        drops one and starts the other over), then a clear works
 		-d      also writes every line to the syslog (/dev/dprintf)
 	Exit status: 0 if every check passed.
 */
@@ -48,6 +57,13 @@ static const uint32 kHeight = 64;
 static const uint32 kPixels = kWidth * kHeight;
 static const uint32 kStride = kWidth * 4;
 static const uint32 kSentinel = 0xdeadbeef;
+
+// clear_job_submit(): which list never finishes
+enum {
+	kHangNone = 0,
+	kHangBinner,
+	kHangRender,
+};
 
 // 1 tile of 64x64: tile allocation = align(128 B per tile, 4 KiB) + 8 KiB
 // (Mesa v3d_tile_alloc_sizes()), tile state = 256 B per tile.
@@ -373,12 +389,19 @@ build_generic_tile_list(ControlList& list, uint32 target)
 
 
 /*!	The render list of a clear-only frame (Mesa v3dX(emit_rcl)() for V3D 4.2,
-	one 64x64 tile, one supertile).
+	one 64x64 tile, one supertile). With \a hang it waits for a semaphore
+	first and never gets further.
 */
 static void
 build_render_list(ControlList& list, uint32 color, uint32 tileAlloc,
-	uint32 genericStart, uint32 genericEnd)
+	uint32 genericStart, uint32 genericEnd, bool hang)
 {
+	if (hang) {
+		// a semaphore only a binner list could increment (see
+		// build_binner_list())
+		emit(list, kWaitOnSemaphore, 1);
+	}
+
 	// Tile rendering mode: "Common" must come first, "ZS clear values" last.
 	uint8* fields = emit(list, kTileRenderingModeConfig, 9);
 	set_field(fields, 0, 4, 0);
@@ -459,6 +482,8 @@ struct ClearJob {
 	Buffer	tile_state;
 	Buffer	target;
 	uint32	color;
+	uint32	binner_length;
+	uint32	render_length;
 };
 
 
@@ -473,8 +498,48 @@ clear_job_destroy(ClearJob& job)
 }
 
 
+/*!	Writes the job's render list for \a color. */
+static void
+clear_job_write_render_list(ClearJob& job, uint32 color, bool hang = false)
+{
+	ControlList render = {}, generic = {};
+	const uint32 genericStart = job.render.gpu_address + kGenericListOffset;
+	build_generic_tile_list(generic, job.target.gpu_address);
+	build_render_list(render, color, job.tile_alloc.gpu_address, genericStart,
+		genericStart + generic.length, hang);
+	memcpy(job.render.data, render.data, render.length);
+	memcpy(job.render.data + kGenericListOffset, generic.data,
+		generic.length);
+	job.color = color;
+	job.render_length = render.length;
+	// The lists reach memory before the GPU reads them.
+	__asm__ __volatile__("dsb sy" : : : "memory");
+}
+
+
 static int
-clear_job_submit(ClearJob& job, uint32 color, uint32 outSync, bool hang)
+clear_job_submit_lists(ClearJob& job, uint32 outSync)
+{
+	uint32 handles[5] = { job.binner.handle, job.render.handle,
+		job.tile_alloc.handle, job.tile_state.handle, job.target.handle };
+
+	drm_v3d_submit_cl submit = {};
+	submit.bcl_start = job.binner.gpu_address;
+	submit.bcl_end = job.binner.gpu_address + job.binner_length;
+	submit.rcl_start = job.render.gpu_address;
+	submit.rcl_end = job.render.gpu_address + job.render_length;
+	submit.qma = job.tile_alloc.gpu_address;
+	submit.qms = job.tile_alloc.size;
+	submit.qts = job.tile_state.gpu_address;
+	submit.bo_handles = (uint64)(addr_t)handles;
+	submit.bo_handle_count = 5;
+	submit.out_sync = outSync;
+	return drm_ioctl(DRM_IOCTL_V3D_SUBMIT_CL, &submit);
+}
+
+
+static int
+clear_job_submit(ClearJob& job, uint32 color, uint32 outSync, int hang)
 {
 	memset(&job, 0, sizeof(job));
 	job.color = color;
@@ -497,35 +562,14 @@ clear_job_submit(ClearJob& job, uint32 color, uint32 outSync, bool hang)
 	for (uint32 i = 0; i < kPixels; i++)
 		pixels[i] = kSentinel;
 
-	ControlList binner = {}, render = {}, generic = {};
-	build_binner_list(binner, hang);
-	const uint32 genericStart = job.render.gpu_address + kGenericListOffset;
-	build_generic_tile_list(generic, job.target.gpu_address);
-	build_render_list(render, color, job.tile_alloc.gpu_address, genericStart,
-		genericStart + generic.length);
-
+	ControlList binner = {};
+	build_binner_list(binner, hang == kHangBinner);
 	memcpy(job.binner.data, binner.data, binner.length);
-	memcpy(job.render.data, render.data, render.length);
-	memcpy(job.render.data + kGenericListOffset, generic.data,
-		generic.length);
-	// The lists and the sentinel reach memory before the GPU reads them.
-	__asm__ __volatile__("dsb sy" : : : "memory");
+	job.binner_length = binner.length;
+	// (its barrier also covers the sentinel)
+	clear_job_write_render_list(job, color, hang == kHangRender);
 
-	uint32 handles[5] = { job.binner.handle, job.render.handle,
-		job.tile_alloc.handle, job.tile_state.handle, job.target.handle };
-
-	drm_v3d_submit_cl submit = {};
-	submit.bcl_start = job.binner.gpu_address;
-	submit.bcl_end = job.binner.gpu_address + binner.length;
-	submit.rcl_start = job.render.gpu_address;
-	submit.rcl_end = job.render.gpu_address + render.length;
-	submit.qma = job.tile_alloc.gpu_address;
-	submit.qms = job.tile_alloc.size;
-	submit.qts = job.tile_state.gpu_address;
-	submit.bo_handles = (uint64)(addr_t)handles;
-	submit.bo_handle_count = 5;
-	submit.out_sync = outSync;
-	error = drm_ioctl(DRM_IOCTL_V3D_SUBMIT_CL, &submit);
+	error = clear_job_submit_lists(job, outSync);
 	if (error != 0)
 		clear_job_destroy(job);
 	return error;
@@ -688,7 +732,7 @@ run_clear(uint32 color, uint32 outSync, const char* label)
 {
 	ClearJob job;
 	const bigtime_t start = system_time();
-	int error = clear_job_submit(job, color, outSync, false);
+	int error = clear_job_submit(job, color, outSync, kHangNone);
 	if (!check(error == 0, "%s: submit: %s", label, strerror(error)))
 		return false;
 
@@ -717,7 +761,7 @@ static void
 test_wait()
 {
 	ClearJob job;
-	int error = clear_job_submit(job, 0xff0000ff, 0, false);
+	int error = clear_job_submit(job, 0xff0000ff, 0, kHangNone);
 	if (!check(error == 0, "wait: submit: %s", strerror(error)))
 		return;
 
@@ -813,7 +857,7 @@ test_syncobj()
 	// A job's out-sync, waited for with an absolute deadline.
 	error = syncobj_array(DRM_IOCTL_SYNCOBJ_RESET, syncobj);
 	ClearJob job;
-	error = clear_job_submit(job, 0x00ff00ff, syncobj, false);
+	error = clear_job_submit(job, 0x00ff00ff, syncobj, kHangNone);
 	if (check(error == 0, "syncobj: submit: %s", strerror(error))) {
 		error = syncobj_wait(syncobj, 0, monotonic_ns(2000000));
 		const uint32 bad = clear_job_check(job);
@@ -837,7 +881,7 @@ test_hang()
 		DRM_V3D_PARAM_GLOBAL_RESET_COUNTER, &error);
 
 	ClearJob job;
-	error = clear_job_submit(job, 0x11223344, 0, true);
+	error = clear_job_submit(job, 0x11223344, 0, kHangBinner);
 	if (!check(error == 0, "hang: submit: %s", strerror(error)))
 		return;
 
@@ -861,11 +905,176 @@ test_hang()
 }
 
 
+/*!	Eight jobs in flight at once, each checked afterwards: the queues keep
+	them apart however they overlap.
+*/
+static void
+test_burst()
+{
+	static const uint32 kJobs = 8;
+	ClearJob jobs[kJobs];
+	uint32 submitted = 0;
+	const bigtime_t start = system_time();
+	for (; submitted < kJobs; submitted++) {
+		const uint32 color = 0x01020304u * (submitted + 1) | 0xff000000u;
+		int error = clear_job_submit(jobs[submitted], color, 0,
+			kHangNone);
+		if (!check(error == 0, "burst: submit %" B_PRIu32 ": %s", submitted,
+				strerror(error))) {
+			break;
+		}
+	}
+	const bigtime_t queued = system_time() - start;
+
+	uint32 good = 0;
+	for (uint32 i = 0; i < submitted; i++) {
+		int error = wait_bo(jobs[i].target.handle, 2000000000ull);
+		if (error == 0 && clear_job_check(jobs[i]) == 0)
+			good++;
+		else
+			report("burst: job %" B_PRIu32 ": wait %s", i, strerror(error));
+	}
+	check(good == kJobs, "burst: %" B_PRIu32 " of %" B_PRIu32 " jobs right, "
+		"queued in %" B_PRId64 " us, all done after %" B_PRId64 " us", good,
+		kJobs, queued, system_time() - start);
+	for (uint32 i = 0; i < submitted; i++)
+		clear_job_destroy(jobs[i]);
+}
+
+
+/*!	Whether the binner has written into the job's tile buffers (they are
+	created zeroed).
+*/
+static bool
+binner_wrote(const ClearJob& job)
+{
+	const Buffer* buffers[2] = { &job.tile_alloc, &job.tile_state };
+	for (int32 b = 0; b < 2; b++) {
+		const volatile uint32* words = (const volatile uint32*)buffers[b]->data;
+		for (uint32 i = 0; i < buffers[b]->size / 4; i++) {
+			if (words[i] != 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+
+/*!	The binner does not wait for an unrelated render list: a clear job
+	after a job whose render list hangs. With concurrent queues the clear's
+	binner list runs at once (its tile buffers fill), serialised only after
+	the watchdog dropped the hung job; its render list waits for that
+	either way (render lists run in submission order). The clear's pixels
+	are right and the GPU resets once.
+*/
+static void
+test_overlap()
+{
+	int error;
+	const uint64 resetsBefore = get_param(
+		DRM_V3D_PARAM_GLOBAL_RESET_COUNTER, &error);
+
+	// Can the binner's writes be seen at all?
+	ClearJob probe;
+	error = clear_job_submit(probe, 0x10203040, 0, kHangNone);
+	if (!check(error == 0, "overlap: submit: %s", strerror(error)))
+		return;
+	error = wait_bo(probe.target.handle, 2000000000ull);
+	const bool observable = binner_wrote(probe);
+	check(error == 0 && clear_job_check(probe) == 0, "overlap: probe job (%s)",
+		strerror(error));
+	clear_job_destroy(probe);
+	if (!observable)
+		report("overlap: the binner leaves the tile buffers zero, no verdict");
+
+	ClearJob hang, clear;
+	error = clear_job_submit(hang, 0x11223344, 0, kHangRender);
+	if (!check(error == 0, "overlap: submit the hanging job: %s",
+			strerror(error))) {
+		return;
+	}
+	const bigtime_t start = system_time();
+	error = clear_job_submit(clear, 0x5060708f, 0, kHangNone);
+	if (check(error == 0, "overlap: submit the clear: %s", strerror(error))) {
+		bigtime_t binned = -1;
+		while (observable && system_time() - start < 300000) {
+			if (binner_wrote(clear)) {
+				binned = system_time() - start;
+				break;
+			}
+			snooze(500);
+		}
+		if (observable && binned >= 0) {
+			report("overlap: the clear's binner list ran after %" B_PRId64
+				" us, beside the hung render list: concurrent queues", binned);
+		} else if (observable) {
+			report("overlap: the clear's binner list did not run beside the "
+				"hung render list: serial queues");
+		}
+
+		error = wait_bo(clear.target.handle, 5000000000ull);
+		const uint32 bad = clear_job_check(clear);
+		check(error == 0 && bad == 0, "overlap: clear after %" B_PRId64
+			" ms, %" B_PRIu32 "/%" B_PRIu32 " pixels (%s)",
+			(system_time() - start) / 1000, kPixels - bad, kPixels,
+			strerror(error));
+		clear_job_destroy(clear);
+	}
+
+	error = wait_bo(hang.target.handle, 5000000000ull);
+	check(error == 0, "overlap: watchdog ended the hung job (%s)",
+		strerror(error));
+	const uint64 resetsAfter = get_param(DRM_V3D_PARAM_GLOBAL_RESET_COUNTER);
+	check(resetsAfter == resetsBefore + 1, "overlap: GPU resets %" B_PRIu64
+		" -> %" B_PRIu64, resetsBefore, resetsAfter);
+	clear_job_destroy(hang);
+}
+
+
+/*!	Two jobs that hang, a render list and a binner list. Serialised, each
+	wedges the GPU in turn. With concurrent queues both run at once: the
+	first reset drops one and starts the other over, which wedges again and
+	is dropped by the second reset (a job starts over only once). Either
+	way: two resets, both jobs end, and then a clear works.
+*/
+static void
+test_restart()
+{
+	int error;
+	const uint64 resetsBefore = get_param(
+		DRM_V3D_PARAM_GLOBAL_RESET_COUNTER, &error);
+
+	ClearJob render, binner;
+	error = clear_job_submit(render, 0x11223344, 0, kHangRender);
+	if (!check(error == 0, "restart: submit: %s", strerror(error)))
+		return;
+	error = clear_job_submit(binner, 0x44332211, 0, kHangBinner);
+	if (!check(error == 0, "restart: submit: %s", strerror(error))) {
+		clear_job_destroy(render);
+		return;
+	}
+
+	const bigtime_t start = system_time();
+	error = wait_bo(render.target.handle, 5000000000ull);
+	const int error2 = wait_bo(binner.target.handle, 5000000000ull);
+	check(error == 0 && error2 == 0, "restart: both jobs ended after %"
+		B_PRId64 " ms (%s, %s)", (system_time() - start) / 1000,
+		strerror(error), strerror(error2));
+	const uint64 resetsAfter = get_param(DRM_V3D_PARAM_GLOBAL_RESET_COUNTER);
+	check(resetsAfter == resetsBefore + 2, "restart: GPU resets %" B_PRIu64
+		" -> %" B_PRIu64, resetsBefore, resetsAfter);
+	clear_job_destroy(binner);
+	clear_job_destroy(render);
+
+	run_clear(0x55aa55aa, 0, "clear after resets");
+}
+
+
 static void
 test_orphan()
 {
 	ClearJob job;
-	int error = clear_job_submit(job, 0x11223344, 0, true);
+	int error = clear_job_submit(job, 0x11223344, 0, kHangBinner);
 	check(error == 0, "orphan: submitted a hanging job, exiting without "
 		"cleaning up (%s)", strerror(error));
 	// The team's death closes the device; its areas go with it.
@@ -877,7 +1086,7 @@ static void
 usage()
 {
 	fprintf(stderr, "usage: v3dtest [-d] [all|info|bo|clear|wait|syncobj|"
-		"hang|orphan|areas]...\n"
+		"hang|orphan|areas|burst|overlap|restart]...\n"
 		"  -d  also log to the syslog\n"
 		"  all = info bo clear wait syncobj (the default)\n");
 	exit(2);
@@ -925,6 +1134,12 @@ main(int argc, char** argv)
 			test_hang();
 		if (strcmp(test, "orphan") == 0)
 			test_orphan();
+		if (strcmp(test, "burst") == 0)
+			test_burst();
+		if (strcmp(test, "overlap") == 0)
+			test_overlap();
+		if (strcmp(test, "restart") == 0)
+			test_restart();
 		if (strcmp(test, "areas") == 0)
 			report("%" B_PRId32 " BO areas", count_bo_areas());
 		else
@@ -932,7 +1147,9 @@ main(int argc, char** argv)
 		if (!all && strcmp(test, "info") != 0 && strcmp(test, "bo") != 0
 			&& strcmp(test, "clear") != 0 && strcmp(test, "wait") != 0
 			&& strcmp(test, "syncobj") != 0 && strcmp(test, "hang") != 0
-			&& strcmp(test, "areas") != 0) {
+			&& strcmp(test, "areas") != 0 && strcmp(test, "burst") != 0
+			&& strcmp(test, "overlap") != 0
+			&& strcmp(test, "restart") != 0) {
 			usage();
 		}
 	}
