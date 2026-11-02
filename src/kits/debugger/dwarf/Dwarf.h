@@ -368,7 +368,11 @@ enum {
 	DW_OP_convert				= 0xa8,
 	DW_OP_reinterpret			= 0xa9,
 	DW_OP_lo_user				= 0xe0,
-	DW_OP_hi_user				= 0xff
+	DW_OP_hi_user				= 0xff,
+
+	// extensions (the GNU forms of DWARF 5's operations)
+	DW_OP_GNU_implicit_pointer	= 0xf2,
+	DW_OP_GNU_entry_value		= 0xf3
 };
 
 // base type

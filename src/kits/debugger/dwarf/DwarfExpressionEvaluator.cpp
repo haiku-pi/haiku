@@ -53,6 +53,14 @@ DwarfExpressionEvaluationContext::~DwarfExpressionEvaluationContext()
 }
 
 
+bool
+DwarfExpressionEvaluationContext::GetIndexedAddress(uint64 index,
+	target_addr_t& _address)
+{
+	return false;
+}
+
+
 // #pragma mark - EvaluationException
 
 
@@ -632,6 +640,38 @@ DwarfExpressionEvaluator::_Evaluate(ValuePieceLocation* _piece)
 			case DW_OP_nop:
 				TRACE_EXPR("  DW_OP_nop\n");
 				break;
+
+			case DW_OP_addrx:
+			case DW_OP_constx:
+			{
+				uint64 index = fDataReader.ReadUnsignedLEB128(0);
+				TRACE_EXPR("  DW_OP_%s(%" B_PRIu64 ")\n",
+					opcode == DW_OP_addrx ? "addrx" : "constx", index);
+				target_addr_t value;
+				if (fDataReader.HasOverflow()
+					|| !fContext->GetIndexedAddress(index, value)) {
+					throw EvaluationException("failed to get indexed address");
+				}
+				// an address is relocated, a constant (e.g. a TLS offset) not
+				if (opcode == DW_OP_addrx)
+					value += fContext->RelocationDelta();
+				_Push(value);
+				break;
+			}
+
+			case DW_OP_entry_value:
+			case DW_OP_GNU_entry_value:
+				// The value an expression had on entry of the function.
+				// Mostly a register that is no longer known, recovering it
+				// would need the caller's call site parameters: unavailable.
+				TRACE_EXPR("  DW_OP_entry_value\n");
+				return B_UNSUPPORTED;
+
+			case DW_OP_implicit_pointer:
+			case DW_OP_GNU_implicit_pointer:
+				// a pointer to an object that was optimized away
+				TRACE_EXPR("  DW_OP_implicit_pointer\n");
+				return B_UNSUPPORTED;
 
 			case DW_OP_implicit_value:
 			{

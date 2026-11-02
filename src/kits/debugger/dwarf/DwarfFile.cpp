@@ -169,6 +169,12 @@ public:
 			fInstructionPointer, _block, _size);
 	}
 
+	virtual bool GetIndexedAddress(uint64 index, target_addr_t& _address)
+	{
+		return fUnit != NULL
+			&& fFile->_ReadAddressIndirect(fUnit, index, _address) == B_OK;
+	}
+
 private:
 	DwarfFile*			fFile;
 	CompilationUnit*	fUnit;
