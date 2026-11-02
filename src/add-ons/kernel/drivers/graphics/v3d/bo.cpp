@@ -30,6 +30,7 @@
 #include <util/AutoLock.h>
 #include <vm/vm.h>
 #include <vm/VMAddressSpace.h>
+#include <vm/VMTranslationMap.h>
 
 
 static const size_t kMaxBOSize = 512 * 1024 * 1024;
@@ -250,6 +251,32 @@ gem_close(v3d_file* file, drm_gem_close* args)
 }
 
 
+/*!	Whether every page of the kernel range is mapped. get_memory_map() panics
+	on a page that is not, and a locked range need not be mapped: for a
+	B_CONTIGUOUS or B_FULL_LOCK area lock_memory_etc() takes it to be, but a
+	clone of a B_CONTIGUOUS area used to be mapped lazily (vm_clone_area()).
+	A client's range must never get us there.
+*/
+static bool
+kernel_range_mapped(const void* address, size_t size)
+{
+	VMTranslationMap* map = VMAddressSpace::Kernel()->TranslationMap();
+	map->Lock();
+	bool mapped = true;
+	for (size_t offset = 0; offset < size; offset += B_PAGE_SIZE) {
+		phys_addr_t physical;
+		uint32 flags;
+		if (map->Query((addr_t)address + offset, &physical, &flags) != B_OK
+			|| (flags & PAGE_PRESENT) == 0) {
+			mapped = false;
+			break;
+		}
+	}
+	map->Unlock();
+	return mapped;
+}
+
+
 /*!	A range of the calling team's memory as a BO (a Haiku extension): the
 	GPU renders straight into, say, a BBitmap. The range need not be page
 	aligned: offset is the GPU address of its first byte.
@@ -308,6 +335,14 @@ import_memory(v3d_file* file, drm_v3d_haiku_import_memory* args)
 		delete_area(bo->imported_area);
 		free(bo);
 		return status;
+	}
+	if (!kernel_range_mapped(bo->address, size)) {
+		ERROR("cannot import memory: pages of area %" B_PRId32 " are not "
+			"mapped\n", source);
+		unlock_memory_etc(bo->imported_team, bo->address, size, B_READ_DEVICE);
+		delete_area(bo->imported_area);
+		free(bo);
+		return B_BAD_ADDRESS;
 	}
 
 	MutexLocker locker(device->lock);
