@@ -2567,8 +2567,10 @@ vm_clone_area(team_id team, const char* name, void** address,
 		cache->AcquireRefLocked();
 	}
 
-	if (newArea->wiring == B_FULL_LOCK) {
-		// we need to map in everything at this point
+	if (newArea->wiring == B_FULL_LOCK || newArea->wiring == B_CONTIGUOUS) {
+		// we need to map in everything at this point: the pages of a wired
+		// area are never faulted in (lock_memory_etc() and get_memory_map()
+		// take them to be mapped)
 		if (sourceArea->cache_type == CACHE_TYPE_DEVICE) {
 			// we don't have actual pages to map but a physical area
 			uint32 memoryType = sourceArea->MemoryType();
