@@ -20,7 +20,9 @@
 
 /* Configuration part.  These macros are defined by `strtold.c',
    `strtof.c', `wcstod.c', `wcstold.c', and `wcstof.c' to produce the
-   `long double' and `float' versions of the reader.  */
+   `long double' and `float' versions of the reader.  SET_MANTISSA puts
+   the number of a `nan(n-char-sequence)' into the payload of the quiet
+   NaN FLT, keeping its quiet bit.  */
 #ifndef FLOAT
 # define FLOAT		double
 # define FLT		DBL
@@ -42,10 +44,8 @@
 # define SET_MANTISSA(flt, mant) \
   do { union ieee754_double u;						      \
        u.d = (flt);							      \
-       if ((mant & 0xfffffffffffffULL) == 0)				      \
-	 mant = 0x8000000000000ULL;					      \
-       u.ieee.mantissa0 = ((mant) >> 32) & 0xfffff;			      \
-       u.ieee.mantissa1 = (mant) & 0xffffffff;				      \
+       u.ieee_nan.mantissa0 = ((mant) >> 32) & 0x7ffff;			      \
+       u.ieee_nan.mantissa1 = (mant) & 0xffffffff;			      \
        (flt) = u.d;							      \
   } while (0)
 #endif
@@ -228,7 +228,10 @@ round_and_return (mp_limb_t *retval, int exponent, int negative,
 
 	  round_limb = retval[RETURN_LIMB_SIZE - 1];
 	  round_bit = (MANT_DIG - 1) % BITS_PER_MP_LIMB;
-	  for (i = 0; i < RETURN_LIMB_SIZE; ++i)
+	  /* The bits below ROUND_BIT in ROUND_LIMB are checked when
+	     rounding; the round bit itself must not count here, or a tie
+	     would always round up.  */
+	  for (i = 0; i < RETURN_LIMB_SIZE - 1; ++i)
 	    more_bits |= retval[i] != 0;
 	  MPN_ZERO (retval, RETURN_LIMB_SIZE);
 	}
@@ -614,6 +617,8 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
 		cp = startp;
 	      else
 		{
+		  /* The subject sequence ends after the closing brace.  */
+		  ++cp;
 		  /* This is a system-dependent way to specify the
 		     bitmask used for the NaN.  We expect it to be
 		     a number which is put in the mantissa of the
@@ -622,7 +627,7 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
 		  unsigned long long int mant;
 
 		  mant = STRTOULL (startp + 1, &endp, 0);
-		  if (endp == cp)
+		  if (endp == cp - 1)
 		    SET_MANTISSA (retval, mant);
 		}
 	    }
@@ -630,7 +635,7 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
 	  if (endptr != NULL)
 	    *endptr = (STRING_TYPE *) cp;
 
-	  return retval;
+	  return negative ? -retval : retval;
 	}
 
       /* It is really a text we do not recognize.  */
@@ -707,7 +712,8 @@ INTERNAL (STRTOF) (nptr, endptr, group LOCALE_PARAM)
       tp = correctly_grouped_prefix (start_of_digits, cp, thousands, grouping);
       /* If TP is at the start of the digits, there was no correctly
 	 grouped prefix of the string; so no number found.  */
-      RETURN (0.0, tp == start_of_digits ? (base == 16 ? cp - 1 : nptr) : tp);
+      RETURN (negative ? -0.0 : 0.0,
+	      tp == start_of_digits ? (base == 16 ? cp - 1 : nptr) : tp);
     }
 
   /* Remember first significant digit and read following characters until the
