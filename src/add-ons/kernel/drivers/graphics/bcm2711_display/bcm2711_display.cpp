@@ -174,10 +174,14 @@ struct display_info {
 
 	struct overlay_memory {
 		area_id		area;		// < 0: unused slot
+			// a physical mapping of the memory (what clients see)
+		area_id		backing;
+			// the memory: contiguous pages, mapped by the kernel only
 		void*		address;
 		phys_addr_t	physical;
 		size_t		size;
-		bool		reserved;	// kept for the next allocation when freed
+		bool		reserved;
+			// allocated when the device was opened
 		bool		in_use;
 	} overlay_buffers[kMaxOverlayBuffers];
 
@@ -759,6 +763,60 @@ reserve_mode_buffer(display_info& info)
 //	#pragma mark - overlays
 
 
+/*!	Allocates an overlay buffer: contiguous memory below kScanOutLimit, and a
+	physical mapping of it that clients see, write-combining, which every
+	team may access (the overlay API gives the clients its address as it is)
+	and clone. A clone of a physical mapping is mapped in full and keeps its
+	memory type; a clone of the contiguous area itself would be mapped by
+	faults, which the GPU driver's import (lock_memory_etc(), then
+	get_memory_map()) does not expect.
+*/
+static status_t
+create_overlay_memory(display_info::overlay_memory& buffer, size_t size)
+{
+	void* backingAddress;
+	buffer.backing = create_scan_out_area("bcm2711 display overlay memory",
+		size, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, &backingAddress,
+		&buffer.physical);
+	if (buffer.backing < 0) {
+		status_t status = buffer.backing;
+		buffer.backing = -1;
+		buffer.area = -1;
+		return status;
+	}
+
+	buffer.area = map_physical_memory("bcm2711 display overlay buffer",
+		buffer.physical, size, B_ANY_KERNEL_ADDRESS,
+		B_READ_AREA | B_WRITE_AREA | B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA
+			| B_CLONEABLE_AREA, &buffer.address);
+	status_t status = buffer.area >= 0 ? B_OK : buffer.area;
+	if (status == B_OK) {
+		status = vm_set_area_memory_type(buffer.area, buffer.physical,
+			B_WRITE_COMBINING_MEMORY);
+		if (status != B_OK)
+			delete_area(buffer.area);
+	}
+	if (status != B_OK) {
+		delete_area(buffer.backing);
+		buffer.backing = -1;
+		buffer.area = -1;
+		return status;
+	}
+	buffer.size = size;
+	return B_OK;
+}
+
+
+static void
+delete_overlay_memory(display_info::overlay_memory& buffer)
+{
+	delete_area(buffer.area);
+	delete_area(buffer.backing);
+	buffer.area = -1;
+	buffer.backing = -1;
+}
+
+
 /*!	Hands out an overlay buffer of at least \a size bytes: a reserved one
 	that fits, or a new one. Either is a kernel area that every team may
 	access: the overlay API gives the clients its address as it is.
@@ -794,15 +852,9 @@ allocate_overlay_buffer(display_info& info,
 		if (buffer == NULL)
 			return B_NO_MEMORY;
 
-		buffer->area = create_scan_out_area("bcm2711 display overlay buffer",
-			size, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA,
-			&buffer->address, &buffer->physical);
-		if (buffer->area < 0) {
-			status_t status = buffer->area;
-			buffer->area = -1;
+		status_t status = create_overlay_memory(*buffer, size);
+		if (status != B_OK)
 			return status;
-		}
-		buffer->size = size;
 		buffer->reserved = false;
 	}
 
@@ -1094,11 +1146,10 @@ free_overlay_buffer(display_info& info, area_id area)
 			}
 		}
 
+		// The memory stays (for the next request) while the device is open:
+		// the GPU may have imported it, and the GPU driver's import keeps
+		// no pages of a physical mapping alive.
 		buffer.in_use = false;
-		if (!buffer.reserved) {
-			delete_area(buffer.area);
-			buffer.area = -1;
-		}
 		return B_OK;
 	}
 	return B_BAD_VALUE;
@@ -1113,8 +1164,10 @@ static void
 overlays_init(display_info& info, void* settings)
 {
 	bcm2711_display_shared_info& sharedInfo = *info.shared_info;
-	for (uint32 i = 0; i < kMaxOverlayBuffers; i++)
+	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
 		info.overlay_buffers[i].area = -1;
+		info.overlay_buffers[i].backing = -1;
+	}
 	info.vblank_period = 16667;
 
 	const bool above = get_driver_boolean_parameter(settings,
@@ -1138,14 +1191,8 @@ overlays_init(display_info& info, void* settings)
 	uint32 reserved = 0;
 	for (; reserved < reserve; reserved++) {
 		display_info::overlay_memory& buffer = info.overlay_buffers[reserved];
-		buffer.area = create_scan_out_area("bcm2711 display overlay buffer",
-			size, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA,
-			&buffer.address, &buffer.physical);
-		if (buffer.area < 0) {
-			buffer.area = -1;
+		if (create_overlay_memory(buffer, size) != B_OK)
 			break;
-		}
-		buffer.size = size;
 		buffer.reserved = true;
 		buffer.in_use = false;
 	}
@@ -1168,10 +1215,8 @@ overlays_uninit(display_info& info)
 	}
 	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
 		display_info::overlay_memory& buffer = info.overlay_buffers[i];
-		if (buffer.area >= 0) {
-			delete_area(buffer.area);
-			buffer.area = -1;
-		}
+		if (buffer.area >= 0)
+			delete_overlay_memory(buffer);
 	}
 }
 
