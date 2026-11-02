@@ -89,8 +89,19 @@ bool
 CompilationUnit::AddDirectory(const char* directory)
 {
 	BString* directoryString = new(std::nothrow) BString(directory);
-	if (directoryString == NULL || directoryString->Length() == 0
-		|| !fDirectories.AddItem(directoryString)) {
+	if (directoryString == NULL || directoryString->Length() == 0) {
+		delete directoryString;
+		return false;
+	}
+
+	// the first directory is the compilation directory, the others may be
+	// relative to it
+	if (fDirectories.CountItems() > 0 && directory[0] != '/') {
+		directoryString->Prepend("/");
+		directoryString->Prepend(*fDirectories.ItemAt(0));
+	}
+
+	if (!fDirectories.AddItem(directoryString)) {
 		delete directoryString;
 		return false;
 	}
