@@ -78,15 +78,17 @@ static uint16 sPalette16[] = {
 	// bbbbbggggggrrrrr (5-6-5)
 	0xffff, 0x3333, 0x4cc0, 0x04d3, 0xc800, 0x722f, 0xdd40, 0x0000,
 };
+// (opaque in 32 bits: a display may blend the frame buffer over overlays by
+// its alpha)
 static uint32 sPalette24[] = {
-	0xffffff,	// white
-	0x336698,	// blue
-	0x4e9a00,	// green
-	0x06989a,	// cyan
-	0xcc0000,	// red
-	0x73447b,	// magenta
-	0xdaa800,	// yellow
-	0x000000,	// black
+	0xffffffff,	// white
+	0xff336698,	// blue
+	0xff4e9a00,	// green
+	0xff06989a,	// cyan
+	0xffcc0000,	// red
+	0xff73447b,	// magenta
+	0xffdaa800,	// yellow
+	0xff000000,	// black
 };
 static uint32 sPalette30[] = {
 	0x3fcff3fc,	// white

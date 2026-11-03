@@ -187,11 +187,16 @@ void
 Overlay::TakeOverToken(Overlay* other)
 {
 	overlay_token token = other->OverlayToken();
-	if (token == NULL)
+	if (token == NULL || other == this)
 		return;
 
+	if (fOverlayToken != NULL && fOverlayToken != token)
+		fHWInterface.ReleaseOverlayChannel(fOverlayToken);
+
+	// The channel is ours now: the other overlay must not release it when its
+	// bitmap goes (it would take the channel from under us), nor hide it.
 	fOverlayToken = token;
-	//other->fOverlayToken = NULL;
+	other->fOverlayToken = NULL;
 }
 
 
