@@ -23,6 +23,17 @@
 	minimum. The firmware keeps lowering the clocks on its own when the SoC gets
 	too hot or the supply too low.
 
+	The levels alone miss work that moves from CPU to CPU: a chain of short
+	programs, each waiting for the one before it (a shell script, a build, a
+	configure run), spreads over all cores at a quarter of each, under the
+	scheduler's target load, so every level stays low, while together the CPUs
+	are as busy as one that never rests. As the clock is shared, the thread
+	also adds up the CPUs' active time: when the CPUs together were busy for
+	kBusyForMax percent of one CPU's time or more (the scheduler's target load
+	for one CPU), it asks for the maximum. Without that, fork() and exec() of
+	a small program took 6.6-8.0 ms instead of 4.7 at the maximum: the ARM
+	clock stayed at 750-1200 MHz.
+
 	Never with turbo (the requests' "skip setting turbo" word, and turbo
 	switched off at the start): while turbo is on, the firmware answers every
 	rate with the maximum. Turbo also kept the core clock (the VPU, the AXI
@@ -38,6 +49,7 @@
 
 #include <string.h>
 
+#include <cpu.h>
 #include <smp.h>
 
 #include <bcm2835_mailbox.h>
@@ -48,6 +60,7 @@
 
 static const bigtime_t kUpdateInterval = 50000;
 static const int32 kLowerAfter = 4;
+static const int32 kBusyForMax = 55;
 static const uint32 kIntermediateRates[] = { 750000000, 1000000000, 1200000000 };
 
 static bcm2835_mailbox_module_info* sMailbox;
@@ -110,14 +123,30 @@ rate_for_level(int32 level)
 static status_t
 clock_thread(void*)
 {
+	const int32 cpuCount = smp_get_num_cpus();
+	bigtime_t lastActive[SMP_MAX_CPUS];
+	for (int32 cpu = 0; cpu < cpuCount; cpu++)
+		lastActive[cpu] = cpu_get_active_time(cpu);
+	bigtime_t last = system_time();
+
 	uint32 current = sMaxRate;
 	int32 lowerVotes = 0;
 	while (!sQuit) {
 		snooze(kUpdateInterval);
 
 		int32 level = 0;
-		for (int32 cpu = 0; cpu < smp_get_num_cpus(); cpu++)
+		bigtime_t busy = 0;
+		for (int32 cpu = 0; cpu < cpuCount; cpu++) {
 			level = max_c(level, atomic_get(&sLevel[cpu]));
+			const bigtime_t active = cpu_get_active_time(cpu);
+			busy += active - lastActive[cpu];
+			lastActive[cpu] = active;
+		}
+		const bigtime_t now = system_time();
+		if (busy * 100 >= (now - last) * kBusyForMax)
+			level = kCPUPerformanceScaleMax;
+		last = now;
+
 		const uint32 wanted = sPowerSaving ? sMinRate : rate_for_level(level);
 
 		if (wanted > current) {
