@@ -45,9 +45,11 @@ HWInterface::HWInterface()
 	:
 	MultiLocker("hw interface lock"),
 	fFloatingOverlaysLock("floating overlays lock"),
-	fOverlayKeying(false),
+	fOverlayChangeLock("overlay change lock"),
+	fOverlayKeyingSupported(false),
 	fOverlayKeysLock("overlay keys lock"),
 	fOverlayKeyCount(0),
+	fOverlayKeyingEnd(0),
 	fCursor(NULL),
 	fDragBitmap(NULL),
 	fDragBitmapOffset(0, 0),
@@ -550,35 +552,90 @@ HWInterface::HideOverlay(Overlay* overlay)
 }
 
 
-/*!	With keying on, every 32-bit write to the front buffer is opaque except
-	the key color inside an overlay's rectangle (see OverlayKeying.h): for a
-	display that blends the frame buffer over its overlays by alpha. On for as
-	long as the accelerant keys that way, overlays visible or not: switching it
-	on with the first overlay would need a pass over the whole front buffer.
+/*!	Keying (see OverlayKeying.h): while an overlay is shown, every 32-bit
+	write to the front buffer is opaque, except the key color inside an
+	overlay's rectangle, for a display that then blends the frame buffer over
+	its overlays by alpha. Without overlays such a display scans the frame
+	buffer out opaque, and it is written as it comes (memcpy). \a supported:
+	the accelerant keys overlays that way, in this mode. The object must be
+	locked exclusively.
 */
 void
-HWInterface::_SetOverlayKeying(bool enabled)
+HWInterface::_SetOverlayKeying(bool supported)
 {
 	BAutolock _(fOverlayKeysLock);
-	fOverlayKeying = enabled;
-	if (!enabled)
+	fOverlayKeyingSupported = supported;
+	if (!supported) {
 		fOverlayKeyCount = 0;
+		fOverlayKeyingEnd = 0;
+	}
 }
 
 
-/*!	The overlay channel \a token shows in \a window (screen coordinates): key
-	pixels written there from now on are transparent. app_server writes them
-	after configuring the overlay: SetViewOverlay() invalidates the view, a
-	moved window is blitted after its overlay moved.
+/*!	Before the overlay channel \a token is shown in \a window (screen
+	coordinates): key pixels written there from now on are transparent.
+	app_server writes them after configuring the overlay: SetViewOverlay()
+	invalidates the view, a moved window is blitted after its overlay moved.
+
+	The first overlay switches keying on. Until then the front buffer was
+	written with whatever alpha its pixels had, and the display blends it by
+	alpha as soon as it shows the overlay; so it is made opaque first, in one
+	pass from the back buffer, with the exclusive lock held (\a exclusive): no
+	drawing thread is then in the middle of a write that was not keyed.
+	Without it, returns \c false and changes nothing if keying is off.
+	The caller holds fOverlayChangeLock (after the exclusive lock).
 */
+bool
+HWInterface::_ShowOverlayKey(overlay_token token, const overlay_window& window,
+	rgb_color key, bool exclusive)
+{
+	if (token == NULL)
+		return true;
+
+	{
+		BAutolock _(fOverlayKeysLock);
+		if (!fOverlayKeyingSupported)
+			return true;
+		const bool keying = _OverlayKeyingOn();
+		if (!keying && !exclusive)
+			return false;
+		_SetOverlayKey(token, window, key);
+		if (keying)
+			return true;
+	}
+
+	if (IsDoubleBuffered())
+		CopyBackToFront(BackBuffer()->Bounds());
+	return true;
+}
+
+
+/*!	After the overlay channel \a token was hidden or released. The display
+	takes a plane change at its next frame: once no overlay is left, keying
+	stays on for kOverlayKeyingOffDelay, so that nothing written with any
+	alpha is blended while it may still show the overlay.
+	The caller holds fOverlayChangeLock.
+*/
+void
+HWInterface::_HideOverlayKey(overlay_token token)
+{
+	BAutolock _(fOverlayKeysLock);
+	for (int32 i = 0; i < fOverlayKeyCount; i++) {
+		if (fOverlayKeys[i].token == token) {
+			fOverlayKeys[i] = fOverlayKeys[--fOverlayKeyCount];
+			if (fOverlayKeyCount == 0)
+				fOverlayKeyingEnd = system_time() + kOverlayKeyingOffDelay;
+			return;
+		}
+	}
+}
+
+
+/*!	Adds or moves the rectangle of \a token; fOverlayKeysLock is held. */
 void
 HWInterface::_SetOverlayKey(overlay_token token, const overlay_window& window,
 	rgb_color key)
 {
-	BAutolock _(fOverlayKeysLock);
-	if (!fOverlayKeying || token == NULL)
-		return;
-
 	int32 index = 0;
 	while (index < fOverlayKeyCount && fOverlayKeys[index].token != token)
 		index++;
@@ -599,16 +656,11 @@ HWInterface::_SetOverlayKey(overlay_token token, const overlay_window& window,
 }
 
 
-void
-HWInterface::_RemoveOverlayKey(overlay_token token)
+/*!	Whether front buffer writes are keyed now; fOverlayKeysLock is held. */
+bool
+HWInterface::_OverlayKeyingOn() const
 {
-	BAutolock _(fOverlayKeysLock);
-	for (int32 i = 0; i < fOverlayKeyCount; i++) {
-		if (fOverlayKeys[i].token == token) {
-			fOverlayKeys[i] = fOverlayKeys[--fOverlayKeyCount];
-			return;
-		}
-	}
+	return fOverlayKeyCount > 0 || system_time() < fOverlayKeyingEnd;
 }
 
 
@@ -619,7 +671,7 @@ int32
 HWInterface::_GetOverlayKeys(overlay_key_rect* keys) const
 {
 	BAutolock _(fOverlayKeysLock);
-	if (!fOverlayKeying)
+	if (!_OverlayKeyingOn())
 		return -1;
 	for (int32 i = 0; i < fOverlayKeyCount; i++)
 		keys[i] = fOverlayKeys[i].rect;

@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include <Accelerant.h>
+#include <Autolock.h>
 #include <Cursor.h>
 #include <Directory.h>
 #include <FindDirectory.h>
@@ -436,7 +437,8 @@ AccelerantHWInterface::_UpdateHooksAfterModeChange()
 		= (configure_overlay)fAccelerantHook(B_CONFIGURE_OVERLAY, NULL);
 
 	// an accelerant whose overlays are keyed by the alpha of the frame
-	// buffer's pixels needs every front buffer write opaque, except the key
+	// buffer's pixels needs every front buffer write opaque while one is
+	// shown, except the key
 	_SetOverlayKeying(fAccOverlaySupportedFeatures != NULL
 		&& fAccConfigureOverlay != NULL
 		&& (fDisplayMode.space == B_RGB32 || fDisplayMode.space == B_RGBA32)
@@ -1126,8 +1128,10 @@ AccelerantHWInterface::ReleaseOverlayChannel(overlay_token token)
 	if (token == NULL)
 		return;
 
-	_RemoveOverlayKey(token);
+	BAutolock _(fOverlayChangeLock);
 	fAccReleaseOverlay(token);
+		// hides the overlay
+	_HideOverlayKey(token);
 }
 
 
@@ -1219,25 +1223,41 @@ AccelerantHWInterface::ConfigureOverlay(Overlay* overlay)
 	// TODO: this only needs to be done on mode changes!
 	overlay->SetColorSpace(fDisplayMode.space);
 
-	// the key pixels app_server writes next are keyed in the new place
-	_SetOverlayKey(overlay->OverlayToken(), *overlay->OverlayWindow(),
-		overlay->Color());
+	// The key pixels app_server writes next are keyed in the new place. The
+	// first overlay switches keying on, with the exclusive lock held: the
+	// front buffer is made opaque before the display shows the overlay.
+	if (_ConfigureOverlay(overlay, false) || !LockExclusiveAccess())
+		return;
+	_ConfigureOverlay(overlay, true);
+	UnlockExclusiveAccess();
+}
+
+
+bool
+AccelerantHWInterface::_ConfigureOverlay(Overlay* overlay, bool exclusive)
+{
+	BAutolock _(fOverlayChangeLock);
+	if (!_ShowOverlayKey(overlay->OverlayToken(), *overlay->OverlayWindow(),
+			overlay->Color(), exclusive)) {
+		return false;
+	}
 
 	fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
 		overlay->OverlayWindow(), overlay->OverlayView());
+	return true;
 }
 
 
 void
 AccelerantHWInterface::HideOverlay(Overlay* overlay)
 {
-	_RemoveOverlayKey(overlay->OverlayToken());
-
-	if (fAccConfigureOverlay == NULL)
-		return;
-
-	fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
-		NULL, NULL);
+	// keyed until the display no longer shows the overlay
+	BAutolock _(fOverlayChangeLock);
+	if (fAccConfigureOverlay != NULL) {
+		fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
+			NULL, NULL);
+	}
+	_HideOverlayKey(overlay->OverlayToken());
 }
 
 

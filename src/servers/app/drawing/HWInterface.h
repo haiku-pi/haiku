@@ -197,11 +197,15 @@ protected:
 			void				_NotifyScreenChanged();
 
 	// overlays keyed by the front buffer's alpha (B_OVERLAY_KEYING_USES_ALPHA)
-			void				_SetOverlayKeying(bool enabled);
+			void				_SetOverlayKeying(bool supported);
+			bool				_ShowOverlayKey(overlay_token token,
+									const overlay_window& window,
+									rgb_color key, bool exclusive);
+			void				_HideOverlayKey(overlay_token token);
 			void				_SetOverlayKey(overlay_token token,
 									const overlay_window& window,
 									rgb_color key);
-			void				_RemoveOverlayKey(overlay_token token);
+			bool				_OverlayKeyingOn() const;
 			int32				_GetOverlayKeys(overlay_key_rect* keys) const;
 			void				_WriteFrontRow(uint8* destination,
 									const uint8* source, int32 x, int32 y,
@@ -247,14 +251,20 @@ protected:
 								fCursorAreaBackup;
 	mutable	BLocker				fFloatingOverlaysLock;
 
+	// orders overlay changes, the accelerant's and the keys' (taken after
+	// the exclusive lock)
+			BLocker				fOverlayChangeLock;
 	static	const int32			kMaxOverlayKeys = 8;
-			bool				fOverlayKeying;
+	static	const bigtime_t		kOverlayKeyingOffDelay = 100000;
+			bool				fOverlayKeyingSupported;
 	mutable	BLocker				fOverlayKeysLock;
 			struct overlay_key {
 				overlay_token		token;
 				overlay_key_rect	rect;
 			}					fOverlayKeys[kMaxOverlayKeys];
 			int32				fOverlayKeyCount;
+			bigtime_t			fOverlayKeyingEnd;
+				// with no overlay left, keying stays on until then
 
 			ServerCursorReference
 								fCursor;
