@@ -6,6 +6,8 @@
 
 #include "OverlayKeying.h"
 
+#include <string.h>
+
 
 static const uint32 kAlpha = 0xff000000;
 static const uint32 kColor = 0x00ffffff;
@@ -15,16 +17,26 @@ static const int32 kMaxSpans = 8;
 void
 copy_row_opaque(uint32* destination, const uint32* source, int32 count)
 {
+	// 64 bytes per iteration, as memcpy() copies: the destination is the
+	// front buffer, write-combining memory (a plain loop becomes one 16-byte
+	// vector per iteration)
+	typedef uint32 pixels __attribute__((vector_size(16)));
+
 	int32 i = 0;
-	for (; i + 4 <= count; i += 4) {
-		const uint32 a = source[i];
-		const uint32 b = source[i + 1];
-		const uint32 c = source[i + 2];
-		const uint32 d = source[i + 3];
-		destination[i] = a | kAlpha;
-		destination[i + 1] = b | kAlpha;
-		destination[i + 2] = c | kAlpha;
-		destination[i + 3] = d | kAlpha;
+	for (; i + 16 <= count; i += 16) {
+		pixels a, b, c, d;
+		memcpy(&a, source + i, sizeof(a));
+		memcpy(&b, source + i + 4, sizeof(b));
+		memcpy(&c, source + i + 8, sizeof(c));
+		memcpy(&d, source + i + 12, sizeof(d));
+		a |= kAlpha;
+		b |= kAlpha;
+		c |= kAlpha;
+		d |= kAlpha;
+		memcpy(destination + i, &a, sizeof(a));
+		memcpy(destination + i + 4, &b, sizeof(b));
+		memcpy(destination + i + 8, &c, sizeof(c));
+		memcpy(destination + i + 12, &d, sizeof(d));
 	}
 	for (; i < count; i++)
 		destination[i] = source[i] | kAlpha;
