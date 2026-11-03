@@ -294,27 +294,35 @@ get_cached_user_stack(Team* team, size_t size, size_t guardSize,
 }
 
 
-/*!	Keeps the user stack area of an exited thread for a new thread of the
-	team \a teamID, if the team is still running and has room for it.
-	\return \c true, if the team took the area, \c false, if the caller has
-		to delete it.
+/*!	Decides what becomes of the user stack area of an exited thread of the
+	team \a teamID.
+
+	While the team is going down, the area stays as it is: the team's other
+	threads keep running until the main thread has killed them, and they may
+	still use objects on the exited thread's stack (a waiter it had put into
+	a list, say) -- the thread that handles a signal that ends the team exits
+	first, on its own. The area goes with the team's address space. Else the
+	team keeps the area for a new thread, if it has room for it.
+
+	\return \c true, if the area stays, \c false, if the caller has to
+		delete it.
 */
 static bool
-put_cached_user_stack(team_id teamID, const cached_user_stack& stack)
+keep_user_stack(team_id teamID, const cached_user_stack& stack)
 {
-	if (stack.size - stack.guard_size
-			> PAGE_ALIGN(kMaxCachedUserStackSize + TLS_SIZE)) {
-		return false;
-	}
-
 	Team* team = Team::Get(teamID);
 	if (team == NULL)
 		return false;
 	BReference<Team> teamReference(team, true);
 
 	TeamLocker teamLocker(team);
+	if (team->state >= TEAM_STATE_SHUTDOWN || team->exit.initialized)
+		return true;
+
 	if (team->state != TEAM_STATE_NORMAL
-		|| team->cached_user_stack_count == MAX_CACHED_USER_STACKS) {
+		|| team->cached_user_stack_count == MAX_CACHED_USER_STACKS
+		|| stack.size - stack.guard_size
+			> PAGE_ALIGN(kMaxCachedUserStackSize + TLS_SIZE)) {
 		return false;
 	}
 
@@ -2569,9 +2577,11 @@ thread_exit(void)
 		// other threads use objects on its stack -- so we want them terminated
 		// first.
 		// When the team is deleted, all areas are deleted anyway, so we don't
-		// need to do that explicitly in that case.
-		// Unless the team keeps the area for a new thread: the thread won't
-		// touch it anymore, as it already left the team's address space.
+		// need to do that explicitly in that case -- nor while the team is
+		// going down, when the other threads may still run (see
+		// keep_user_stack()). Nor if the team keeps the area for a new thread:
+		// the thread won't touch it anymore, as it already left the team's
+		// address space.
 		cached_user_stack stack;
 		stack.area = userStackArea;
 		stack.guard_size = thread->user_stack_guard_size;
@@ -2582,7 +2592,7 @@ thread_exit(void)
 #endif
 		stack.size = PAGE_ALIGN(stack.guard_size + thread->user_stack_size
 			+ TLS_SIZE);
-		if (!put_cached_user_stack(teamID, stack))
+		if (!keep_user_stack(teamID, stack))
 			vm_delete_area(teamID, userStackArea, true);
 	}
 
