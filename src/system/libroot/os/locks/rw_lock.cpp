@@ -16,6 +16,8 @@ typedef struct rw_lock_waiter {
 	rw_lock_waiter *	next;
 	thread_id			thread;
 	bool				writer;
+	bool				queued;
+	status_t			status;
 } rw_lock_waiter;
 
 
@@ -26,26 +28,39 @@ rw_lock_wait(rw_lock *lock, bool writer)
 	waiter.thread = find_thread(NULL);
 	waiter.next = NULL;
 	waiter.writer = writer;
+	waiter.queued = true;
+	waiter.status = B_OK;
 
+	// The waiter is dequeued before this function returns (see below), which
+	// GCC cannot see
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Wdangling-pointer"
 	if (lock->waiters != NULL)
 		lock->last_waiter->next = &waiter;
 	else
 		lock->waiters = &waiter;
 
 	lock->last_waiter = &waiter;
+	#pragma GCC diagnostic pop
 
-	// the rw_lock is locked when entering, release it before blocking
-	get_user_thread()->wait_status = 1;
-	mutex_unlock(&lock->lock);
+	// The rw_lock is locked when entering; it is released while blocking.
+	// Whoever dequeues the waiter (rw_lock_unblock(), __rw_lock_destroy())
+	// holds it, sets the waiter's status and unblocks the thread. A block can
+	// also end without that, interrupted (a signal, resume_thread()): then
+	// block again, with the wait status set anew. The kernel ignores an
+	// unblock while the wait status is not positive, so blocking with the
+	// one an interruption left would return at once forever and miss the
+	// wake-up of the dequeue, keeping the lock it was given.
+	while (waiter.queued) {
+		get_user_thread()->wait_status = 1;
+		mutex_unlock(&lock->lock);
 
-	status_t result;
-	do {
-		result = _kern_block_thread(0, 0);
-	} while (result == B_INTERRUPTED);
+		_kern_block_thread(0, 0);
 
-	// and lock it again before returning
-	mutex_lock(&lock->lock);
-	return result;
+		mutex_lock(&lock->lock);
+	}
+
+	return waiter.status;
 }
 
 
@@ -66,6 +81,8 @@ rw_lock_unblock(rw_lock *lock)
 
 		lock->waiters = waiter->next;
 		lock->holder = waiter->thread;
+		waiter->queued = false;
+		waiter->status = B_OK;
 		_kern_unblock_thread(waiter->thread, B_OK);
 		return;
 	}
@@ -73,6 +90,8 @@ rw_lock_unblock(rw_lock *lock)
 	while (waiter != NULL && !waiter->writer) {
 		lock->reader_count++;
 		lock->waiters = waiter->next;
+		waiter->queued = false;
+		waiter->status = B_OK;
 		_kern_unblock_thread(waiter->thread, B_OK);
 		waiter = lock->waiters;
 	}
@@ -105,8 +124,11 @@ __rw_lock_destroy(rw_lock *lock)
 
 	rw_lock_waiter *waiter = lock->waiters;
 	while (waiter != NULL) {
+		rw_lock_waiter *next = waiter->next;
+		waiter->queued = false;
+		waiter->status = B_ERROR;
 		_kern_unblock_thread(waiter->thread, B_ERROR);
-		waiter = waiter->next;
+		waiter = next;
 	}
 
 	mutex_destroy(&lock->lock);
