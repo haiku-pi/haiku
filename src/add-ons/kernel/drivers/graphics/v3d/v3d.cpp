@@ -506,6 +506,8 @@ v3d_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
 		return B_NO_MEMORY;
 	file->device = device;
 
+	v3d_jobs_read_settings(device);
+
 	MutexLocker locker(device->lock);
 	status_t status = start_gpu(device);
 	if (status != B_OK) {

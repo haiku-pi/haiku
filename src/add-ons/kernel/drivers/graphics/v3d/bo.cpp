@@ -58,10 +58,11 @@ static void
 bo_free(v3d_device* device, v3d_bo* bo)
 {
 	v3d_unmap_range(device, bo->gpu_address, bo->size);
-	if (device->active == NULL)
+	if (!v3d_jobs_on_gpu(device))
 		v3d_mmu_flush(device);
-	// else: the TLB may still hold the old entries for the running job, but
-	// its pages stay until it is done, and every job flushes the TLB first.
+	// else: the TLB may still hold the old entries for the running jobs, but
+	// the pages stay until they are done, and every job flushes the TLB
+	// first.
 
 	bo->release_after = device->submitted_seqno;
 	if (device->completed_seqno >= bo->release_after) {

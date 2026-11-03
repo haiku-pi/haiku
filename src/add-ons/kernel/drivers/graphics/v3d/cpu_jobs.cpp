@@ -5,7 +5,7 @@
 
 
 /*!	CPU jobs (SUBMIT_CPU, the DRM_V3D_EXT_ID_CPU_* extensions): small pieces
-	of work the driver does on the CPU when they reach the head of the job
+	of work the driver does on the CPU when they reach the head of their
 	queue, after every job submitted before them has completed - what
 	Vulkan's timestamp queries and indirect dispatches need (as Linux
 	v3d_sched.c):
@@ -294,9 +294,9 @@ set_up_indirect_dispatch(v3d_device* device, v3d_job* job)
 {
 	v3d_cpu_job* cpu = job->cpu;
 	v3d_job* csd = cpu->csd_job;
-	if (device->queue_head != csd) {
-		// cannot happen: both were queued together
-		ERROR("indirect dispatch: its compute job is not next\n");
+	if (csd->stage != V3D_JOB_QUEUED) {
+		// cannot happen: the compute job waits for this one
+		ERROR("indirect dispatch: its compute job has started\n");
 		return;
 	}
 
@@ -327,8 +327,9 @@ set_up_indirect_dispatch(v3d_device* device, v3d_job* job)
 }
 
 
-/*!	Runs the job: every job before it has completed, the next one has not
-	started. Called by the worker with the device lock held.
+/*!	Runs the job: every job before it has completed, the next one of its
+	submission (an indirect dispatch's compute job) has not started. Called
+	by the worker with the device lock held.
 */
 void
 v3d_cpu_job_run(v3d_device* device, v3d_job* job)
