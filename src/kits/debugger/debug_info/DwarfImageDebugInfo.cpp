@@ -959,9 +959,18 @@ DwarfImageDebugInfo::GetSourceLanguage(FunctionDebugInfo* _function,
 		case DW_LANG_C89:
 		case DW_LANG_C:
 		case DW_LANG_C99:
+		case DW_LANG_C11:
+		case DW_LANG_C17:
+		case DW_LANG_C23:
 			language = new(std::nothrow) CLanguage;
 			break;
 		case DW_LANG_C_plus_plus:
+		case DW_LANG_C_plus_plus_03:
+		case DW_LANG_C_plus_plus_11:
+		case DW_LANG_C_plus_plus_14:
+		case DW_LANG_C_plus_plus_17:
+		case DW_LANG_C_plus_plus_20:
+		case DW_LANG_C_plus_plus_23:
 			language = new(std::nothrow) CppLanguage;
 			break;
 		case 0:

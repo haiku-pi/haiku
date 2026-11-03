@@ -368,7 +368,11 @@ enum {
 	DW_OP_convert				= 0xa8,
 	DW_OP_reinterpret			= 0xa9,
 	DW_OP_lo_user				= 0xe0,
-	DW_OP_hi_user				= 0xff
+	DW_OP_hi_user				= 0xff,
+
+	// extensions (the GNU forms of DWARF 5's operations)
+	DW_OP_GNU_implicit_pointer	= 0xf2,
+	DW_OP_GNU_entry_value		= 0xf3
 };
 
 // base type
@@ -473,6 +477,11 @@ enum {
 	DW_LANG_Fortran08		= 0x0023,
 	DW_LANG_RenderScript	= 0x0024,
 	DW_LANG_BLISS			= 0x0025,
+	DW_LANG_C_plus_plus_17	= 0x002a,	// added after DWARF 5
+	DW_LANG_C_plus_plus_20	= 0x002b,
+	DW_LANG_C17				= 0x002c,
+	DW_LANG_C_plus_plus_23	= 0x003a,
+	DW_LANG_C23				= 0x003e,
 	DW_LANG_lo_user			= 0x8000,
 	DW_LANG_hi_user			= 0xffff
 };
@@ -611,6 +620,34 @@ enum {
 	DW_UT_split_type			= 0x06,
 	DW_UT_lo_user				= 0x80,
 	DW_UT_hi_user				= 0xff
+};
+
+// range list entry (.debug_rnglists)
+enum {
+	DW_RLE_end_of_list			= 0x00,
+	DW_RLE_base_addressx		= 0x01,
+	DW_RLE_startx_endx			= 0x02,
+	DW_RLE_startx_length		= 0x03,
+	DW_RLE_offset_pair			= 0x04,
+	DW_RLE_base_address			= 0x05,
+	DW_RLE_start_end			= 0x06,
+	DW_RLE_start_length			= 0x07
+};
+
+// location list entry (.debug_loclists)
+enum {
+	DW_LLE_end_of_list			= 0x00,
+	DW_LLE_base_addressx		= 0x01,
+	DW_LLE_startx_endx			= 0x02,
+	DW_LLE_startx_length		= 0x03,
+	DW_LLE_offset_pair			= 0x04,
+	DW_LLE_default_location		= 0x05,
+	DW_LLE_base_address			= 0x06,
+	DW_LLE_start_end			= 0x07,
+	DW_LLE_start_length			= 0x08,
+
+	// extensions
+	DW_LLE_GNU_view_pair		= 0x09
 };
 
 

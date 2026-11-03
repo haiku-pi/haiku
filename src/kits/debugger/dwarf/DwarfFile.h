@@ -125,16 +125,24 @@ private:
 									bool ehFrame, FDEInfoList& infos);
 			status_t			_ParseCompilationUnit(CompilationUnit* unit);
 			status_t			_ParseTypeUnit(TypeUnit* unit);
+			status_t			_AddTypeUnit(TypeUnit* unit);
 			status_t			_ParseDebugInfoEntry(DataReader& dataReader,
 									BaseUnit* unit,
 									AbbreviationTable* abbreviationTable,
 									DebugInfoEntry*& _entry,
 									bool& _endOfEntryList, int level = 0);
 			status_t			_FinishUnit(BaseUnit* unit);
+			ElfSection*			_UnitSection(BaseUnit* unit) const;
 			status_t			_ReadStringIndirect(BaseUnit* unit,
 									uint64 index, const char*& value) const;
 			status_t			_ReadAddressIndirect(BaseUnit* unit,
 									uint64 index, uint64& value) const;
+			status_t			_ReadListIndirect(BaseUnit* unit,
+									ElfSection* section, off_t base,
+									uint64 index, uint64& _offset) const;
+			TargetAddressRangeList* _ResolveRangeListV5(
+									CompilationUnit* unit,
+									uint64 offset) const;
 			status_t			_ParseEntryAttributes(DataReader& dataReader,
 									BaseUnit* unit,
 									DebugInfoEntry* entry,
@@ -146,6 +154,10 @@ private:
 			status_t			_ParseLineInfoFormatUint(CompilationUnit* unit,
 									DataReader &dataReader,
 									uint64 format, uint64 &value);
+			status_t			_SkipLineInfoFormatValue(
+									CompilationUnit* unit,
+									DataReader &dataReader,
+									uint64 format);
 			status_t			_ParseLineInfo(CompilationUnit* unit);
 
 			status_t			_UnwindCallFrame(CompilationUnit* unit,
@@ -190,6 +202,11 @@ private:
 									uint64 offset, target_addr_t address,
 									const void*& _expression,
 									off_t& _length) const;
+			status_t			_FindLocationExpressionV5(
+									CompilationUnit* unit,
+									uint64 offset, target_addr_t address,
+									const void*& _expression,
+									off_t& _length) const;
 
 			status_t			_LocateDebugInfo(
 									BString& _requiredExternalFileName,
@@ -223,11 +240,13 @@ private:
 			ElfSection*			fDebugStringSection;
 			ElfSection*			fDebugStrOffsetsSection;
 			ElfSection*			fDebugRangesSection;
+			ElfSection*			fDebugRangeListsSection;
 			ElfSection*			fDebugLineSection;
 			ElfSection*			fDebugLineStrSection;
 			ElfSection*			fDebugFrameSection;
 			ElfSection*			fEHFrameSection;
 			ElfSection*			fDebugLocationSection;
+			ElfSection*			fDebugLocationListsSection;
 			ElfSection*			fDebugPublicTypesSection;
 			ElfSection*			fDebugTypesSection;
 			AbbreviationTableList fAbbreviationTables;

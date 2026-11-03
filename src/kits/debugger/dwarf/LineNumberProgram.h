@@ -9,12 +9,17 @@
 #include "Types.h"
 
 
+class CompilationUnit;
+
+
 class LineNumberProgram {
 public:
 	struct State;
 
 public:
-								LineNumberProgram(uint8 addressSize, bool isBigEndian);
+								LineNumberProgram(uint8 addressSize,
+									bool isBigEndian,
+									const CompilationUnit* unit);
 								~LineNumberProgram();
 
 			status_t			Init(const void* program, size_t programSize,
@@ -29,6 +34,7 @@ public:
 
 private:
 			void				_SetToInitial(State& state) const;
+			int32				_FileIndex(uint64 fileNumber) const;
 
 private:
 			const void*			fProgram;
@@ -41,12 +47,15 @@ private:
 			uint8				fAddressSize;
 			bool				fIsBigEndian;
 			const uint8*		fStandardOpcodeLengths;
+			const CompilationUnit* fUnit;
 };
 
 
 struct LineNumberProgram::State {
 	target_addr_t	address;
 	int32			file;
+		// one-based index into the compilation unit's file list (cf.
+		// CompilationUnit::FileIndex()), -1 for an explicit file
 	int32			line;
 	int32			column;
 	bool			isStatement;

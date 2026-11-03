@@ -224,7 +224,8 @@ static const attribute_info_entry kAttributeFormInfos[] = {
 	{ ENTRY(addrx),			AC_ADDRESS },
 	{ ENTRY(ref_sup4),		AC_REFERENCE },
 	{ ENTRY(strp_sup),		AC_STRING },
-	{ ENTRY(data16),		AC_CONSTANT },
+	{ ENTRY(data16),		AC_BLOCK },
+		// a 16 byte constant: read as block (as DWARF 4's 16 byte constants)
 	{ ENTRY(line_strp),		AC_STRING },
 	{ ENTRY(ref_sig8),		AC_REFERENCE },
 	{ ENTRY(implicit_const),

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "CompilationUnit.h"
 #include "Dwarf.h"
 #include "Tracing.h"
 
@@ -19,7 +20,8 @@ static const uint8 kLineNumberStandardOpcodeOperands[]
 static const uint32 kLineNumberStandardOpcodeCount = 12;
 
 
-LineNumberProgram::LineNumberProgram(uint8 addressSize, bool isBigEndian)
+LineNumberProgram::LineNumberProgram(uint8 addressSize, bool isBigEndian,
+	const CompilationUnit* unit)
 	:
 	fProgram(NULL),
 	fProgramSize(0),
@@ -30,7 +32,8 @@ LineNumberProgram::LineNumberProgram(uint8 addressSize, bool isBigEndian)
 	fOpcodeBase(0),
 	fAddressSize(addressSize),
 	fIsBigEndian(isBigEndian),
-	fStandardOpcodeLengths(NULL)
+	fStandardOpcodeLengths(NULL),
+	fUnit(unit)
 {
 }
 
@@ -120,7 +123,7 @@ LineNumberProgram::GetNextRow(State& state) const
 					state.line += dataReader.ReadSignedLEB128(0);
 					break;
 				case DW_LNS_set_file:
-					state.file = dataReader.ReadUnsignedLEB128(0);
+					state.file = _FileIndex(dataReader.ReadUnsignedLEB128(0));
 					break;
 				case DW_LNS_set_column:
 					state.column = dataReader.ReadUnsignedLEB128(0);
@@ -208,7 +211,7 @@ void
 LineNumberProgram::_SetToInitial(State& state) const
 {
 	state.address = 0;
-	state.file = 1;
+	state.file = _FileIndex(1);
 	state.line = 1;
 	state.column = 0;
 	state.isStatement = fDefaultIsStatement;
@@ -218,4 +221,11 @@ LineNumberProgram::_SetToInitial(State& state) const
 	state.isEpilogueBegin = false;
 	state.instructionSet = 0;
 	state.discriminator = 0;
+}
+
+
+int32
+LineNumberProgram::_FileIndex(uint64 fileNumber) const
+{
+	return fUnit != NULL ? fUnit->FileIndex(fileNumber) : (int32)fileNumber;
 }

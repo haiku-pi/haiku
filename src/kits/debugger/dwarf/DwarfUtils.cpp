@@ -272,7 +272,7 @@ DwarfUtils::GetDeclarationLocation(DwarfFile* dwarfFile,
 		}
 	}
 
-	if (file == 0)
+	if (!fileSet)
 		return false;
 
 	// get the compilation unit
@@ -281,7 +281,8 @@ DwarfUtils::GetDeclarationLocation(DwarfFile* dwarfFile,
 		return false;
 
 	const char* directoryName;
-	const char* fileName = unit->FileAt(file - 1, &directoryName);
+	const char* fileName = unit->FileAt(unit->FileIndex(file) - 1,
+		&directoryName);
 	if (fileName == NULL)
 		return false;
 

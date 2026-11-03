@@ -47,6 +47,11 @@ public:
 									// block, when the entry doesn't have a
 									// location attribute
 
+	virtual	bool				GetIndexedAddress(uint64 index,
+									target_addr_t& _address);
+									// the entry of the unit's .debug_addr
+									// table (DWARF 5), not relocated
+
 protected:
 			const DwarfTargetInterface* fTargetInterface;
 			uint8				fAddressSize;

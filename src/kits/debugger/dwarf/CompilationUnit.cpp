@@ -24,20 +24,30 @@ struct CompilationUnit::File {
 		dirName(dirName)
 	{
 	}
+
+	BString Path() const
+	{
+		if (dirName == NULL || fileName.ByteAt(0) == '/')
+			return fileName;
+
+		BString path(dirName);
+		path << '/' << fileName;
+		return path;
+	}
 };
 
 
 CompilationUnit::CompilationUnit(off_t headerOffset, off_t contentOffset,
 	off_t totalSize, off_t abbreviationOffset, uint8 addressSize,
-	bool isBigEndian, bool isDwarf64)
+	bool isBigEndian, bool isDwarf64, uint16 version)
 	:
 	BaseUnit(headerOffset, contentOffset, totalSize, abbreviationOffset,
-		addressSize, isBigEndian, isDwarf64),
+		addressSize, isBigEndian, isDwarf64, version),
 	fUnitEntry(NULL),
 	fAddressRanges(NULL),
 	fDirectories(10),
 	fFiles(10),
-	fLineNumberProgram(addressSize, isBigEndian)
+	fLineNumberProgram(addressSize, isBigEndian, this)
 {
 }
 
@@ -79,8 +89,19 @@ bool
 CompilationUnit::AddDirectory(const char* directory)
 {
 	BString* directoryString = new(std::nothrow) BString(directory);
-	if (directoryString == NULL || directoryString->Length() == 0
-		|| !fDirectories.AddItem(directoryString)) {
+	if (directoryString == NULL || directoryString->Length() == 0) {
+		delete directoryString;
+		return false;
+	}
+
+	// the first directory is the compilation directory, the others may be
+	// relative to it
+	if (fDirectories.CountItems() > 0 && directory[0] != '/') {
+		directoryString->Prepend("/");
+		directoryString->Prepend(*fDirectories.ItemAt(0));
+	}
+
+	if (!fDirectories.AddItem(directoryString)) {
 		delete directoryString;
 		return false;
 	}
@@ -134,6 +155,45 @@ CompilationUnit::FileAt(int32 index, const char** _directory) const
 	}
 
 	return NULL;
+}
+
+
+bool
+CompilationUnit::AddFileEntry(const char* fileName, int32 dirIndex)
+{
+	if (fileName == NULL)
+		return fFileEntries.Add(0);
+
+	// (the same file may be named relative to different directories)
+	BString path = File(fileName, DirectoryAt(dirIndex)).Path();
+	int32 index = 0;
+	for (int32 i = 0; File* file = fFiles.ItemAt(i); i++) {
+		if (file->Path() == path) {
+			index = i + 1;
+			break;
+		}
+	}
+
+	if (index == 0) {
+		if (!AddFile(fileName, dirIndex))
+			return false;
+		index = fFiles.CountItems();
+	}
+
+	return fFileEntries.Add(index);
+}
+
+
+int32
+CompilationUnit::FileIndex(uint64 fileNumber) const
+{
+	if (fFileEntries.Count() == 0) {
+		// no line number program header (read)
+		return fileNumber <= (uint64)fFiles.CountItems() ? fileNumber : 0;
+	}
+
+	return fileNumber < (uint64)fFileEntries.Count()
+		? fFileEntries[fileNumber] : 0;
 }
 
 
