@@ -132,7 +132,22 @@ arch_thread_enter_userspace(Thread *thread, addr_t entry,
 
 	thread->arch_info.iframes.index = 0;
 
+	// The kernel exit work of a return from an exception, as on x86: signals
+	// can be pending already -- the resume_thread() that starts a thread
+	// sends one, which else interrupts the thread's first wait (and first
+	// faults on its stack no longer handle it, when the stack is reused).
+	// A signal handler's frame goes into this frame.
+	arm64_push_iframe(&thread->arch_info.iframes, &frame);
 	disable_interrupts();
+	if ((thread->flags & (THREAD_FLAGS_SIGNALS_PENDING
+			| THREAD_FLAGS_DEBUG_THREAD | THREAD_FLAGS_TRAP_FOR_CORE_DUMP))
+				!= 0) {
+		enable_interrupts();
+		thread_at_kernel_exit();
+	} else
+		thread_at_kernel_exit_no_signals();
+	arm64_pop_iframe(&thread->arch_info.iframes);
+
 	arm64_init_user_debug_at_kernel_exit(&frame);
 	_eret_with_iframe(&frame, thread->kernel_stack_top - 1);
 	return B_ERROR;
