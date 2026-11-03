@@ -60,7 +60,10 @@ public:
 
 	void Notify(uint32 eventCode, struct image* image)
 	{
-		char eventBuffer[128];
+		// two int32 and a pointer field take 132 bytes with 64-bit pointers: in
+		// 128 the pointer did not fit, and listeners (the profiler) got an
+		// event without "imageStruct" and dropped it
+		char eventBuffer[256];
 		KMessage event;
 		event.SetTo(eventBuffer, sizeof(eventBuffer), IMAGE_MONITOR);
 		event.AddInt32("event", eventCode);
