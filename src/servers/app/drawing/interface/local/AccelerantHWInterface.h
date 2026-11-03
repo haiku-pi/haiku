@@ -98,6 +98,7 @@ private:
 			status_t			_OpenAccelerant(int device);
 			status_t			_SetupDefaultHooks();
 			void				_UpdateHooksAfterModeChange();
+			bool				_ConfigureOverlay(Overlay* overlay, bool exclusive);
 			status_t			_UpdateModeList();
 			status_t			_UpdateFrameBufferConfig();
 			void				_RegionToRectParams(/*const*/ BRegion* region,

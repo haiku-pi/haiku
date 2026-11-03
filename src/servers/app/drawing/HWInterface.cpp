@@ -9,6 +9,8 @@
 
 #include "HWInterface.h"
 
+#include <Autolock.h>
+
 #include <new>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +45,11 @@ HWInterface::HWInterface()
 	:
 	MultiLocker("hw interface lock"),
 	fFloatingOverlaysLock("floating overlays lock"),
+	fOverlayChangeLock("overlay change lock"),
+	fOverlayKeyingSupported(false),
+	fOverlayKeysLock("overlay keys lock"),
+	fOverlayKeyCount(0),
+	fOverlayKeyingEnd(0),
 	fCursor(NULL),
 	fDragBitmap(NULL),
 	fDragBitmapOffset(0, 0),
@@ -444,15 +451,19 @@ HWInterface::CopyToBackAndFront(const uint8* bits, uint32 bytesPerRow,
 	BRegion backOnly(region);
 	backOnly.Exclude(&frontRegion);
 
+	overlay_key_rect keys[kMaxOverlayKeys];
+	const int32 keyCount = _GetOverlayKeys(keys);
+
 	const int32 count = frontRegion.CountRects();
 	for (int32 i = 0; i < count; i++) {
 		const clipping_rect rect = frontRegion.RectAtInt(i);
-		const size_t bytes = (rect.right - rect.left + 1) * 4;
+		const int32 width = rect.right - rect.left + 1;
 		const uint8* source = bits + (rect.top - offset.y) * bytesPerRow
 			+ (rect.left - offset.x) * 4;
 		for (int32 y = rect.top; y <= rect.bottom; y++) {
-			memcpy(back + y * backBPR + rect.left * 4, source, bytes);
-			memcpy(frontBits + y * frontBPR + rect.left * 4, source, bytes);
+			memcpy(back + y * backBPR + rect.left * 4, source, width * 4);
+			_WriteFrontRow(frontBits + y * frontBPR + rect.left * 4, source,
+				rect.left, y, width, keys, keyCount);
 			source += bytesPerRow;
 		}
 	}
@@ -538,6 +549,149 @@ HWInterface::ConfigureOverlay(Overlay* overlay)
 void
 HWInterface::HideOverlay(Overlay* overlay)
 {
+}
+
+
+/*!	Keying (see OverlayKeying.h): while an overlay is shown, every 32-bit
+	write to the front buffer is opaque, except the key color inside an
+	overlay's rectangle, for a display that then blends the frame buffer over
+	its overlays by alpha. Without overlays such a display scans the frame
+	buffer out opaque, and it is written as it comes (memcpy). \a supported:
+	the accelerant keys overlays that way, in this mode. The object must be
+	locked exclusively.
+*/
+void
+HWInterface::_SetOverlayKeying(bool supported)
+{
+	BAutolock _(fOverlayKeysLock);
+	fOverlayKeyingSupported = supported;
+	if (!supported) {
+		fOverlayKeyCount = 0;
+		fOverlayKeyingEnd = 0;
+	}
+}
+
+
+/*!	Before the overlay channel \a token is shown in \a window (screen
+	coordinates): key pixels written there from now on are transparent.
+	app_server writes them after configuring the overlay: SetViewOverlay()
+	invalidates the view, a moved window is blitted after its overlay moved.
+
+	The first overlay switches keying on. Until then the front buffer was
+	written with whatever alpha its pixels had, and the display blends it by
+	alpha as soon as it shows the overlay; so it is made opaque first, in one
+	pass from the back buffer, with the exclusive lock held (\a exclusive): no
+	drawing thread is then in the middle of a write that was not keyed.
+	Without it, returns \c false and changes nothing if keying is off.
+	The caller holds fOverlayChangeLock (after the exclusive lock).
+*/
+bool
+HWInterface::_ShowOverlayKey(overlay_token token, const overlay_window& window,
+	rgb_color key, bool exclusive)
+{
+	if (token == NULL)
+		return true;
+
+	{
+		BAutolock _(fOverlayKeysLock);
+		if (!fOverlayKeyingSupported)
+			return true;
+		const bool keying = _OverlayKeyingOn();
+		if (!keying && !exclusive)
+			return false;
+		_SetOverlayKey(token, window, key);
+		if (keying)
+			return true;
+	}
+
+	if (IsDoubleBuffered())
+		CopyBackToFront(BackBuffer()->Bounds());
+	return true;
+}
+
+
+/*!	After the overlay channel \a token was hidden or released. The display
+	takes a plane change at its next frame: once no overlay is left, keying
+	stays on for kOverlayKeyingOffDelay, so that nothing written with any
+	alpha is blended while it may still show the overlay.
+	The caller holds fOverlayChangeLock.
+*/
+void
+HWInterface::_HideOverlayKey(overlay_token token)
+{
+	BAutolock _(fOverlayKeysLock);
+	for (int32 i = 0; i < fOverlayKeyCount; i++) {
+		if (fOverlayKeys[i].token == token) {
+			fOverlayKeys[i] = fOverlayKeys[--fOverlayKeyCount];
+			if (fOverlayKeyCount == 0)
+				fOverlayKeyingEnd = system_time() + kOverlayKeyingOffDelay;
+			return;
+		}
+	}
+}
+
+
+/*!	Adds or moves the rectangle of \a token; fOverlayKeysLock is held. */
+void
+HWInterface::_SetOverlayKey(overlay_token token, const overlay_window& window,
+	rgb_color key)
+{
+	int32 index = 0;
+	while (index < fOverlayKeyCount && fOverlayKeys[index].token != token)
+		index++;
+	if (index == fOverlayKeyCount) {
+		if (fOverlayKeyCount == kMaxOverlayKeys)
+			return;
+		fOverlayKeyCount++;
+	}
+
+	overlay_key& entry = fOverlayKeys[index];
+	entry.token = token;
+	entry.rect.left = window.h_start;
+	entry.rect.top = window.v_start;
+	entry.rect.right = window.h_start + window.width - 1;
+	entry.rect.bottom = window.v_start + window.height - 1;
+	entry.rect.key = ((uint32)key.red << 16) | ((uint32)key.green << 8)
+		| key.blue;
+}
+
+
+/*!	Whether front buffer writes are keyed now; fOverlayKeysLock is held. */
+bool
+HWInterface::_OverlayKeyingOn() const
+{
+	return fOverlayKeyCount > 0 || system_time() < fOverlayKeyingEnd;
+}
+
+
+/*!	Copies the current overlay rectangles to \a keys (kMaxOverlayKeys).
+	Returns their count, or -1 if keying is off.
+*/
+int32
+HWInterface::_GetOverlayKeys(overlay_key_rect* keys) const
+{
+	BAutolock _(fOverlayKeysLock);
+	if (!_OverlayKeyingOn())
+		return -1;
+	for (int32 i = 0; i < fOverlayKeyCount; i++)
+		keys[i] = fOverlayKeys[i].rect;
+	return fOverlayKeyCount;
+}
+
+
+/*!	Writes \a width 32-bit pixels of row \a y to the front buffer, from \a x
+	on: a copy, or keyed (\a keyCount from _GetOverlayKeys() not -1).
+*/
+void
+HWInterface::_WriteFrontRow(uint8* destination, const uint8* source, int32 x,
+	int32 y, int32 width, const overlay_key_rect* keys, int32 keyCount) const
+{
+	if (keyCount < 0)
+		memcpy(destination, source, width * 4);
+	else {
+		write_keyed_row((uint32*)destination, (const uint32*)source, x, y,
+			width, keys, keyCount);
+	}
 }
 
 
@@ -748,15 +902,17 @@ HWInterface::_CopyToFront(uint8* src, uint32 srcBPR, int32 x, int32 y,
 		case B_RGB32:
 		case B_RGBA32:
 		{
-			int32 bytes = (right - x + 1) * 4;
+			int32 width = right - x + 1;
 
-			if (bytes > 0) {
+			if (width > 0) {
+				overlay_key_rect keys[kMaxOverlayKeys];
+				const int32 keyCount = _GetOverlayKeys(keys);
+
 				// offset to left top pixel in dest buffer
 				dst += y * dstBPR + x * 4;
 				// copy
 				for (; y <= bottom; y++) {
-					// bytes is guaranteed to be multiple of 4
-					memcpy(dst, src, bytes);
+					_WriteFrontRow(dst, src, x, y, width, keys, keyCount);
 					dst += dstBPR;
 					src += srcBPR;
 				}

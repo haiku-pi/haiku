@@ -44,6 +44,21 @@ status_t bcm2711_set_cursor_bitmap(uint16 width, uint16 height, uint16 hotX,
 void bcm2711_move_cursor(uint16 x, uint16 y);
 void bcm2711_show_cursor(bool isVisible);
 
+// overlays
+uint32 bcm2711_overlay_count(const display_mode* mode);
+const uint32* bcm2711_overlay_supported_spaces(const display_mode* mode);
+uint32 bcm2711_overlay_supported_features(uint32 colorSpace);
+const overlay_buffer* bcm2711_allocate_overlay_buffer(color_space colorSpace,
+	uint16 width, uint16 height);
+status_t bcm2711_release_overlay_buffer(const overlay_buffer* buffer);
+status_t bcm2711_get_overlay_constraints(const display_mode* mode,
+	const overlay_buffer* buffer, overlay_constraints* constraints);
+overlay_token bcm2711_allocate_overlay(void);
+status_t bcm2711_release_overlay(overlay_token overlayToken);
+status_t bcm2711_configure_overlay(overlay_token overlayToken,
+	const overlay_buffer* buffer, const overlay_window* window,
+	const overlay_view* view);
+
 #ifdef __cplusplus
 }
 #endif
