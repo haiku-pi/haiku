@@ -19,11 +19,11 @@
 	its render stage, which starts once its bin stage is done and the
 	previous render list completed (Mesa relies on that order).
 
-	With the driver setting "queues concurrent" the four units run one job
-	each at the same time (Linux v3d_sched.c, credit_limit = 1): the binner
-	works on job N + 1 while the renderer draws job N, and texture uploads
-	and compute dispatches run beside control lists. Otherwise ("queues
-	serial", the default) one job is on the GPU at a time, the oldest first:
+	With the driver setting "queues concurrent" (the default) the four units
+	run one job each at the same time (Linux v3d_sched.c, credit_limit = 1):
+	the binner works on job N + 1 while the renderer draws job N, and texture
+	uploads and compute dispatches run beside control lists. With "queues
+	serial" one job is on the GPU at a time, the oldest first:
 	exactly the order of the single queue before (bin N, render N, then the
 	next job).
 
@@ -1304,8 +1304,8 @@ v3d_jobs_stop(v3d_device* device)
 }
 
 
-/*!	Reads the driver settings file "v3d": "queues concurrent" runs a job on
-	every unit at once, "queues serial" (the default) one job on the GPU at
+/*!	Reads the driver settings file "v3d": "queues concurrent" (the default)
+	runs a job on every unit at once, "queues serial" one job on the GPU at
 	a time. Read at every open(), so that a test switches between the two
 	without a reboot; a switch is safe at any time. Called without the
 	device lock.
@@ -1314,11 +1314,11 @@ void
 v3d_jobs_read_settings(v3d_device* device)
 {
 	void* settings = load_driver_settings("v3d");
-	const char* queues = get_driver_parameter(settings, "queues", "serial",
-		"serial");
-	const bool concurrent = strcmp(queues, "concurrent") == 0;
-	if (!concurrent && strcmp(queues, "serial") != 0)
-		ERROR("unknown setting \"queues %s\", using serial\n", queues);
+	const char* queues = get_driver_parameter(settings, "queues", "concurrent",
+		"concurrent");
+	const bool concurrent = strcmp(queues, "serial") != 0;
+	if (concurrent && strcmp(queues, "concurrent") != 0)
+		ERROR("unknown setting \"queues %s\", using concurrent\n", queues);
 	unload_driver_settings(settings);
 
 	MutexLocker locker(device->lock);
