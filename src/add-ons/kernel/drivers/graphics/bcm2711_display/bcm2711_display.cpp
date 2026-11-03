@@ -90,7 +90,7 @@ static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
 
 // overlay buffers: how many of the native mode's size are reserved when the
 // device is opened (the "overlay_reserve" setting), and at most in all
-static const uint32 kDefaultOverlayReserve = 3;
+static const uint32 kDefaultOverlayReserve = 4;
 static const uint32 kMaxOverlayBuffers = 32;
 static const size_t kMaxOverlayBufferSize = 64 * 1024 * 1024;
 
