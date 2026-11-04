@@ -50,6 +50,9 @@ static const uint16_t kHostControl2Signal1v8 = 1 << 3;
 // ExecuteIoCommand(): the smallest block the interrupt handler moves (a
 // smaller one is on the bus for less time than it takes to wake a thread)
 static const size_t kInterruptIoBlockSize = 256;
+// ExecuteIoCommand(): how long to poll for the end of a transfer whose last
+// block is on the bus (a 512-byte block takes 25 us at 41.7 MHz, 4 bits wide)
+static const bigtime_t kIoCompletionPoll = 100;
 #define CALLED(x...)		TRACE("CALLED %s\n", __PRETTY_FUNCTION__)
 
 
@@ -578,10 +581,22 @@ SdhciBus::ExecuteIoCommand(uint8_t command, uint32_t argument, void* buffer,
 
 	const bigtime_t timeout = system_time() + 1000000;
 	if (byInterrupt) {
-		// the interrupt handler moves the blocks; the transfer complete
-		// interrupt ends the command
+		// The interrupt handler moves the blocks, and the transfer complete
+		// interrupt ends the command. That one comes a block's time after the
+		// last block is on the bus, sooner than a thread wakes up from it: the
+		// handler wakes this thread then, and it polls for the rest.
 		ConditionVariableEntry waiter;
+		bool polled = false;
 		while (true) {
+			if (!polled && _IoTransferEnding()) {
+				polled = true;
+				const bigtime_t pollEnd = system_time() + kIoCompletionPoll;
+				while ((*(volatile uint32_t*)&fCommandResult
+						& SDHCI_INT_TRANSFER_MASK) == 0
+					&& system_time() < pollEnd) {
+					cpu_pause();
+				}
+			}
 			fInterruptNotifier.Add(&waiter);
 			if ((*(volatile uint32_t*)&fCommandResult
 					& SDHCI_INT_TRANSFER_MASK) != 0) {
@@ -729,7 +744,20 @@ SdhciBus::_MoveReadyIoBlocks()
 		fRegisters->interrupt_signal_enable &= ~(SDHCI_INT_BUF_READ_READY
 			| SDHCI_INT_BUF_WRITE_READY);
 	}
+	if (moved > 0 && _IoTransferEnding())
+		fInterruptNotifier.NotifyAll();
 	return moved;
+}
+
+
+/*!	Whether the last block of the current ExecuteIoCommand() transfer is on
+	the bus: written to the buffer, or being read into it.
+*/
+bool
+SdhciBus::_IoTransferEnding()
+{
+	const uint32_t blocksLeft = *(volatile uint32_t*)&fIoBlocksLeft;
+	return fIoWrite ? blocksLeft == 0 : blocksLeft <= 1;
 }
 
 

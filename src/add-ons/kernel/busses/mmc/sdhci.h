@@ -83,6 +83,7 @@ class SdhciBus {
 									bool isWrite);
 			uint32_t			_EndIoTransfer();
 			uint32_t			_MoveReadyIoBlocks();
+			bool				_IoTransferEnding();
 			void				_MoveIoBlock(uint8_t* data, size_t blockSize,
 									bool isWrite);
 			status_t			_TransferPio(phys_addr_t address, size_t length,
