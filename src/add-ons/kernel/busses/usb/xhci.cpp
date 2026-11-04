@@ -21,6 +21,11 @@
 #include <ByteOrder.h>
 #include <util/AutoLock.h>
 
+#if defined(__aarch64__)
+#	include <arch/cpu.h>
+#	include <arch_kernel.h>
+#endif
+
 #include "xhci.h"
 
 
@@ -1155,6 +1160,9 @@ XHCI::SubmitNormalRequest(Transfer* transfer)
 			transfer->VectorCount(), transfer->IsPhysical());
 	}
 
+	if (transfer->IsPhysical())
+		_SyncPhysicalFragment(transfer);
+
 	td->transfer = transfer;
 	status = _LinkDescriptorForPipe(td, endpoint);
 	if (status != B_OK) {
@@ -1517,6 +1525,36 @@ XHCI::FreeDescriptor(xhci_td* descriptor)
 		free(descriptor);
 	else
 		fStack->FreeChunk(descriptor, 0, sizeof(xhci_td));
+}
+
+
+/*!	Cache maintenance for the current fragment of a physical transfer, whose
+	TRBs point at the caller's memory itself (usb_disk's I/O requests) rather
+	than at the stack's DMA buffers. Called before the TD is handed to the
+	controller (dirty lines are written back for it to read, and discarded so
+	that none can be evicted over what it writes) and again when an IN transfer
+	has completed (to drop lines fetched speculatively in the meantime).
+	Only needed where the controller does not snoop the CPU caches.
+*/
+void
+XHCI::_SyncPhysicalFragment(Transfer* transfer)
+{
+#if defined(__aarch64__)
+	// TODO: like the stack's own DMA memory (see create_dma_area()), assume
+	// a controller that does not snoop the CPU caches on arm64, as the
+	// Raspberry Pi 4's VL805 behind its PCIe root complex; this should come
+	// from the bus instead.
+	const generic_io_vec* vector = transfer->Vector();
+	generic_size_t left = transfer->FragmentLength();
+	for (size_t i = 0; i < transfer->VectorCount() && left > 0; i++) {
+		const generic_size_t length = min_c(vector[i].length, left);
+		if (length == 0)
+			continue;
+
+		arm64_dcache_flush_range(KERNEL_PMAP_BASE + vector[i].base, length);
+		left -= length;
+	}
+#endif
 }
 
 
@@ -3275,6 +3313,9 @@ XHCI::FinishTransfers()
 				TRACE("transfer not successful, actualLength=%" B_PRIuSIZE "\n",
 					actualLength);
 			}
+
+			if (directionIn && transfer->IsPhysical())
+				_SyncPhysicalFragment(transfer);
 
 			if (directionIn && actualLength > 0 && !transfer->IsPhysical()) {
 				TRACE("copying in iov count %ld\n", transfer->VectorCount());
