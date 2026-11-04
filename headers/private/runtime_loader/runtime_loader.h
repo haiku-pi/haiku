@@ -72,6 +72,13 @@ struct rld_export {
 	void (*unlock_heap_after_fork)();
 };
 
+// A module ID (the value of a DTPMOD relocation) with this bit set stands for
+// a module whose TLS is in the thread's static TLS block (TLS_STATIC_TLS_SLOT):
+// the other bits are the offset of the module's TLS in that block. The images
+// loaded at program start get one on arm64 (runtime_loader/elf_tls.cpp); their
+// TLS is never stale, so __tls_get_addr() needs no generation check for them.
+#define TLS_STATIC_MODULE	0x80000000u
+
 extern struct rld_export *__gRuntimeLoader;
 
 

@@ -23,6 +23,9 @@ enum {
 	TLS_DYNAMIC_THREAD_VECTOR,
 	TLS_MALLOC_SLOT,
 	TLS_LOCALE_SLOT,
+	TLS_STATIC_TLS_SLOT,
+		// the thread's block of the TLS of the images loaded at program
+		// start (runtime_loader/elf_tls.cpp)
 
 	// Note: these entries can safely be changed between
 	// releases; 3rd party code always calls tls_allocate()

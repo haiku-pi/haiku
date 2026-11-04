@@ -530,6 +530,7 @@ err:
 	KTRACE("rld: preload_addon(\"%s\") failed: %s", path, strerror(status));
 
 	dequeue_loaded_image(image);
+	TLSBlockTemplates::Get().Unregister(image->dso_tls_id);
 	delete_image(image);
 	return status;
 }
@@ -607,6 +608,10 @@ load_program(char const *path, void **_entry)
 		goto err;
 
 	inject_runtime_loader_api(gProgramImage);
+
+	// The program's own code runs from here on: TLS of images loaded later
+	// cannot go into the static block anymore.
+	freeze_static_tls_block();
 
 	remap_images();
 	init_dependencies(gProgramImage, true);

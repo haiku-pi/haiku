@@ -85,6 +85,24 @@ TLSBlockTemplate::SetBaseAddress(addr_t baseAddress)
 }
 
 
+void
+TLSBlockTemplate::CopyInitImage(void* to) const
+{
+	memcpy(to, fAddress, fFileSize);
+	if (fMemorySize > fFileSize)
+		memset((char*)to + fFileSize, 0, fMemorySize - fFileSize);
+}
+
+
+void
+TLSBlockTemplate::ForgetInitImage()
+{
+	// The image is unmapped: blocks made from now on start out zeroed.
+	fAddress = NULL;
+	fFileSize = 0;
+}
+
+
 TLSBlock
 TLSBlockTemplate::CreateBlock()
 {
@@ -92,9 +110,7 @@ TLSBlockTemplate::CreateBlock()
 	if (pointer == NULL)
 		return TLSBlock();
 	memset(pointer, 0, TLS_DTV_OFFSET);
-	memcpy((char*)pointer + TLS_DTV_OFFSET, fAddress, fFileSize);
-	if (fMemorySize > fFileSize)
-		memset((char*)pointer + TLS_DTV_OFFSET + fFileSize, 0, fMemorySize - fFileSize);
+	CopyInitImage((char*)pointer + TLS_DTV_OFFSET);
 	return TLSBlock(pointer);
 }
 
@@ -123,6 +139,10 @@ TLSBlockTemplates::Register(const TLSBlockTemplate& block)
 	}
 
 	fTemplates[dso].SetGeneration(fGeneration);
+#ifdef TLS_STATIC_BLOCK
+	if (!fStaticBlockFrozen)
+		_AddToStaticBlock(fTemplates[dso]);
+#endif
 	return dso;
 }
 
@@ -132,6 +152,13 @@ TLSBlockTemplates::Unregister(unsigned dso)
 {
 	if (dso == unsigned(-1))
 		return;
+
+	if (fTemplates[dso].IsStatic()) {
+		// Its place in the static block is taken for good: the module ID is
+		// never handed out again, so no thread's block for it gets stale.
+		fTemplates[dso].ForgetInitImage();
+		return;
+	}
 
 	fGeneration++;
 	fFreeDSOs.push_back(dso);
@@ -162,9 +189,93 @@ TLSBlockTemplates::CreateBlock(unsigned dso)
 }
 
 
+/*!	Returns the value of a DTPMOD relocation for the module: its ID, or for
+	a module in the static block TLS_STATIC_MODULE | its offset there.
+*/
+addr_t
+TLSBlockTemplates::RelocationModule(unsigned dso) const
+{
+	unsigned offset;
+	if (GetStaticOffset(dso, offset))
+		return TLS_STATIC_MODULE | offset;
+	return dso;
+}
+
+
+bool
+TLSBlockTemplates::GetStaticOffset(unsigned dso, unsigned& _offset) const
+{
+	if (dso >= fTemplates.size() || !fTemplates[dso].IsStatic())
+		return false;
+
+	_offset = fTemplates[dso].StaticOffset();
+	return true;
+}
+
+
+/*!	Allocates and initializes a thread's static block. Its layout is fixed
+	from then on: modules registered later get blocks of their own.
+*/
+void*
+TLSBlockTemplates::CreateStaticBlock()
+{
+	fStaticBlockFrozen = true;
+
+	// The heap aligns to less than a TLS segment may ask for: allocate more,
+	// and keep the allocation's address in front of the aligned block.
+	size_t alignment = std::max(fStaticBlockAlignment, sizeof(void*));
+	void* allocation = malloc(fStaticBlockSize + alignment + sizeof(void*));
+	if (allocation == NULL)
+		return NULL;
+
+	addr_t block = ((addr_t)allocation + sizeof(void*) + alignment - 1)
+		& ~(addr_t)(alignment - 1);
+	((void**)block)[-1] = allocation;
+
+	for (unsigned dso = 0; dso < fTemplates.size(); dso++) {
+		if (fTemplates[dso].IsStatic())
+			fTemplates[dso].CopyInitImage((char*)block
+				+ fTemplates[dso].StaticOffset());
+	}
+
+	return (void*)block;
+}
+
+
+/*static*/ void
+TLSBlockTemplates::DeleteStaticBlock(void* block)
+{
+	if (block != NULL)
+		free(((void**)block)[-1]);
+}
+
+
+void
+TLSBlockTemplates::_AddToStaticBlock(TLSBlockTemplate& block)
+{
+	size_t alignment = std::max(block.Alignment(), (size_t)1);
+	if ((alignment & (alignment - 1)) != 0)
+		return;
+
+	size_t offset = (fStaticBlockSize + alignment - 1) & ~(alignment - 1);
+	if (offset >= TLS_STATIC_MODULE
+		|| block.MemorySize() >= TLS_STATIC_MODULE - offset) {
+		// the offset would not fit into a module ID
+		return;
+	}
+
+	block.SetStaticOffset(offset);
+	fStaticBlockSize = offset + block.MemorySize();
+	fStaticBlockAlignment = std::max(fStaticBlockAlignment, alignment);
+}
+
+
 TLSBlockTemplates::TLSBlockTemplates()
 	:
-	fGeneration(0)
+	fGeneration(0),
+	fStaticBlockSize(0),
+	fStaticBlockAlignment(1),
+	fStaticBlockFrozen(false)
 {
 	gRuntimeLoader.tls_generation = &fGeneration;
 }
@@ -313,9 +424,32 @@ DynamicThreadVector::_ResizeVector(unsigned minimumSize)
 }
 
 
+static void*
+get_static_tls_address(unsigned staticOffset, addr_t offset)
+{
+	void** block = tls_address(TLS_STATIC_TLS_SLOT);
+	if (*block == NULL) {
+		*block = TLSBlockTemplates::Get().CreateStaticBlock();
+		if (*block == NULL)
+			return NULL;
+	}
+	return (char*)*block + staticOffset + offset;
+}
+
+
 void*
 get_tls_address(unsigned dso, addr_t offset)
 {
+	// __tls_get_addr() passes a module in the static block as
+	// TLS_STATIC_MODULE | offset (the relocation's value), other callers may
+	// pass its module ID: both get the same block.
+	if (dso != unsigned(-1) && (dso & TLS_STATIC_MODULE) != 0)
+		return get_static_tls_address(dso & ~TLS_STATIC_MODULE, offset);
+
+	unsigned staticOffset;
+	if (TLSBlockTemplates::Get().GetStaticOffset(dso, staticOffset))
+		return get_static_tls_address(staticOffset, offset);
+
 	DynamicThreadVector dynamicThreadVector;
 	TLSBlock& block = dynamicThreadVector[dso];
 	if (block.IsInvalid())
@@ -328,5 +462,19 @@ void
 destroy_thread_tls()
 {
 	DynamicThreadVector().DestroyAll();
+
+	void** staticBlock = tls_address(TLS_STATIC_TLS_SLOT);
+	TLSBlockTemplates::DeleteStaticBlock(*staticBlock);
+	*staticBlock = NULL;
+}
+
+
+/*!	Called once the images loaded at program start are registered, before
+	any of their code runs: images loaded later get blocks of their own.
+*/
+void
+freeze_static_tls_block()
+{
+	TLSBlockTemplates::Get().FreezeStaticBlock();
 }
 
