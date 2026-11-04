@@ -78,6 +78,13 @@ class SdhciBus {
 			bool				PowerOn();
 			void				PowerOff();
 			void				RecoverError();
+			void				_StartIoTransfer(uint8_t* data,
+									size_t blockSize, uint32_t blockCount,
+									bool isWrite);
+			uint32_t			_EndIoTransfer();
+			uint32_t			_MoveReadyIoBlocks();
+			void				_MoveIoBlock(uint8_t* data, size_t blockSize,
+									bool isWrite);
 			status_t			_TransferPio(phys_addr_t address, size_t length,
 									bool isWrite);
 			status_t			_ExecuteCommand(uint8_t command,
@@ -102,7 +109,18 @@ class SdhciBus {
 			ConditionVariable	fInterruptNotifier;
 			sem_id				fScanSemaphore;
 			sem_id				fCardInterruptSemaphore;
-			spinlock			fCardInterruptLock;
+			spinlock			fInterruptLock;
+				// guards interrupt_signal_enable/interrupt_status_enable
+				// updates and the transfer below
+			uint8_t*			fIoData;
+			size_t				fIoBlockSize;
+			uint32_t			fIoBlocksLeft;
+			bool				fIoWrite;
+				// the blocks of an ExecuteIoCommand() data phase still to be
+				// moved by the interrupt handler (none: fIoBlocksLeft 0)
+			uint32_t			fIoLateBlocks;
+				// blocks the waiting thread moved itself, after a missed
+				// buffer ready interrupt
 			status_t			fStatus;
 			thread_id			fWorkerThread;
 			card_type			fCardType;

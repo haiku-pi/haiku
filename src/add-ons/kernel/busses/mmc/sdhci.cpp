@@ -46,6 +46,10 @@
 
 // host control 2: the I/O signals run at 1.8 V
 static const uint16_t kHostControl2Signal1v8 = 1 << 3;
+
+// ExecuteIoCommand(): the smallest block the interrupt handler moves (a
+// smaller one is on the bus for less time than it takes to wake a thread)
+static const size_t kInterruptIoBlockSize = 256;
 #define CALLED(x...)		TRACE("CALLED %s\n", __PRETTY_FUNCTION__)
 
 
@@ -69,6 +73,7 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 	:
 	fRegisters(registers),
 	fIrq(irq),
+	fWorkerThread(-1),
 	fCardType(CARD_TYPE_UNKNOWN),
 	fBaseClockKHz(quirks != NULL ? quirks->base_clock_khz : 0),
 	fNonRemovable(quirks != NULL && quirks->non_removable),
@@ -93,7 +98,12 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
 
 	fInterruptNotifier.Init(this, "SDHCI interrupts");
 	fCardInterruptSemaphore = -1;
-	B_INITIALIZE_SPINLOCK(&fCardInterruptLock);
+	B_INITIALIZE_SPINLOCK(&fInterruptLock);
+	fIoData = NULL;
+	fIoBlockSize = 0;
+	fIoBlocksLeft = 0;
+	fIoWrite = false;
+	fIoLateBlocks = 0;
 
 	DisableInterrupts();
 
@@ -208,7 +218,7 @@ SdhciBus::~SdhciBus()
 	fStatus = B_SHUTTING_DOWN;
 
 	status_t result;
-	if (fWorkerThread != 0)
+	if (fWorkerThread >= 0)
 		wait_for_thread(fWorkerThread, &result);
 }
 
@@ -524,9 +534,17 @@ SdhciBus::ExecuteDataCommand(uint8_t command, uint32_t argument, void* buffer,
 
 /*!	Executes a command whose data phase moves \a blockCount blocks of
 	\a blockSize bytes (at most 2048, not necessarily a multiple of 4) between
-	the card and the kernel buffer \a buffer, through the buffer data port:
-	SDIO's IO_RW_EXTENDED. The buffer is ready when the Present State
-	register says so; its latched interrupt status bit can be missed.
+	the card and the buffer \a buffer, through the buffer data port: SDIO's
+	IO_RW_EXTENDED.
+	A block is moved when the Present State register says that the buffer is
+	ready: its latched interrupt status bit can be missed when the next edge
+	comes while the previous one is acknowledged, so it is acknowledged before
+	the level is read. Blocks of at least kInterruptIoBlockSize bytes are moved
+	by the interrupt handler while the caller sleeps until the transfer
+	completes; smaller ones (register accesses, the 64-byte blocks of an SDIO
+	function's backplane window) are ready sooner than a thread wakes up, and
+	are moved here. \a buffer must be locked kernel memory, as the interrupt
+	handler accesses it.
 */
 status_t
 SdhciBus::ExecuteIoCommand(uint8_t command, uint32_t argument, void* buffer,
@@ -544,65 +562,206 @@ SdhciBus::ExecuteIoCommand(uint8_t command, uint32_t argument, void* buffer,
 	if (blockCount > 1)
 		transferMode |= TransferMode::kMulti | TransferMode::kBlockCountEnable;
 
+	// (the polling thread of a bus without interrupts does not move blocks)
+	const bool byInterrupt = blockSize >= kInterruptIoBlockSize
+		&& fWorkerThread < 0;
+	if (byInterrupt)
+		_StartIoTransfer((uint8_t*)buffer, blockSize, blockCount, isWrite);
+
 	status_t status = _ExecuteCommand(command, argument, response,
 		Command::kR1Type | Command::kDataPresent, transferMode);
-	if (status != B_OK)
+	if (status != B_OK) {
+		if (byInterrupt)
+			_EndIoTransfer();
 		return status;
-
-	const uint32_t ready = isWrite
-		? SDHCI_INT_BUF_WRITE_READY : SDHCI_INT_BUF_READ_READY;
-	uint8_t* data = (uint8_t*)buffer;
-	for (uint32_t block = 0; block < blockCount; block++) {
-		const bigtime_t timeout = system_time() + 1000000;
-		while (!(isWrite ? fRegisters->present_state.BufferWriteEnable()
-				: fRegisters->present_state.BufferReadEnable())) {
-			if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0
-				|| system_time() > timeout) {
-				ERROR("CMD%d %#" B_PRIx32 ": block %" B_PRIu32 " not ready, "
-					"response %#" B_PRIx32 ", status %" B_PRIx32 ", present state %"
-					B_PRIx32 ", host control %x, block %#" B_PRIx32 "\n", command,
-					argument, block, *response,
-					fCommandResult | fRegisters->interrupt_status,
-					fRegisters->present_state.Bits(),
-					fRegisters->host_control.Bits(),
-					fRegisters->block_size.Bits());
-				fRegisters->software_reset.ResetCommandAndDataLines();
-				return B_IO_ERROR;
-			}
-			spin(1);
-		}
-		fRegisters->interrupt_status = ready;
-
-		for (size_t done = 0; done < blockSize; done += 4) {
-			const size_t chunk = min_c(blockSize - done, 4);
-			uint32_t word = 0;
-			if (isWrite) {
-				memcpy(&word, data + done, chunk);
-				fRegisters->buffer_data_port = word;
-			} else {
-				word = fRegisters->buffer_data_port;
-				memcpy(data + done, &word, chunk);
-			}
-		}
-		data += blockSize;
 	}
 
-	// the transfer complete interrupt ends the command
 	const bigtime_t timeout = system_time() + 1000000;
-	while ((fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0) {
-		if (system_time() > timeout) {
-			ERROR("CMD%d: no transfer complete\n", command);
-			fRegisters->software_reset.ResetCommandAndDataLines();
-			return B_TIMED_OUT;
+	if (byInterrupt) {
+		// the interrupt handler moves the blocks; the transfer complete
+		// interrupt ends the command
+		ConditionVariableEntry waiter;
+		while (true) {
+			fInterruptNotifier.Add(&waiter);
+			if ((*(volatile uint32_t*)&fCommandResult
+					& SDHCI_INT_TRANSFER_MASK) != 0) {
+				break;
+			}
+			if (waiter.Wait(B_RELATIVE_TIMEOUT, 1000) == B_OK)
+				continue;
+
+			// Nothing for a millisecond: move the blocks whose buffer ready
+			// interrupt did not come
+			InterruptsSpinLocker locker(fInterruptLock);
+			const uint32_t late = _MoveReadyIoBlocks();
+			locker.Unlock();
+			if (late > 0) {
+				const uint32_t before = fIoLateBlocks;
+				fIoLateBlocks += late;
+				if ((before ^ fIoLateBlocks) > before) {
+					TRACE_ALWAYS("%" B_PRIu32 " data blocks moved without "
+						"their buffer ready interrupt\n", fIoLateBlocks);
+				}
+			}
+			if (system_time() > timeout)
+				break;
 		}
-		spin(10);
+
+		const uint32_t blocksLeft = _EndIoTransfer();
+		if ((fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0
+			|| blocksLeft != 0) {
+			ERROR("CMD%d %#" B_PRIx32 ": %s, %" B_PRIu32 " of %" B_PRIu32
+				" blocks left, status %" B_PRIx32 ", present state %" B_PRIx32
+				"\n", command, argument,
+				(fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0
+					? "no transfer complete" : "transfer ended early",
+				blocksLeft, blockCount,
+				fCommandResult | fRegisters->interrupt_status,
+				fRegisters->present_state.Bits());
+			fRegisters->software_reset.ResetCommandAndDataLines();
+			return (fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0
+				? B_TIMED_OUT : B_IO_ERROR;
+		}
+	} else {
+		const uint32_t ready = isWrite
+			? SDHCI_INT_BUF_WRITE_READY : SDHCI_INT_BUF_READ_READY;
+		uint8_t* data = (uint8_t*)buffer;
+		for (uint32_t block = 0; block < blockCount; block++) {
+			const bigtime_t blockTimeout = system_time() + 1000000;
+			while (!(isWrite ? fRegisters->present_state.BufferWriteEnable()
+					: fRegisters->present_state.BufferReadEnable())) {
+				if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0
+					|| system_time() > blockTimeout) {
+					ERROR("CMD%d %#" B_PRIx32 ": block %" B_PRIu32 " not ready, "
+						"response %#" B_PRIx32 ", status %" B_PRIx32 ", present "
+						"state %" B_PRIx32 ", host control %x, block %#" B_PRIx32
+						"\n", command, argument, block, *response,
+						fCommandResult | fRegisters->interrupt_status,
+						fRegisters->present_state.Bits(),
+						fRegisters->host_control.Bits(),
+						fRegisters->block_size.Bits());
+					fRegisters->software_reset.ResetCommandAndDataLines();
+					return B_IO_ERROR;
+				}
+				spin(1);
+			}
+			fRegisters->interrupt_status = ready;
+			_MoveIoBlock(data, blockSize, isWrite);
+			data += blockSize;
+		}
+
+		// the transfer complete interrupt ends the command
+		while ((fCommandResult & SDHCI_INT_TRANSFER_MASK) == 0) {
+			if (system_time() > timeout) {
+				ERROR("CMD%d: no transfer complete\n", command);
+				fRegisters->software_reset.ResetCommandAndDataLines();
+				return B_TIMED_OUT;
+			}
+			spin(10);
+		}
 	}
+
 	if ((fCommandResult & SDHCI_INT_DATA_ERROR_MASK) != 0) {
 		ERROR("CMD%d: data error %" B_PRIx32 "\n", command, fCommandResult);
 		fRegisters->software_reset.ResetCommandAndDataLines();
 		return B_IO_ERROR;
 	}
 	return B_OK;
+}
+
+
+/*!	Hands the data phase of the next ExecuteIoCommand() to the interrupt
+	handler, and lets the buffer ready interrupt of its direction through.
+*/
+void
+SdhciBus::_StartIoTransfer(uint8_t* data, size_t blockSize,
+	uint32_t blockCount, bool isWrite)
+{
+	const uint32_t ready = isWrite
+		? SDHCI_INT_BUF_WRITE_READY : SDHCI_INT_BUF_READ_READY;
+
+	InterruptsSpinLocker locker(fInterruptLock);
+	fIoData = data;
+	fIoBlockSize = blockSize;
+	fIoBlocksLeft = blockCount;
+	fIoWrite = isWrite;
+
+	// an edge left from an earlier transfer would only raise an empty
+	// interrupt
+	fRegisters->interrupt_status = ready;
+	fRegisters->interrupt_signal_enable |= ready;
+}
+
+
+/*!	Takes the data phase back from the interrupt handler, which will not
+	access the buffer anymore. Returns how many blocks were not moved.
+*/
+uint32_t
+SdhciBus::_EndIoTransfer()
+{
+	InterruptsSpinLocker locker(fInterruptLock);
+	const uint32_t blocksLeft = fIoBlocksLeft;
+	fIoBlocksLeft = 0;
+	fIoData = NULL;
+	fRegisters->interrupt_signal_enable &= ~(SDHCI_INT_BUF_READ_READY
+		| SDHCI_INT_BUF_WRITE_READY);
+	return blocksLeft;
+}
+
+
+/*!	Moves the blocks of the current ExecuteIoCommand() transfer for which the
+	buffer is ready, and masks the buffer ready interrupts once all are moved.
+	Called with fInterruptLock held. Returns how many blocks were moved.
+*/
+uint32_t
+SdhciBus::_MoveReadyIoBlocks()
+{
+	uint32_t moved = 0;
+	while (fIoBlocksLeft > 0
+		&& (fIoWrite ? fRegisters->present_state.BufferWriteEnable()
+			: fRegisters->present_state.BufferReadEnable())) {
+		_MoveIoBlock(fIoData, fIoBlockSize, fIoWrite);
+		fIoData += fIoBlockSize;
+		fIoBlocksLeft--;
+		moved++;
+	}
+	if (fIoBlocksLeft == 0) {
+		fRegisters->interrupt_signal_enable &= ~(SDHCI_INT_BUF_READ_READY
+			| SDHCI_INT_BUF_WRITE_READY);
+	}
+	return moved;
+}
+
+
+/*!	Moves one block of \a blockSize bytes between \a data and the buffer data
+	port, which only takes 32-bit accesses.
+*/
+void
+SdhciBus::_MoveIoBlock(uint8_t* data, size_t blockSize, bool isWrite)
+{
+	const size_t tail = blockSize % 4;
+	uint8_t* const end = data + blockSize - tail;
+	uint32_t word;
+	if (isWrite) {
+		for (; data < end; data += 4) {
+			memcpy(&word, data, 4);
+			fRegisters->buffer_data_port = word;
+		}
+		if (tail != 0) {
+			word = 0;
+			memcpy(&word, data, tail);
+			fRegisters->buffer_data_port = word;
+		}
+	} else {
+		for (; data < end; data += 4) {
+			word = fRegisters->buffer_data_port;
+			memcpy(data, &word, 4);
+		}
+		if (tail != 0) {
+			word = fRegisters->buffer_data_port;
+			memcpy(data, &word, tail);
+		}
+	}
 }
 
 
@@ -1159,7 +1318,7 @@ SdhciBus::PowerOff()
 void
 SdhciBus::SetCardInterrupt(sem_id sem)
 {
-	InterruptsSpinLocker locker(fCardInterruptLock);
+	InterruptsSpinLocker locker(fInterruptLock);
 	fCardInterruptSemaphore = sem;
 	if (sem >= 0) {
 		fRegisters->interrupt_status_enable |= SDHCI_INT_CARD_STATUS;
@@ -1175,7 +1334,7 @@ SdhciBus::SetCardInterrupt(sem_id sem)
 void
 SdhciBus::AcknowledgeCardInterrupt()
 {
-	InterruptsSpinLocker locker(fCardInterruptLock);
+	InterruptsSpinLocker locker(fInterruptLock);
 	if (fCardInterruptSemaphore < 0)
 		return;
 	fRegisters->interrupt_status_enable |= SDHCI_INT_CARD_STATUS;
@@ -1241,10 +1400,9 @@ SdhciBus::HandleInterrupt()
 	// shared with another controller (the Raspberry Pi 4's two SDHCIs share
 	// one), and the first handler that claims a level-triggered interrupt
 	// ends its dispatch.
-	if ((intmask == 0) || (intmask == 0xffffffff)
-		|| (intmask & fRegisters->interrupt_signal_enable) == 0) {
+	const uint32_t signalled = intmask & fRegisters->interrupt_signal_enable;
+	if ((intmask == 0) || (intmask == 0xffffffff) || signalled == 0)
 		return B_UNHANDLED_INTERRUPT;
-	}
 
 	TRACE("interrupt function called %x\n", intmask);
 
@@ -1293,6 +1451,17 @@ SdhciBus::HandleInterrupt()
 		TRACE("Card presence interrupt handled\n");
 	}
 
+	// The buffer is ready for a block of an ExecuteIoCommand() transfer:
+	// acknowledge the edge before reading the level, so that one coming
+	// while the blocks are moved raises the interrupt again
+	const uint32_t bufferReady = signalled
+		& (SDHCI_INT_BUF_READ_READY | SDHCI_INT_BUF_WRITE_READY);
+	if (bufferReady != 0) {
+		SpinLocker locker(fInterruptLock);
+		fRegisters->interrupt_status = bufferReady;
+		_MoveReadyIoBlocks();
+	}
+
 	// handling command interrupt
 	if (intmask & SDHCI_INT_CMD_MASK) {
 		fCommandResult |= intmask;
@@ -1315,7 +1484,7 @@ SdhciBus::HandleInterrupt()
 	// SDIO card interrupt: a level that only the function driver can clear
 	// by servicing the card, so it stays masked until it acknowledges it
 	if ((intmask & SDHCI_INT_CARD_STATUS) != 0) {
-		SpinLocker locker(fCardInterruptLock);
+		SpinLocker locker(fInterruptLock);
 		fRegisters->interrupt_signal_enable &= ~SDHCI_INT_CARD_STATUS;
 		fRegisters->interrupt_status_enable &= ~SDHCI_INT_CARD_STATUS;
 		if (fCardInterruptSemaphore >= 0) {
