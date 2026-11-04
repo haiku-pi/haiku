@@ -291,8 +291,14 @@ round_and_return (mp_limb_t *retval, int exponent, int negative,
 	exponent = MIN_EXP - 1;
     }
 
-  if (exponent > MAX_EXP)
-    return negative ? -FLOAT_HUGE_VAL : FLOAT_HUGE_VAL;
+  /* EXPONENT is that of the leading bit: MAX_EXP - 1 is the largest finite
+     one, MAX_EXP is reached when rounding carries out of the largest
+     mantissa (or a hexadecimal input names it).  Either is an overflow.  */
+  if (exponent >= MAX_EXP)
+    {
+      __set_errno (ERANGE);
+      return negative ? -FLOAT_HUGE_VAL : FLOAT_HUGE_VAL;
+    }
 
   return MPN2FLOAT (retval, exponent, negative);
 }
