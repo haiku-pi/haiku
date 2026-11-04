@@ -444,6 +444,13 @@ DynamicThreadVector::_ResizeVector(unsigned minimumSize)
 }
 
 
+#ifdef TLS_STATIC_BLOCK
+static const bool kHaveStaticBlock = true;
+#else
+static const bool kHaveStaticBlock = false;
+#endif
+
+
 static void*
 get_static_tls_address(unsigned staticOffset, addr_t offset)
 {
@@ -462,13 +469,17 @@ get_tls_address(unsigned dso, addr_t offset)
 {
 	// __tls_get_addr() passes a module in the static block as
 	// TLS_STATIC_MODULE | offset (the relocation's value), other callers may
-	// pass its module ID: both get the same block.
-	if (dso != unsigned(-1) && (dso & TLS_STATIC_MODULE) != 0)
-		return get_static_tls_address(dso & ~TLS_STATIC_MODULE, offset);
+	// pass its module ID: both get the same block. Without a static block
+	// no module is in one, and every thread-local access of a library comes
+	// through here: skip the lookup then.
+	if (kHaveStaticBlock) {
+		if (dso != unsigned(-1) && (dso & TLS_STATIC_MODULE) != 0)
+			return get_static_tls_address(dso & ~TLS_STATIC_MODULE, offset);
 
-	unsigned staticOffset;
-	if (TLSBlockTemplates::Get().GetStaticOffset(dso, staticOffset))
-		return get_static_tls_address(staticOffset, offset);
+		unsigned staticOffset;
+		if (TLSBlockTemplates::Get().GetStaticOffset(dso, staticOffset))
+			return get_static_tls_address(staticOffset, offset);
+	}
 
 	DynamicThreadVector dynamicThreadVector;
 	TLSBlock& block = dynamicThreadVector[dso];
