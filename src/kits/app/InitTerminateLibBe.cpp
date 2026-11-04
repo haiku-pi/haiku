@@ -81,7 +81,9 @@ terminate_after(image_id)
 
 	BRoster::Private::DeleteBeRoster();
 	BMessage::Private::StaticCleanup();
-	BMessage::Private::StaticCacheCleanup();
+	// The message cache is not deleted: the team's other threads keep running
+	// until exit() is done, and loopers among them still create and delete
+	// messages (BPathMonitor's looper, for one, is never quit).
 
 	DBG(OUT("terminate_after() done\n"));
 }
