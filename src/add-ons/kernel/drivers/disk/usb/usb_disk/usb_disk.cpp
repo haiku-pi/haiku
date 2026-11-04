@@ -957,6 +957,14 @@ usb_disk_update_capacity(device_lun* lun)
 		restrictions.high_address = UINT32_MAX;
 		restrictions.max_transfer_size = MAX_IO_BLOCKS * lun->block_size;
 		restrictions.max_segment_count = 256;
+#ifdef __aarch64__
+		// TODO: like the xHCI driver's cache maintenance for these transfers,
+		// assume a host controller that does not snoop the CPU caches on
+		// arm64. Then a buffer must not share a cache line with other data:
+		// the line, written back after the device wrote the buffer, would
+		// overwrite that data. Misaligned buffers are bounced instead.
+		restrictions.alignment = 64;
+#endif
 
 		DMAResource* dmaResource = new DMAResource;
 		result = dmaResource->Init(restrictions, lun->block_size, 1, 1);
