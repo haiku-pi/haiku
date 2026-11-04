@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <string.h>
 #include <strings.h>
 #include <syslog.h>
 #include <unistd.h>
@@ -41,6 +42,7 @@
 #include <Server.h>
 #include <TextView.h>
 #include <FindDirectory.h>
+#include <fs_info.h>
 
 #include <AutoDeleter.h>
 #include <WPASupplicant.h>
@@ -417,13 +419,32 @@ NetServer::_TestForInterface(const char* name)
 }
 
 
+/*!	Returns whether the boot volume is on a remote disk, i.e. the kernel
+	booted from the network.
+*/
+static bool
+is_network_boot()
+{
+	fs_info info;
+	if (fs_stat_dev(dev_for_path("/boot"), &info) != 0)
+		return false;
+	return strstr(info.device_name, "/disk/virtual/remote_disk/") != NULL;
+}
+
+
 /*!	Returns whether the kernel configured \a device before we started: it
 	does so when it boots from the network (its boot volume on a remote disk),
 	and reconfiguring the interface would take the boot volume away.
+	Otherwise an address the interface has is one an earlier net_server gave
+	it (net_server was restarted), and its DHCP client must be started again.
 */
 bool
 NetServer::_IsBootInterface(const char* device)
 {
+	static const bool sNetworkBoot = is_network_boot();
+	if (!sNetworkBoot)
+		return false;
+
 	BNetworkInterface interface(device);
 	if (!interface.Exists())
 		return false;
