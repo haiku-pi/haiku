@@ -716,8 +716,8 @@ IOOperation::Dump() const
 		B_PRIuGENADDR ")\n", fLength, fOriginalLength);
 	kprintf("  transferred:      %" B_PRIuGENADDR "\n", fTransferredBytes);
 	kprintf("  block size:       %" B_PRIuGENADDR "\n", fBlockSize);
-	kprintf("  saved vec index:  %u\n", fSavedVecIndex);
-	kprintf("  saved vec length: %u\n", fSavedVecLength);
+	kprintf("  saved vec index:  %" B_PRIu32 "\n", fSavedVecIndex);
+	kprintf("  saved vec length: %" B_PRIuGENADDR "\n", fSavedVecLength);
 	kprintf("  r/w:              %s\n", IsWrite() ? "write" : "read");
 	kprintf("  phase:            %s\n", fPhase == PHASE_READ_BEGIN
 		? "read begin" : fPhase == PHASE_READ_END ? "read end"

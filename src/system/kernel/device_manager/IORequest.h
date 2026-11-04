@@ -184,8 +184,10 @@ protected:
 			generic_size_t		fOriginalLength;
 			generic_size_t		fTransferredBytes;
 			generic_size_t		fBlockSize;
-			uint16				fSavedVecIndex;
-			uint16				fSavedVecLength;
+			uint32				fSavedVecIndex;
+			generic_size_t		fSavedVecLength;
+									// a bounce buffer vec can be longer than
+									// 64 kB
 			uint8				fPhase;
 			bool				fPartialBegin;
 			bool				fPartialEnd;
