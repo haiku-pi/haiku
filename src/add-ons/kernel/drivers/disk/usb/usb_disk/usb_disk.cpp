@@ -1809,6 +1809,13 @@ usb_disk_do_io(void* cookie, IOOperation* operation)
 	RecursiveLocker ioLocker(lun->device->io_lock);
 	MutexLocker deviceLocker(lun->device->lock);
 
+	if (lun->device->removed) {
+		// Operations still queued when the device went away: every command
+		// would only wait for its timeout.
+		lun->io_scheduler->OperationCompleted(operation, B_DEV_NOT_READY, 0);
+		return B_DEV_NOT_READY;
+	}
+
 	TRACE("%p: IOO offset: %" B_PRIdOFF ", length: %" B_PRIuGENADDR
 		", write: %s\n", operation->Parent(), operation->Offset(),
 		operation->Length(), operation->IsWrite() ? "yes" : "no");
@@ -1941,13 +1948,21 @@ usb_disk_uninit_driver(void* _cookie)
 	CALLED();
 	disk_device* device = (disk_device*)_cookie;
 	mutex_lock(&device->lock);
+	const bool removed = device->removed;
+	mutex_unlock(&device->lock);
 
-	if (!device->removed) {
-		mutex_unlock(&device->lock);
+	if (!removed)
 		usb_disk_device_removed(_cookie);
-		mutex_lock(&device->lock);
+
+	// Deleting an I/O scheduler waits for its threads, and its scheduler
+	// thread may be in usb_disk_do_io(), which takes the device locks: delete
+	// them before taking the lock (as usb_disk_update_capacity() does).
+	for (uint8 i = 0; i < device->lun_count; i++) {
+		delete device->luns[i]->io_scheduler;
+		device->luns[i]->io_scheduler = NULL;
 	}
 
+	mutex_lock(&device->lock);
 	ASSERT(device->open_count == 0);
 	usb_disk_free_device_and_luns(device);
 }
