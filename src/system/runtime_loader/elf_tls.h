@@ -106,7 +106,8 @@ TLSBlockTemplate::TLSBlockTemplate(void* address, size_t fileSize,
 	fAddress(address),
 	fFileSize(fileSize),
 	fMemorySize(memorySize),
-	fAlignment(alignment)
+	fAlignment(alignment > 1 && (alignment & (alignment - 1)) == 0
+		? alignment : 1)
 {
 }
 
