@@ -231,6 +231,8 @@ Volume::Mount(const char* deviceName, uint32 flags)
 	status_t status = fJournal->InitCheck();
 	if (status < B_OK) {
 		FATAL(("could not initialize journal: %s!\n", strerror(status)));
+		delete fJournal;
+		fJournal = NULL;
 		return status;
 	}
 
@@ -249,6 +251,8 @@ Volume::Mount(const char* deviceName, uint32 flags)
 	status = fBlockAllocator.Initialize();
 	if (status != B_OK) {
 		FATAL(("could not initialize block bitmap allocator!\n"));
+		delete fJournal;
+		fJournal = NULL;
 		return status;
 	}
 
@@ -281,15 +285,25 @@ Volume::Mount(const char* deviceName, uint32 flags)
 			}
 		} else {
 			FATAL(("could not create root node: publish_vnode() failed!\n"));
-			delete fRootNode;
-			return status;
 		}
 	} else {
 		status = B_BAD_VALUE;
 		FATAL(("could not create root node!\n"));
+	}
 
-		// We need to wait for the block allocator to finish
+	if (status != B_OK) {
+		// We need to wait for the block allocator to finish: it may have
+		// started a transaction to repair the block bitmap.
 		fBlockAllocator.Uninitialize();
+
+		delete fRootNode;
+		fRootNode = NULL;
+
+		// Deleting the journal ends the transaction that may still be open
+		// before the block cache goes with the device opener: the block
+		// cache cannot free blocks that are part of a transaction.
+		delete fJournal;
+		fJournal = NULL;
 		return status;
 	}
 
