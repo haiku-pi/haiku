@@ -955,6 +955,17 @@ usb_disk_update_capacity(device_lun* lun)
 	if (lun->io_scheduler == NULL) {
 		dma_restrictions restrictions = {};
 		restrictions.high_address = UINT32_MAX;
+
+		// The host controller may reach even less, for example behind a PCIe
+		// root complex with a limited inbound window (the Raspberry Pi 4's
+		// reaches only the first 3 GiB). Buffers above it are bounced.
+		uint64 highAddress;
+		if (gDeviceManager->get_attr_uint64(lun->device->node,
+				B_DMA_HIGH_ADDRESS, &highAddress, true) == B_OK
+			&& highAddress < restrictions.high_address) {
+			restrictions.high_address = highAddress;
+		}
+
 		restrictions.max_transfer_size = MAX_IO_BLOCKS * lun->block_size;
 		restrictions.max_segment_count = 256;
 #ifdef __aarch64__
