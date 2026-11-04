@@ -78,6 +78,36 @@ private:
 TLSBlockTemplates*	TLSBlockTemplates::fInstance;
 
 
+/*!	Allocates a TLS block whose data, \a dataOffset bytes into it, is aligned
+	to \a alignment (a power of two; the heap aligns to less than a TLS
+	segment may ask for). The allocation's address is kept in front of the
+	block, for free_tls_block().
+*/
+static void*
+allocate_tls_block(size_t size, size_t alignment, size_t dataOffset)
+{
+	alignment = std::max(alignment, sizeof(void*));
+	void* allocation = malloc(sizeof(void*) + dataOffset + size
+		+ alignment - 1);
+	if (allocation == NULL)
+		return NULL;
+
+	addr_t data = ((addr_t)allocation + sizeof(void*) + dataOffset
+		+ alignment - 1) & ~(addr_t)(alignment - 1);
+	void** block = (void**)(data - dataOffset);
+	block[-1] = allocation;
+	return block;
+}
+
+
+static void
+free_tls_block(void* block)
+{
+	if (block != NULL)
+		free(((void**)block)[-1]);
+}
+
+
 void
 TLSBlockTemplate::SetBaseAddress(addr_t baseAddress)
 {
@@ -106,7 +136,7 @@ TLSBlockTemplate::ForgetInitImage()
 TLSBlock
 TLSBlockTemplate::CreateBlock()
 {
-	void* pointer = malloc(fMemorySize + TLS_DTV_OFFSET);
+	void* pointer = allocate_tls_block(fMemorySize, fAlignment, TLS_DTV_OFFSET);
 	if (pointer == NULL)
 		return TLSBlock();
 	memset(pointer, 0, TLS_DTV_OFFSET);
@@ -221,42 +251,32 @@ TLSBlockTemplates::CreateStaticBlock()
 {
 	fStaticBlockFrozen = true;
 
-	// The heap aligns to less than a TLS segment may ask for: allocate more,
-	// and keep the allocation's address in front of the aligned block.
-	size_t alignment = std::max(fStaticBlockAlignment, sizeof(void*));
-	void* allocation = malloc(fStaticBlockSize + alignment + sizeof(void*));
-	if (allocation == NULL)
+	char* block = (char*)allocate_tls_block(fStaticBlockSize,
+		fStaticBlockAlignment, 0);
+	if (block == NULL)
 		return NULL;
-
-	addr_t block = ((addr_t)allocation + sizeof(void*) + alignment - 1)
-		& ~(addr_t)(alignment - 1);
-	((void**)block)[-1] = allocation;
 
 	for (unsigned dso = 0; dso < fTemplates.size(); dso++) {
 		if (fTemplates[dso].IsStatic())
-			fTemplates[dso].CopyInitImage((char*)block
+			fTemplates[dso].CopyInitImage(block
 				+ fTemplates[dso].StaticOffset());
 	}
 
-	return (void*)block;
+	return block;
 }
 
 
 /*static*/ void
 TLSBlockTemplates::DeleteStaticBlock(void* block)
 {
-	if (block != NULL)
-		free(((void**)block)[-1]);
+	free_tls_block(block);
 }
 
 
 void
 TLSBlockTemplates::_AddToStaticBlock(TLSBlockTemplate& block)
 {
-	size_t alignment = std::max(block.Alignment(), (size_t)1);
-	if ((alignment & (alignment - 1)) != 0)
-		return;
-
+	size_t alignment = block.Alignment();
 	size_t offset = (fStaticBlockSize + alignment - 1) & ~(alignment - 1);
 	if (offset >= TLS_STATIC_MODULE
 		|| block.MemorySize() >= TLS_STATIC_MODULE - offset) {
@@ -306,7 +326,7 @@ TLSBlock::Initialize(unsigned dso)
 void
 TLSBlock::Destroy()
 {
-	free(fPointer);
+	free_tls_block(fPointer);
 	fPointer = NULL;
 }
 
