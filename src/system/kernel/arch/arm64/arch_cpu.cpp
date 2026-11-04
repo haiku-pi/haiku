@@ -17,6 +17,7 @@ extern "C" void _exception_vectors(void);
 
 
 static uint32 sPsciConduit = 0;
+static arm64_shutdown_hook sShutdownHook = NULL;
 
 
 status_t
@@ -82,22 +83,42 @@ arch_cpu_init_post_modules(kernel_args *args)
 }
 
 
+void
+arm64_set_shutdown_hook(arm64_shutdown_hook hook)
+{
+	sShutdownHook = hook;
+}
+
+
 status_t
 arch_cpu_shutdown(bool reboot)
 {
-	// PSCI 0.2+: SYSTEM_RESET / SYSTEM_OFF. These don't return on success.
+	// PSCI 0.2+: SYSTEM_RESET / SYSTEM_OFF. These don't return on success;
+	// if one fails, the firmware may have changed x1-x17 (SMCCC 1.0).
 	uint64 function = reboot ? 0x84000009UL : 0x84000008UL;
 	register uint64 x0 asm("x0") = function;
 	switch (sPsciConduit) {
 		case 1:
-			asm volatile("smc #0" : "+r" (x0) : : "memory");
+			asm volatile("smc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4",
+				"x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+				"x14", "x15", "x16", "x17", "memory");
 			break;
 		case 2:
-			asm volatile("hvc #0" : "+r" (x0) : : "memory");
+			asm volatile("hvc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4",
+				"x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+				"x14", "x15", "x16", "x17", "memory");
 			break;
 		default:
 			break;
 	}
+
+	// No PSCI (the Raspberry Pi 4 under U-Boot: its device tree has no "psci"
+	// node, the firmware starts the other CPUs from a spin table), or it
+	// failed: a platform driver may know how.
+	arm64_shutdown_hook hook = sShutdownHook;
+	if (hook != NULL)
+		return hook(reboot);
+
 	return B_ERROR;
 }
 

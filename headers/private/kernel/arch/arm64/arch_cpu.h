@@ -186,6 +186,17 @@ static inline void arch_cpu_idle(void)
 extern addr_t arm64_get_fp(void);
 
 
+/*!	Powers the machine off or resets it, for arch_cpu_shutdown() when the
+	firmware offers no PSCI: a platform driver (a watchdog that can reset the
+	board, say) installs it. It may be called with interrupts disabled (from
+	the kernel debugger, too), so it must not block. It returns only if it
+	failed.
+*/
+typedef status_t (*arm64_shutdown_hook)(bool reboot);
+
+extern void arm64_set_shutdown_hook(arm64_shutdown_hook hook);
+
+
 #ifdef __cplusplus
 }
 #endif

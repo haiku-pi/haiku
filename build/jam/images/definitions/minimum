@@ -360,6 +360,7 @@ SYSTEM_ADD_ONS_DRIVERS_POWER = [ FFilterByBuildFeatures
 		amd_thermal
 		pch_thermal
 	}@ # x86,x86_64
+	bcm2835_pm@arm64
 	bcm2835_thermal@arm64
 ] ;
 
