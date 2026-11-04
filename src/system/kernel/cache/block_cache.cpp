@@ -59,6 +59,10 @@
 static const bigtime_t kTransactionIdleTime = 2000000LL;
 	// a transaction is considered idle after 2 seconds of inactivity
 
+// Set to 1 to have every sub transaction start check that it reached all
+// blocks changed since the last one (walks all blocks of the transaction).
+#define BLOCK_CACHE_CHECK_SUB_TRANSACTIONS 0
+
 
 namespace {
 
@@ -101,6 +105,8 @@ struct cached_block {
 	bool			discard : 1;
 	bool			busy_reading_waiters : 1;
 	bool			busy_writing_waiters : 1;
+	bool			sub_transaction_changed : 1;
+		// The block is in its transaction's sub_changed_blocks list
 	cache_transaction* transaction;
 		// This is the current active transaction, if any, the block is
 		// currently in (meaning was changed as a part of it).
@@ -113,6 +119,8 @@ struct cached_block {
 		// transaction ends, the changes of the previous transaction have to
 		// be written back before that transaction becomes the next previous
 		// transaction.
+	cached_block*	sub_transaction_next;
+		// The next block in the transaction's sub_changed_blocks list
 
 	bool CanBeWritten() const;
 	int32 LastAccess() const
@@ -278,6 +286,10 @@ struct cache_transaction {
 	int32			main_num_blocks;
 	int32			sub_num_blocks;
 	cached_block*	first_block;
+	cached_block*	sub_changed_blocks;
+		// The blocks made writable or discarded since the current sub
+		// transaction started: all others are unchanged since then, so that
+		// the next sub transaction start only needs to look at these
 	block_list		blocks;
 	ListenerList	listeners;
 	bool			open;
@@ -1055,6 +1067,7 @@ cache_transaction::cache_transaction()
 	main_num_blocks = 0;
 	sub_num_blocks = 0;
 	first_block = NULL;
+	sub_changed_blocks = NULL;
 	open = true;
 	has_sub_transaction = false;
 	last_used = system_time();
@@ -1077,6 +1090,40 @@ static cache_transaction*
 lookup_transaction(block_cache* cache, int32 id)
 {
 	return cache->transaction_hash.Lookup(id);
+}
+
+
+/*!	Remembers that \a block, a block of \a transaction, has been made writable
+	or discarded in the current sub transaction, if there is one.
+*/
+static void
+add_sub_transaction_change(cache_transaction* transaction, cached_block* block)
+{
+	ASSERT(block->transaction == transaction);
+
+	if (!transaction->has_sub_transaction || block->sub_transaction_changed)
+		return;
+
+	block->sub_transaction_changed = true;
+	block->sub_transaction_next = transaction->sub_changed_blocks;
+	transaction->sub_changed_blocks = block;
+}
+
+
+/*!	Empties the list of blocks changed in the current sub transaction. This
+	must be done before any block can leave \a transaction.
+*/
+static void
+clear_sub_transaction_changes(cache_transaction* transaction)
+{
+	cached_block* next;
+	for (cached_block* block = transaction->sub_changed_blocks; block != NULL;
+			block = next) {
+		next = block->sub_transaction_next;
+		block->sub_transaction_next = NULL;
+		block->sub_transaction_changed = false;
+	}
+	transaction->sub_changed_blocks = NULL;
 }
 
 
@@ -1786,6 +1833,8 @@ block_cache::NewBlock(off_t blockNumber)
 	block->discard = false;
 	block->busy_reading_waiters = false;
 	block->busy_writing_waiters = false;
+	block->sub_transaction_changed = false;
+	block->sub_transaction_next = NULL;
 #if BLOCK_CACHE_DEBUG_CHANGED
 	block->compare = NULL;
 #endif
@@ -2332,8 +2381,10 @@ get_writable_cached_block(block_cache* cache, off_t blockNumber,
 		transaction->first_block = block;
 		transaction->num_blocks++;
 	}
-	if (transaction != NULL)
+	if (transaction != NULL) {
 		transaction->last_used = system_time();
+		add_sub_transaction_change(transaction, block);
+	}
 
 	bool wasUnchanged = block->original_data == NULL
 		|| block->previous_transaction != NULL;
@@ -3184,6 +3235,8 @@ cache_end_transaction(void* _cache, int32 id,
 
 	T(Action("end", cache, transaction));
 
+	clear_sub_transaction_changes(transaction);
+
 	// iterate through all blocks and free the unchanged original contents
 
 	cached_block* next;
@@ -3237,6 +3290,8 @@ cache_abort_transaction(void* _cache, int32 id)
 
 	T(Abort(cache, transaction));
 	notify_transaction_listeners(cache, transaction, TRANSACTION_ABORTED);
+
+	clear_sub_transaction_changes(transaction);
 
 	// iterate through all blocks and restore their original contents
 
@@ -3311,6 +3366,8 @@ cache_detach_sub_transaction(void* _cache, int32 id,
 		delete newTransaction;
 		return B_NO_MEMORY;
 	}
+
+	clear_sub_transaction_changes(transaction);
 
 	cached_block* last = NULL;
 	cached_block* next;
@@ -3396,6 +3453,8 @@ cache_abort_sub_transaction(void* _cache, int32 id)
 	T(Abort(cache, transaction));
 	notify_transaction_listeners(cache, transaction, TRANSACTION_ABORTED);
 
+	clear_sub_transaction_changes(transaction);
+
 	// revert all changes back to the version of the parent
 
 	cached_block* block = transaction->first_block;
@@ -3462,6 +3521,40 @@ cache_abort_sub_transaction(void* _cache, int32 id)
 }
 
 
+/*!	Makes the changes to \a block in the current sub transaction (if any) part
+	of the parent transaction, and lets the next sub transaction start from
+	there.
+*/
+static void
+start_sub_transaction_block(block_cache* cache, cached_block* block)
+{
+	if (block->parent_data != NULL) {
+		// There already is an older sub transaction - we acknowledge
+		// its changes and move its blocks up to the parent
+		ASSERT(block->transaction->has_sub_transaction);
+		cache->FreeBlockParentData(block);
+	}
+	if (block->discard) {
+		// This block has been discarded in the parent transaction.
+		// Just throw away any changes made in this transaction, so that
+		// it can still be reverted to its original contents if needed
+		ASSERT(block->previous_transaction == NULL);
+		if (block->original_data != NULL) {
+			memcpy(block->current_data, block->original_data,
+				cache->block_size);
+
+			cache->Free(block->original_data);
+			block->original_data = NULL;
+		}
+		return;
+	}
+
+	// we "allocate" the parent data lazily, that means, we don't copy
+	// the data (and allocate memory for it) until we need to
+	block->parent_data = block->current_data;
+}
+
+
 status_t
 cache_start_sub_transaction(void* _cache, int32 id)
 {
@@ -3481,36 +3574,39 @@ cache_start_sub_transaction(void* _cache, int32 id)
 
 	// move all changed blocks up to the parent
 
-	cached_block* block = transaction->first_block;
-	cached_block* next;
-	for (; block != NULL; block = next) {
-		next = block->transaction_next;
+	if (transaction->has_sub_transaction) {
+		// Only the blocks changed in the current sub transaction need to be
+		// looked at: start_sub_transaction_block() left all other blocks as
+		// they are now when the current sub transaction started.
+		cached_block* block = transaction->sub_changed_blocks;
+		cached_block* next;
+		for (; block != NULL; block = next) {
+			next = block->sub_transaction_next;
+			block->sub_transaction_next = NULL;
+			block->sub_transaction_changed = false;
 
-		if (block->parent_data != NULL) {
-			// There already is an older sub transaction - we acknowledge
-			// its changes and move its blocks up to the parent
-			ASSERT(transaction->has_sub_transaction);
-			cache->FreeBlockParentData(block);
+			start_sub_transaction_block(cache, block);
 		}
-		if (block->discard) {
-			// This block has been discarded in the parent transaction.
-			// Just throw away any changes made in this transaction, so that
-			// it can still be reverted to its original contents if needed
-			ASSERT(block->previous_transaction == NULL);
-			if (block->original_data != NULL) {
-				memcpy(block->current_data, block->original_data,
-					cache->block_size);
+		transaction->sub_changed_blocks = NULL;
+	} else {
+		ASSERT(transaction->sub_changed_blocks == NULL);
 
-				cache->Free(block->original_data);
-				block->original_data = NULL;
-			}
-			continue;
-		}
-
-		// we "allocate" the parent data lazily, that means, we don't copy
-		// the data (and allocate memory for it) until we need to
-		block->parent_data = block->current_data;
+		cached_block* block = transaction->first_block;
+		for (; block != NULL; block = block->transaction_next)
+			start_sub_transaction_block(cache, block);
 	}
+
+#if BLOCK_CACHE_CHECK_SUB_TRANSACTIONS
+	for (cached_block* block = transaction->first_block; block != NULL;
+			block = block->transaction_next) {
+		if (block->sub_transaction_changed || (block->discard
+				? block->parent_data != NULL || block->original_data != NULL
+				: block->parent_data != block->current_data)) {
+			panic("cache_start_sub_transaction(): block %" B_PRIdOFF
+				" (%p) missed\n", block->block_number, block);
+		}
+	}
+#endif
 
 	// all subsequent changes will go into the sub transaction
 	transaction->has_sub_transaction = true;
@@ -3857,6 +3953,8 @@ block_cache_discard(void* _cache, off_t blockNumber, size_t numBlocks)
 
 			// mark it as discarded (in the current transaction only, if any)
 			block->discard = true;
+			if (block->transaction != NULL)
+				add_sub_transaction_change(block->transaction, block);
 		}
 	}
 }
