@@ -54,6 +54,11 @@ public:
 
 			void				VnodeDeleted()	{ fVnodeDeleted = true; }
 
+			// whether the file lies on a disk partition (its pages are
+			// written back through the device's queue)
+			bool				IsOnPartition() const
+									{ return fModifiedPageQueue.Get() != NULL; }
+
 			dev_t				DeviceId() const
 									{ return fDevice; }
 			ino_t				InodeId() const

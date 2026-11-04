@@ -59,6 +59,7 @@
 #include "VMAnonymousCache.h"
 #include "VMAnonymousNoSwapCache.h"
 #include "IORequest.h"
+#include "../cache/vnode_store.h"
 
 
 //#define TRACE_VM
@@ -3882,6 +3883,16 @@ vm_page_fault(addr_t address, addr_t faultAddress, bool isWrite, bool isExecute,
 }
 
 
+/*!	The number of file pages a page fault reads at once: the faulting page
+	and the missing pages around it, within the aligned cluster of this size
+	that holds it (as FreeBSD's vm_fault does for a fault that does not follow
+	the previous one). A program's pages are faulted in scattered over its
+	files, and a request for every 4 KiB page made those reads cost a request
+	each: about 5 MB/s from an SD card.
+*/
+static const uint32 kFaultReadAroundPages = 16;
+
+
 struct PageFaultContext {
 	AddressSpaceReadLocker	addressSpaceLocker;
 	VMCacheChainLocker		cacheChainLocker;
@@ -3891,6 +3902,10 @@ struct PageFaultContext {
 	off_t					cacheOffset;
 	vm_page_reservation		reservation;
 	bool					isWrite;
+
+	// set when reading around the page did not bring the page itself; the
+	// fault then reads only that page (kept over restarts)
+	bool					singlePageRead;
 
 	// return values
 	vm_page*				page;
@@ -3902,7 +3917,8 @@ struct PageFaultContext {
 		:
 		addressSpaceLocker(addressSpace, true),
 		map(addressSpace->TranslationMap()),
-		isWrite(isWrite)
+		isWrite(isWrite),
+		singlePageRead(false)
 	{
 	}
 
@@ -3930,6 +3946,145 @@ struct PageFaultContext {
 		cacheChainLocker.Unlock(exceptCache);
 	}
 };
+
+
+/*!	Reads the faulting page of the vnode cache \a cache of a file on a disk
+	partition together with the missing pages around it, within its aligned
+	cluster of \c kFaultReadAroundPages, in one request. The pages around it
+	go into the cache as cached pages, as the file cache's reads leave them.
+	Returns \c false, with nothing changed, when there is nothing to read
+	around (the neighbouring pages are in the cache, or the file is that
+	small) or the pages for it cannot be reserved without waiting; the caller
+	then reads the single page.
+	Otherwise everything has been unlocked, \a _status is the result, and
+	\c context.restart is set, as after the single page read.
+*/
+static bool
+fault_read_around(PageFaultContext& context, VMCache* cache,
+	status_t& _status)
+{
+	// Only where a page read is a disk request. Other file systems bring
+	// their data in their own units: packagefs decompresses 64 KiB chunks of
+	// a package into a cache of its own, so a fault there already reads a
+	// chunk, and the pages around the faulting one, aligned to the file, would
+	// often need the next chunk too.
+	if (!static_cast<VMVnodeCache*>(cache)->IsOnPartition())
+		return false;
+
+	const off_t clusterSize = kFaultReadAroundPages * B_PAGE_SIZE;
+	const off_t clusterStart = ROUNDDOWN(context.cacheOffset, clusterSize);
+	const off_t first = max_c(clusterStart,
+		ROUNDUP(cache->virtual_base, B_PAGE_SIZE));
+	const off_t last = min_c(clusterStart + clusterSize,
+		ROUNDUP(cache->virtual_end, B_PAGE_SIZE));
+
+	// the run of missing pages the faulting one is in
+	off_t start = context.cacheOffset;
+	off_t end = context.cacheOffset + B_PAGE_SIZE;
+	while (start > first && cache->LookupPage(start - B_PAGE_SIZE) == NULL)
+		start -= B_PAGE_SIZE;
+	while (end < last && cache->LookupPage(end) == NULL)
+		end += B_PAGE_SIZE;
+
+	const uint32 pageCount = (end - start) / B_PAGE_SIZE;
+	vm_page_reservation reservation;
+	if (pageCount < 2
+		|| !vm_page_try_reserve_pages(&reservation, pageCount - 1,
+			VM_PRIORITY_USER)) {
+		return false;
+	}
+
+	// insert busy pages for the run
+	vm_page* pages[kFaultReadAroundPages];
+	generic_io_vec vecs[kFaultReadAroundPages];
+	uint32 vecCount = 0;
+	for (uint32 i = 0; i < pageCount; i++) {
+		const off_t offset = start + (off_t)i * B_PAGE_SIZE;
+		vm_page* page;
+		if (offset == context.cacheOffset) {
+			page = vm_page_allocate_page(&context.reservation,
+				PAGE_STATE_ACTIVE | VM_PAGE_ALLOC_BUSY);
+		} else {
+			page = vm_page_allocate_page(&reservation,
+				PAGE_STATE_CACHED | VM_PAGE_ALLOC_BUSY);
+			page->busy_io = true;
+		}
+		cache->InsertPage(page, offset);
+		DEBUG_PAGE_ACCESS_END(page);
+		pages[i] = page;
+
+		const phys_addr_t address
+			= (phys_addr_t)page->physical_page_number * B_PAGE_SIZE;
+		if (vecCount > 0
+			&& vecs[vecCount - 1].base + vecs[vecCount - 1].length == address) {
+			vecs[vecCount - 1].length += B_PAGE_SIZE;
+		} else {
+			vecs[vecCount].base = address;
+			vecs[vecCount].length = B_PAGE_SIZE;
+			vecCount++;
+		}
+	}
+	vm_page_unreserve_pages(&reservation);
+
+	cache->AcquireRefLocked();
+	context.UnlockAll();
+
+	generic_size_t bytesRead = end - start;
+	status_t status = cache->Read(start, vecs, vecCount,
+		B_PHYSICAL_IO_REQUEST, &bytesRead);
+
+	cache->Lock();
+
+	// Read() clears what lies past the end of the file; a page it could not
+	// fill before the end of the file is not kept
+	off_t validEnd = status == B_OK ? start + (off_t)bytesRead : start;
+	if (validEnd >= cache->virtual_end)
+		validEnd = end;
+
+	for (uint32 i = 0; i < pageCount; i++) {
+		vm_page* page = pages[i];
+		const off_t offset = start + (off_t)i * B_PAGE_SIZE;
+		const bool valid = offset + B_PAGE_SIZE <= validEnd;
+		DEBUG_PAGE_ACCESS_START(page);
+
+		if (offset == context.cacheOffset) {
+			if (valid) {
+				cache->MarkPageUnbusy(page);
+				DEBUG_PAGE_ACCESS_END(page);
+			} else {
+				cache->NotifyPageEvents(page, PAGE_EVENT_NOT_BUSY);
+				cache->RemovePage(page);
+				vm_page_free_etc(cache, page, &context.reservation);
+				context.singlePageRead = true;
+			}
+			continue;
+		}
+
+		if (!page->busy_io) {
+			// the page was removed from the cache meanwhile
+			cache->FreeRemovedPage(page);
+			continue;
+		}
+		page->busy_io = false;
+
+		if (valid) {
+			cache->MarkPageUnbusy(page);
+			DEBUG_PAGE_ACCESS_END(page);
+		} else {
+			cache->NotifyPageEvents(page, PAGE_EVENT_NOT_BUSY);
+			cache->RemovePage(page);
+			vm_page_free(cache, page);
+		}
+	}
+
+	// As after the single page read, the area situation might have changed
+	// while everything was unlocked: restart. If the faulting page could not
+	// be read with the others, it is read alone then, and its error reported.
+	cache->ReleaseRefAndUnlock();
+	context.restart = true;
+	_status = B_OK;
+	return true;
+}
 
 
 /*!	Gets the page that should be mapped into the area.
@@ -3975,6 +4130,12 @@ fault_get_page(PageFaultContext& context)
 
 		// see if the backing store has it
 		if (cache->StoreHasPage(context.cacheOffset)) {
+			status_t readAroundStatus;
+			if (cache->type == CACHE_TYPE_VNODE && !context.singlePageRead
+				&& fault_read_around(context, cache, readAroundStatus)) {
+				return readAroundStatus;
+			}
+
 			// insert a fresh page and mark it busy -- we're going to read it in
 			page = vm_page_allocate_page(&context.reservation,
 				PAGE_STATE_ACTIVE | VM_PAGE_ALLOC_BUSY);
