@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "arch_elf.h"
+#include "elf_tls.h"
 #include "runtime_loader_private.h"
 
 #include <runtime_loader.h>
@@ -63,8 +64,9 @@ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
 				relocValue = image->regions[0].delta + rel[i].r_addend;
 				break;
 			case R_AARCH64_TLS_DTPMOD64:
-				relocValue = symbolImage == NULL
-							? image->dso_tls_id : symbolImage->dso_tls_id;
+				relocValue = TLSBlockTemplates::Get().RelocationModule(
+					symbolImage == NULL
+						? image->dso_tls_id : symbolImage->dso_tls_id);
 				break;
 			case R_AARCH64_TLS_DTPREL64:
 				relocValue = symAddr;
