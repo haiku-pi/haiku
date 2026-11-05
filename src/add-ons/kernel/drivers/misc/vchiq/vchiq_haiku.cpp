@@ -243,6 +243,9 @@ adopt_buffer(vchiq_haiku_buffer* buffer)
 		lock_flags(buffer));
 	buffer->clone = clone;
 	buffer->clone_address = address;
+	TRACE_ALWAYS("team %" B_PRId32 " went away with a bulk transfer queued: "
+		"its %zu bytes are kept until the transfer ends\n", buffer->team,
+		buffer->size);
 }
 
 
