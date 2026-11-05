@@ -23,6 +23,7 @@
 #ifndef FS_SHELL
 #	include <io_requests.h>
 #	include <util/fs_trim_support.h>
+#	include <vfs.h>
 #endif
 
 
@@ -113,7 +114,23 @@ iterative_io_finished_hook(void* cookie, io_request* request, status_t status,
 {
 	Inode* inode = (Inode*)cookie;
 	rw_lock_read_unlock(&inode->Lock());
+
+#ifdef FS_SHELL
 	put_vnode(inode->GetVolume()->FSVolume(), inode->ID());
+#else
+	// This hook runs in the I/O scheduler's notifier thread, which also
+	// notifies all other I/O of the device. If ours is the last reference to
+	// a removed inode, put_vnode() would delete it right here, and
+	// bfs_remove_vnode() would wait for the journal lock - possibly held by
+	// a thread that waits for an inode lock that another request of ours
+	// holds until we notify it. vfs_put_vnode() leaves deleting the vnode to
+	// the vnode undertaker.
+	struct vnode* vnode;
+	if (vfs_lookup_vnode(inode->GetVolume()->ID(), inode->ID(), &vnode)
+			== B_OK) {
+		vfs_put_vnode(vnode);
+	}
+#endif
 	return B_OK;
 }
 
