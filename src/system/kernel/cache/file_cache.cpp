@@ -17,6 +17,7 @@
 #include <condition_variable.h>
 #include <file_cache.h>
 #include <generic_syscall.h>
+#include <heap.h>
 #include <low_resource_manager.h>
 #include <thread.h>
 #include <util/AutoLock.h>
@@ -39,6 +40,10 @@
 
 // maximum number of iovecs per request
 #define MAX_IO_VECS			32	// 128 kB
+// maximum number of pages per request of a large read (more than MAX_IO_VECS
+// pages): 512 kB, what the I/O scheduler hands a disk with 512 byte blocks in
+// one operation
+#define MAX_READ_CHUNK_PAGES	128
 
 #define BYPASS_IO_SIZE		65536
 #define LAST_ACCESSES		3
@@ -95,9 +100,19 @@ private:
 			generic_size_t		fSize;
 };
 
+/*!	The pages and I/O vectors of one part ("chunk") of a cache_io() request
+	that is read into or written to the cache at once.
+*/
+struct cache_chunk {
+	generic_io_vec*	vecs;
+	vm_page**		pages;
+	uint32			maxPages;
+};
+
 typedef status_t (*cache_func)(file_cache_ref* ref, off_t offset,
 	int32 pageOffset, addr_t buffer, size_t bufferSize, bool useBuffer,
-	vm_page_reservation* reservation, size_t reservePages);
+	vm_page_reservation* reservation, size_t reservePages,
+	const cache_chunk& chunk);
 
 static void add_to_iovec(generic_io_vec* vecs, uint32 &index, uint32 max,
 	generic_addr_t address, generic_size_t size);
@@ -385,20 +400,19 @@ read_pages_and_clear_partial(file_cache_ref* ref, off_t offset,
 static status_t
 read_into_cache(file_cache_ref* ref, off_t offset,
 	int32 pageOffset, addr_t buffer, size_t bufferSize, bool useBuffer,
-	vm_page_reservation* reservation, size_t reservePages)
+	vm_page_reservation* reservation, size_t reservePages,
+	const cache_chunk& chunk)
 {
 	TRACE(("read_into_cache(offset = %lld, pageOffset = %ld, buffer = %#lx, "
 		"bufferSize = %lu\n", offset, pageOffset, buffer, bufferSize));
 
 	VMCache* cache = ref->cache;
 
-	// TODO: We're using way too much stack! Rather allocate a sufficiently
-	// large chunk on the heap.
-	generic_io_vec vecs[MAX_IO_VECS];
+	generic_io_vec* vecs = chunk.vecs;
 	uint32 vecCount = 0;
 
 	generic_size_t numBytes = PAGE_ALIGN(pageOffset + bufferSize);
-	vm_page* pages[MAX_IO_VECS];
+	vm_page** pages = chunk.pages;
 	int32 pageIndex = 0;
 
 	// allocate pages for the cache and mark them busy
@@ -410,7 +424,7 @@ read_into_cache(file_cache_ref* ref, off_t offset,
 		cache->InsertPage(page, offset + pos);
 		DEBUG_PAGE_ACCESS_END(page);
 
-		add_to_iovec(vecs, vecCount, MAX_IO_VECS,
+		add_to_iovec(vecs, vecCount, chunk.maxPages,
 			page->physical_page_number * B_PAGE_SIZE, B_PAGE_SIZE);
 			// TODO: check if the array is large enough (currently panics)!
 	}
@@ -484,7 +498,8 @@ read_into_cache(file_cache_ref* ref, off_t offset,
 static status_t
 read_from_file(file_cache_ref* ref, off_t offset,
 	int32 pageOffset, addr_t buffer, size_t bufferSize, bool useBuffer,
-	vm_page_reservation* reservation, size_t reservePages)
+	vm_page_reservation* reservation, size_t reservePages,
+	const cache_chunk& chunk)
 {
 	TRACE(("read_from_file(offset = %lld, pageOffset = %ld, buffer = %#lx, "
 		"bufferSize = %lu\n", offset, pageOffset, buffer, bufferSize));
@@ -521,14 +536,13 @@ read_from_file(file_cache_ref* ref, off_t offset,
 static status_t
 write_to_cache(file_cache_ref* ref, off_t offset,
 	int32 pageOffset, addr_t buffer, size_t bufferSize, bool useBuffer,
-	vm_page_reservation* reservation, size_t reservePages)
+	vm_page_reservation* reservation, size_t reservePages,
+	const cache_chunk& chunk)
 {
-	// TODO: We're using way too much stack! Rather allocate a sufficiently
-	// large chunk on the heap.
-	generic_io_vec vecs[MAX_IO_VECS];
+	generic_io_vec* vecs = chunk.vecs;
 	uint32 vecCount = 0;
 	generic_size_t numBytes = PAGE_ALIGN(pageOffset + bufferSize);
-	vm_page* pages[MAX_IO_VECS];
+	vm_page** pages = chunk.pages;
 	int32 pageIndex = 0;
 	status_t status = B_OK;
 
@@ -552,7 +566,7 @@ write_to_cache(file_cache_ref* ref, off_t offset,
 
 		DEBUG_PAGE_ACCESS_END(page);
 
-		add_to_iovec(vecs, vecCount, MAX_IO_VECS,
+		add_to_iovec(vecs, vecCount, chunk.maxPages,
 			page->physical_page_number * B_PAGE_SIZE, B_PAGE_SIZE);
 	}
 
@@ -702,7 +716,8 @@ write_zeros_to_file(struct vnode* vnode, off_t offset,
 static status_t
 write_to_file(file_cache_ref* ref, off_t offset, int32 pageOffset,
 	addr_t buffer, size_t bufferSize, bool useBuffer,
-	vm_page_reservation* reservation, size_t reservePages)
+	vm_page_reservation* reservation, size_t reservePages,
+	const cache_chunk& chunk)
 {
 	push_access(ref, offset, bufferSize, true);
 	ref->cache->Unlock();
@@ -736,17 +751,18 @@ satisfy_cache_io(file_cache_ref* ref, cache_func function,
 	off_t offset, addr_t buffer, bool useBuffer, int32 &pageOffset,
 	size_t bytesLeft, size_t &reservePages, off_t &lastOffset,
 	addr_t &lastBuffer, int32 &lastPageOffset, size_t &lastLeft,
-	size_t &lastReservedPages, vm_page_reservation* reservation)
+	size_t &lastReservedPages, vm_page_reservation* reservation,
+	const cache_chunk& chunk)
 {
 	if (lastBuffer == buffer)
 		return B_OK;
 
 	size_t requestSize = buffer - lastBuffer;
-	reservePages = min_c(MAX_IO_VECS, (lastLeft - requestSize
+	reservePages = min_c(chunk.maxPages, (lastLeft - requestSize
 		+ lastPageOffset + B_PAGE_SIZE - 1) >> PAGE_SHIFT);
 
 	status_t status = function(ref, lastOffset, lastPageOffset,
-		lastBuffer, requestSize, useBuffer, reservation, reservePages);
+		lastBuffer, requestSize, useBuffer, reservation, reservePages, chunk);
 	if (status == B_OK) {
 		lastReservedPages = reservePages;
 		lastBuffer = buffer;
@@ -783,9 +799,30 @@ do_cache_io(void* _cacheRef, off_t offset, addr_t buffer,
 	// the "last*" variables always point to the end of the last
 	// satisfied request part
 
-	const uint32 kMaxChunkSize = MAX_IO_VECS * B_PAGE_SIZE;
+	// A chunk has MAX_IO_VECS pages and I/O vectors on the stack. A large
+	// read gets up to MAX_READ_CHUNK_PAGES from the heap, when there is memory
+	// to spare, so that it reaches the disk in fewer, larger requests. (A
+	// write only fills the cache: the page writer decides how it is written.)
+	generic_io_vec stackVecs[MAX_IO_VECS];
+	vm_page* stackPages[MAX_IO_VECS];
+	cache_chunk chunk = { stackVecs, stackPages, MAX_IO_VECS };
+	MemoryDeleter chunkDeleter;
+	if (!doWrite && pageOffset + size > MAX_IO_VECS * B_PAGE_SIZE
+		&& low_resource_state(B_KERNEL_RESOURCE_PAGES) == B_NO_LOW_RESOURCE) {
+		void* chunkBuffer = malloc_etc(MAX_READ_CHUNK_PAGES
+				* (sizeof(generic_io_vec) + sizeof(vm_page*)),
+			HEAP_DONT_WAIT_FOR_MEMORY | HEAP_DONT_LOCK_KERNEL_SPACE);
+		if (chunkBuffer != NULL) {
+			chunkDeleter.SetTo(chunkBuffer);
+			chunk.vecs = (generic_io_vec*)chunkBuffer;
+			chunk.pages = (vm_page**)(chunk.vecs + MAX_READ_CHUNK_PAGES);
+			chunk.maxPages = MAX_READ_CHUNK_PAGES;
+		}
+	}
 
-	size_t lastReservedPages = min_c(MAX_IO_VECS, (pageOffset + size
+	const uint32 kMaxChunkSize = chunk.maxPages * B_PAGE_SIZE;
+
+	size_t lastReservedPages = min_c(chunk.maxPages, (pageOffset + size
 		+ B_PAGE_SIZE - 1) >> PAGE_SHIFT);
 	vm_page_reservation reservation;
 	reserve_pages(ref, &reservation, lastReservedPages, doWrite);
@@ -865,7 +902,7 @@ do_cache_io(void* _cacheRef, off_t offset, addr_t buffer,
 			status = satisfy_cache_io(ref, function, offset,
 				buffer, useBuffer, pageOffset, bytesLeft, reservePages,
 				lastOffset, lastBuffer, lastPageOffset, lastLeft,
-				lastReservedPages, &reservation);
+				lastReservedPages, &reservation, chunk);
 			if (status != B_OK)
 				return status;
 
@@ -972,7 +1009,7 @@ do_cache_io(void* _cacheRef, off_t offset, addr_t buffer,
 			status = satisfy_cache_io(ref, function, offset,
 				buffer, useBuffer, pageOffset, bytesLeft, reservePages,
 				lastOffset, lastBuffer, lastPageOffset, lastLeft,
-				lastReservedPages, &reservation);
+				lastReservedPages, &reservation, chunk);
 			if (status != B_OK)
 				return partial(status);
 		}
@@ -981,7 +1018,7 @@ do_cache_io(void* _cacheRef, off_t offset, addr_t buffer,
 	// fill the last remaining bytes of the request (either write or read)
 
 	status = function(ref, lastOffset, lastPageOffset, lastBuffer,
-		lastLeft, useBuffer, &reservation, 0);
+		lastLeft, useBuffer, &reservation, 0, chunk);
 	if (status != B_OK)
 		return partial(status);
 	return B_OK;
