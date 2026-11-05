@@ -17,6 +17,9 @@
 	returns the driver's state, a few gencmd answers of the firmware and the
 	core's state dump.
 
+	While a client has MMAL's service open, the VideoCore's H.264 block runs
+	at its maximum clock rate (see "the H.264 block's clock" below).
+
 	Nothing happens while the system boots: the first open() allocates the
 	shared memory (the "slots"), starts the core's threads and hands the
 	slots to the firmware (mailbox property VCHIQ_INIT). That cannot be undone:
@@ -40,6 +43,7 @@
 #include <Drivers.h>
 #include <arch/cpu.h>
 #include <bus/FDT.h>
+#include <driver_settings.h>
 #include <Notifications.h>
 #include <kernel.h>
 #include <team.h>
@@ -105,6 +109,7 @@ struct vchiq_file {
 	void*				instance;
 	char*				report;
 	size_t				report_size;
+	bool				holds_video_clock;
 };
 
 
@@ -504,6 +509,99 @@ init_vchiq(vchiq_device* device)
 }
 
 
+//	#pragma mark - the H.264 block's clock
+
+
+/*!	The firmware runs the H.264 block (MMAL's video decoder and encoder) at
+	its minimum rate once its boot-time turbo period is over (250 MHz on the
+	Pi 4), where its maximum (500 MHz) decodes 1.4 times faster. While a
+	client has MMAL's service open, the block runs at the maximum, as the
+	CPU and V3D drivers set their clocks; the last such client's close gives
+	the firmware's minimum back. "video_clock false" in the driver's settings
+	file (kernel/drivers/vchiq) leaves the clock to the firmware; it is read
+	when the first client comes.
+*/
+static mutex sVideoClockLock = MUTEX_INITIALIZER("vchiq video clock");
+static int32 sVideoClockUsers;
+static uint32 sVideoClockRate;
+	// last rate the firmware reported, 0 when the clock is left alone
+
+
+static status_t
+clock_tag(uint32 tag, uint32 rate, uint32* _rate)
+{
+	// clock ID, rate, skip setting turbo (turbo would hold the ARM clock at
+	// its maximum: bcm2835_cpufreq sets that)
+	uint32 values[3] = { BCM2835_CLOCK_H264, rate, 1 };
+	const uint32 requestSize = tag == BCM2835_TAG_SET_CLOCK_RATE
+		? sizeof(values) : sizeof(uint32);
+	status_t status = sMailbox->property_tag(tag, values, sizeof(values),
+		requestSize, NULL);
+	if (status == B_OK && _rate != NULL)
+		*_rate = values[1];
+	return status;
+}
+
+
+static void
+set_video_clock(bool maximum)
+{
+	uint32 before = 0, target = 0, after = 0;
+	clock_tag(BCM2835_TAG_GET_CLOCK_RATE, 0, &before);
+	status_t status = clock_tag(maximum ? BCM2835_TAG_GET_MAX_CLOCK_RATE
+		: BCM2835_TAG_GET_MIN_CLOCK_RATE, 0, &target);
+	if (status == B_OK && target != 0)
+		status = clock_tag(BCM2835_TAG_SET_CLOCK_RATE, target, &after);
+	sVideoClockRate = after;
+	TRACE_ALWAYS("H.264 clock %s: %" B_PRIu32 " -> %" B_PRIu32 " MHz (%s)\n",
+		maximum ? "maximum" : "minimum", before / 1000000, after / 1000000,
+		strerror(status));
+}
+
+
+static bool
+video_clock_wanted()
+{
+	void* settings = load_driver_settings("vchiq");
+	const bool wanted = get_driver_boolean_parameter(settings, "video_clock",
+		true, true);
+	unload_driver_settings(settings);
+	return wanted;
+}
+
+
+static void
+acquire_video_clock(vchiq_file* file)
+{
+	if (file->holds_video_clock)
+		return;
+	file->holds_video_clock = true;
+
+	MutexLocker locker(sVideoClockLock);
+	if (sVideoClockUsers++ == 0) {
+		if (video_clock_wanted())
+			set_video_clock(true);
+		else {
+			sVideoClockRate = 0;
+			TRACE_ALWAYS("H.264 clock left to the firmware (settings)\n");
+		}
+	}
+}
+
+
+static void
+release_video_clock(vchiq_file* file)
+{
+	if (!file->holds_video_clock)
+		return;
+	file->holds_video_clock = false;
+
+	MutexLocker locker(sVideoClockLock);
+	if (--sVideoClockUsers == 0 && sVideoClockRate != 0)
+		set_video_clock(false);
+}
+
+
 //	#pragma mark - device module API
 
 
@@ -563,6 +661,7 @@ vchiq_free(void* cookie)
 
 	if (file->instance != NULL)
 		vchiq_haiku_free(file->instance);
+	release_video_clock(file);
 	free(file->report);
 	free(file);
 	return B_OK;
@@ -614,6 +713,13 @@ make_report(vchiq_file* file)
 		B_PRIxPHYSADDR "%s\n", device->registers_physical, device->interrupt,
 		atomic_get(&device->interrupts), device->bus_offset, device->dma_end,
 		device->long_bulk_addresses ? ", 36-bit bulk addresses" : "");
+
+	uint32 rate = 0;
+	clock_tag(BCM2835_TAG_GET_CLOCK_RATE, 0, &rate);
+	mutex_lock(&sVideoClockLock);
+	append(report, length, "vchiq: H.264 clock %" B_PRIu32 " MHz, %" B_PRId32
+		" MMAL clients\n", rate / 1000000, sVideoClockUsers);
+	mutex_unlock(&sVideoClockLock);
 
 	length += vchiq_haiku_dump_state(report + length,
 		kMaxReportSize - 1 - length);
@@ -702,6 +808,12 @@ vchiq_control(void* cookie, uint32 op, void* arg, size_t length)
 	}
 
 	int result = vchiq_haiku_ioctl(file->instance, op, &data);
+
+	if (op == VCHIQ_IOC_CREATE_SERVICE && result >= 0
+		&& data.create_service.params.fourcc
+			== VCHIQ_MAKE_FOURCC('m', 'm', 'a', 'l')) {
+		acquire_video_clock(file);
+	}
 
 	// Also after an error: an interrupted blocking bulk transfer reports
 	// in its "mode" that it waits (libvchiq repeats the call with it).
