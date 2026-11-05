@@ -32,8 +32,8 @@ RemotePackageRepository HaikuPorts
 	coreutils-9.9_bootstrap-1
 	expat-2.5.0_bootstrap-1
 	expat_devel-2.5.0_bootstrap-1
-	ffmpeg6-6.1.6-3
-	ffmpeg6_devel-6.1.6-3
+	ffmpeg6-6.1.6-4
+	ffmpeg6_devel-6.1.6-4
 	findutils-4.9.0_bootstrap-1
 	flex-2.5.35_bootstrap-1
 	fluidlite-1.0.9-1
@@ -132,6 +132,10 @@ RemotePackageRepository HaikuPorts
 	libedit_devel-20260512_3.1-1
 	python3.14-3.14.8-2
 	python3.14_devel-3.14.8-2
+	# haiku-pi: MMAL, libvchiq and VCOS for the VideoCore (scripts/build-mmal.sh), which ffmpeg6's h264_mmal
+	# decoder links
+	raspberrypi_userland-20241223-1
+	raspberrypi_userland_devel-20241223-1
 	# haiku-pi: HaikuWebKit (WebPositive) and its dependencies (scripts/build-webkit.sh)
 	brotli-1.2.0-1
 	brotli_devel-1.2.0-1
