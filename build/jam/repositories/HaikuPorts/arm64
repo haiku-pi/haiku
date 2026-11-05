@@ -134,8 +134,8 @@ RemotePackageRepository HaikuPorts
 	python3.14_devel-3.14.8-2
 	# haiku-pi: MMAL, libvchiq and VCOS for the VideoCore (scripts/build-mmal.sh), which ffmpeg6's h264_mmal
 	# decoder links
-	raspberrypi_userland-20241223-2
-	raspberrypi_userland_devel-20241223-2
+	raspberrypi_userland-20241223-3
+	raspberrypi_userland_devel-20241223-3
 	# haiku-pi: HaikuWebKit (WebPositive) and its dependencies (scripts/build-webkit.sh)
 	brotli-1.2.0-1
 	brotli_devel-1.2.0-1
