@@ -4,13 +4,79 @@
  */
 
 
-/*!	Linux kernel primitives for the VCHIQ core, on Haiku's (see vchi_haiku.h).
-	Thread and signal helpers that need the kernel's private C++ headers are
-	in vchiq_haiku.cpp.
+/*!	Linux kernel primitives for the VCHIQ core, on Haiku's (see
+	vchi_haiku.h).
 */
 
 
+#include <new>
+
+#include <condition_variable.h>
+#include <thread.h>
+#include <util/AutoLock.h>
+
 #include <interface/compat/vchi_haiku.h>
+
+
+static_assert(sizeof(ConditionVariable) <= sizeof(vchiq_condition),
+	"vchiq_condition cannot hold a ConditionVariable");
+static_assert(alignof(ConditionVariable) <= alignof(vchiq_condition),
+	"vchiq_condition is not aligned for a ConditionVariable");
+
+
+static inline ConditionVariable*
+condition(vchiq_condition& storage)
+{
+	return (ConditionVariable*)storage.storage;
+}
+
+
+static void
+init_condition(vchiq_condition& storage, const void* object,
+	const char* name)
+{
+	ConditionVariable* variable = new(storage.storage) ConditionVariable;
+	variable->Init(object, name);
+}
+
+
+/*!	Waits, with \a lock held, until \a count is not 0 (or for ever when it
+	is negative, a completion that is complete for all), and takes one.
+	Returns B_OK, or B_INTERRUPTED, B_TIMED_OUT... with nothing taken.
+*/
+static status_t
+take(spinlock& lock, int32& count, vchiq_condition& storage, uint32 flags,
+	bigtime_t timeout)
+{
+	InterruptsSpinLocker locker(lock);
+	if ((flags & B_RELATIVE_TIMEOUT) != 0 && timeout > 0) {
+		timeout += system_time();
+		flags = (flags & ~B_RELATIVE_TIMEOUT) | B_ABSOLUTE_TIMEOUT;
+	}
+
+	while (count == 0) {
+		if ((flags & B_RELATIVE_TIMEOUT) != 0)
+			return B_WOULD_BLOCK;
+
+		ConditionVariableEntry entry;
+		condition(storage)->Add(&entry);
+		locker.Unlock();
+		status_t status = entry.Wait(flags, timeout);
+		locker.Lock();
+
+		if (status != B_OK && count == 0)
+			return status;
+		if (status != B_OK) {
+			// we were woken up, or another waiter has to be
+			condition(storage)->NotifyOne();
+			return status;
+		}
+	}
+
+	if (count > 0)
+		count--;
+	return B_OK;
+}
 
 
 //	#pragma mark - semaphores
@@ -19,40 +85,39 @@
 void
 _sema_init(struct semaphore* s, int value)
 {
-	s->id = create_sem(value, "vchiq semaphore");
-	if (s->id < 0)
-		panic("vchiq: cannot create a semaphore: %s", strerror(s->id));
+	B_INITIALIZE_SPINLOCK(&s->lock);
+	s->count = value;
+	init_condition(s->condition, s, "vchiq semaphore");
 }
 
 
 void
 _sema_destroy(struct semaphore* s)
 {
-	if (s->id >= 0)
-		delete_sem(s->id);
-	s->id = -1;
+	condition(s->condition)->~ConditionVariable();
 }
 
 
 void
 down(struct semaphore* s)
 {
-	acquire_sem(s->id);
+	take(s->lock, s->count, s->condition, 0, 0);
 }
 
 
 int
 down_interruptible(struct semaphore* s)
 {
-	return acquire_sem_etc(s->id, 1, B_CAN_INTERRUPT, 0) == B_OK ? 0 : EINTR;
+	return take(s->lock, s->count, s->condition, B_CAN_INTERRUPT, 0) == B_OK
+		? 0 : EINTR;
 }
 
 
 int
 down_trylock(struct semaphore* s)
 {
-	return acquire_sem_etc(s->id, 1, B_RELATIVE_TIMEOUT, 0) == B_OK
-		? 0 : EAGAIN;
+	return take(s->lock, s->count, s->condition, B_RELATIVE_TIMEOUT, 0)
+		== B_OK ? 0 : EAGAIN;
 }
 
 
@@ -60,82 +125,63 @@ down_trylock(struct semaphore* s)
 void
 up(struct semaphore* s)
 {
-	release_sem_etc(s->id, 1, B_DO_NOT_RESCHEDULE);
+	InterruptsSpinLocker locker(s->lock);
+	s->count++;
+	condition(s->condition)->NotifyOne();
 }
 
 
 //	#pragma mark - completions
 
 
-/*!	A completion is a semaphore that counts complete() calls; complete_all()
-	sets "all" and releases far more than anyone waits for, so that every
-	present and later wait succeeds until INIT_COMPLETION.
-*/
-static const int32 kCompleteAllCount = 0x10000000;
-
-
 void
 init_completion(struct completion* c)
 {
-	c->all = 0;
-	c->sem = create_sem(0, "vchiq completion");
-	if (c->sem < 0)
-		panic("vchiq: cannot create a semaphore: %s", strerror(c->sem));
+	B_INITIALIZE_SPINLOCK(&c->lock);
+	c->done = 0;
+	init_condition(c->condition, c, "vchiq completion");
 }
 
 
 void
 destroy_completion(struct completion* c)
 {
-	if (c->sem >= 0)
-		delete_sem(c->sem);
-	c->sem = -1;
+	condition(c->condition)->~ConditionVariable();
 }
 
 
 void
 complete(struct completion* c)
 {
-	if (atomic_get(&c->all) == 0)
-		release_sem_etc(c->sem, 1, B_DO_NOT_RESCHEDULE);
+	InterruptsSpinLocker locker(c->lock);
+	if (c->done >= 0) {
+		c->done++;
+		condition(c->condition)->NotifyOne();
+	}
 }
 
 
 void
 complete_all(struct completion* c)
 {
-	if (atomic_get_and_set(&c->all, 1) == 0)
-		release_sem_etc(c->sem, kCompleteAllCount, 0);
+	InterruptsSpinLocker locker(c->lock);
+	c->done = -1;
+	condition(c->condition)->NotifyAll();
 }
 
 
 void
 INIT_COMPLETION_locked(struct completion* c)
 {
-	if (atomic_get_and_set(&c->all, 0) != 0) {
-		delete_sem(c->sem);
-		init_completion(c);
-		return;
-	}
-	while (acquire_sem_etc(c->sem, 1, B_RELATIVE_TIMEOUT, 0) == B_OK)
-		;
-}
-
-
-static void
-completion_claimed(struct completion* c)
-{
-	// keep complete_all()'s count from running out
-	if (atomic_get(&c->all) != 0)
-		release_sem_etc(c->sem, 1, B_DO_NOT_RESCHEDULE);
+	InterruptsSpinLocker locker(c->lock);
+	c->done = 0;
 }
 
 
 void
 wait_for_completion(struct completion* c)
 {
-	acquire_sem(c->sem);
-	completion_claimed(c);
+	take(c->lock, c->done, c->condition, 0, 0);
 }
 
 
@@ -143,20 +189,16 @@ wait_for_completion(struct completion* c)
 int
 try_wait_for_completion(struct completion* c)
 {
-	if (acquire_sem_etc(c->sem, 1, B_RELATIVE_TIMEOUT, 0) != B_OK)
-		return 0;
-	completion_claimed(c);
-	return 1;
+	return take(c->lock, c->done, c->condition, B_RELATIVE_TIMEOUT, 0)
+		== B_OK;
 }
 
 
 int
 wait_for_completion_interruptible(struct completion* c)
 {
-	if (acquire_sem_etc(c->sem, 1, B_CAN_INTERRUPT, 0) != B_OK)
-		return EINTR;
-	completion_claimed(c);
-	return 0;
+	return take(c->lock, c->done, c->condition, B_CAN_INTERRUPT, 0) == B_OK
+		? 0 : EINTR;
 }
 
 
@@ -167,14 +209,16 @@ long
 wait_for_completion_interruptible_timeout(struct completion* c,
 	unsigned long timeout)
 {
+	if (timeout == 0)
+		return try_wait_for_completion(c);
+
 	bigtime_t start = system_time();
-	status_t status = acquire_sem_etc(c->sem, 1,
+	status_t status = take(c->lock, c->done, c->condition,
 		B_CAN_INTERRUPT | B_RELATIVE_TIMEOUT, (bigtime_t)timeout * 1000);
 	if (status == B_TIMED_OUT || status == B_WOULD_BLOCK)
 		return 0;
 	if (status != B_OK)
 		return EINTR;
-	completion_claimed(c);
 
 	long left = (long)timeout - (long)((system_time() - start) / 1000);
 	return left > 0 ? left : 1;
@@ -184,10 +228,8 @@ wait_for_completion_interruptible_timeout(struct completion* c,
 int
 wait_for_completion_killable(struct completion* c)
 {
-	if (acquire_sem_etc(c->sem, 1, B_KILL_CAN_INTERRUPT, 0) != B_OK)
-		return EINTR;
-	completion_claimed(c);
-	return 0;
+	return take(c->lock, c->done, c->condition, B_KILL_CAN_INTERRUPT, 0)
+		== B_OK ? 0 : EINTR;
 }
 
 
@@ -251,7 +293,7 @@ struct thread_start {
 static status_t
 vchiq_thread_entry(void* _start)
 {
-	struct thread_start start = *(struct thread_start*)_start;
+	thread_start start = *(thread_start*)_start;
 	free(_start);
 	return start.function(start.data);
 }
@@ -268,7 +310,7 @@ vchiq_thread_create(int (*threadfn)(void* data), void* data,
 	vsnprintf(name, sizeof(name), namefmt, args);
 	va_end(args);
 
-	struct thread_start* start = malloc(sizeof(struct thread_start));
+	thread_start* start = (thread_start*)malloc(sizeof(thread_start));
 	if (start == NULL)
 		return NULL;
 	start->function = threadfn;
@@ -306,4 +348,12 @@ void
 flush_signals(VCHIQ_THREAD_T thread)
 {
 	// kernel threads get no signals
+}
+
+
+int
+fatal_signal_pending(VCHIQ_THREAD_T thread)
+{
+	return thread_is_interrupted(thread_get_current_thread(),
+		B_KILL_CAN_INTERRUPT);
 }

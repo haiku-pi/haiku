@@ -20,7 +20,7 @@ KernelAddon vchiq :
 	vchiq_gencmd.c
 
 	# the Linux primitives, on Haiku's (in place of FreeBSD's vchi_bsd.c)
-	vchi_haiku.c
+	vchi_haiku.cpp
 
 	# the core, from FreeBSD
 	vchiq_2835_arm.c

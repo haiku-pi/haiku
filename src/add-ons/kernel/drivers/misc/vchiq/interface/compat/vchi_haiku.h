@@ -133,9 +133,19 @@ typedef rw_lock rwlock_t;
 #define write_unlock_bh(lock)	rw_lock_write_unlock(lock)
 
 
-/* Counting semaphores: Haiku's. up() is safe in interrupt context. */
+/* Counting semaphores and completions: a count under a spinlock and a
+   condition variable (vchi_haiku.cpp), without kernel semaphores (the core
+   makes one per possible service: 4096). up() and complete() are safe in
+   interrupt context. */
+struct vchiq_condition {
+	uint64	storage[10];
+		/* a ConditionVariable */
+};
+
 struct semaphore {
-	sem_id	id;
+	spinlock				lock;
+	int32					count;
+	struct vchiq_condition	condition;
 };
 
 void _sema_init(struct semaphore* s, int value);
@@ -145,12 +155,11 @@ int down_interruptible(struct semaphore* s);
 int down_trylock(struct semaphore* s);
 void up(struct semaphore* s);
 
-
-/* Completions */
 struct completion {
-	sem_id	sem;
-	int32	all;
-		/* complete_all() was called: every wait succeeds */
+	spinlock				lock;
+	int32					done;
+		/* -1: complete_all() was called, every wait succeeds */
+	struct vchiq_condition	condition;
 };
 
 void init_completion(struct completion* c);
@@ -264,7 +273,9 @@ int fatal_signal_pending(VCHIQ_THREAD_T thread);
 #ifndef PAGE_SIZE
 #	define PAGE_SIZE			B_PAGE_SIZE
 #endif
-#define PAGE_ALIGN(x)			(((x) + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1))
+#ifndef PAGE_ALIGN
+#	define PAGE_ALIGN(x)		(((x) + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1))
+#endif
 
 
 /* Time */

@@ -42,7 +42,6 @@
 #include <bus/FDT.h>
 #include <kernel.h>
 #include <team.h>
-#include <thread.h>
 #include <util/AutoLock.h>
 #include <vm/vm.h>
 
@@ -326,16 +325,6 @@ vchiq_haiku_ring_doorbell(void)
 }
 
 
-/*!	Linux's fatal_signal_pending(): a kill signal is pending for the
-	calling thread. (vchi_haiku.h) */
-extern "C" int
-fatal_signal_pending(struct vchiq_thread* thread)
-{
-	return thread_is_interrupted(thread_get_current_thread(),
-		B_KILL_CAN_INTERRUPT);
-}
-
-
 static int32
 vchiq_interrupt(void* data)
 {
@@ -418,12 +407,15 @@ vchiq_open(void* deviceCookie, const char* path, int openMode, void** _cookie)
 	MutexLocker locker(device->lock);
 	status_t status = init_vchiq(device);
 	locker.Unlock();
-	if (status == B_OK)
-		status = vchiq_haiku_open(team_get_current_team_id(), &file->instance);
 	if (status != B_OK) {
 		free(file);
 		return status;
 	}
+
+	// Without a connection to the VideoCore, the file still reads (the
+	// state dump says why); its ioctls fail.
+	if (vchiq_haiku_open(team_get_current_team_id(), &file->instance) != B_OK)
+		file->instance = NULL;
 
 	*_cookie = file;
 	return B_OK;
@@ -442,7 +434,8 @@ vchiq_free(void* cookie)
 {
 	vchiq_file* file = (vchiq_file*)cookie;
 
-	vchiq_haiku_free(file->instance);
+	if (file->instance != NULL)
+		vchiq_haiku_free(file->instance);
 	free(file->report);
 	free(file);
 	return B_OK;
@@ -550,6 +543,8 @@ vchiq_control(void* cookie, uint32 op, void* arg, size_t length)
 
 	if (IOCGROUP(op) != VCHIQ_IOC_MAGIC)
 		return B_DEV_INVALID_IOCTL;
+	if (file->instance == NULL)
+		return ENOTCONN;
 
 	union {
 		VCHIQ_CREATE_SERVICE_T			create_service;
