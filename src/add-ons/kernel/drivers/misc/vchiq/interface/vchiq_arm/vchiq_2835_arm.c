@@ -74,7 +74,8 @@ typedef struct bulkinfo_struct {
 	vchiq_haiku_buffer	*buffer;
 } BULKINFO_T;
 
-extern VCHIQ_STATE_T g_state;
+extern VCHIQ_STATE_T *vchiq_haiku_state;
+#define g_state (*vchiq_haiku_state)
 int vchiq_init(void);
 
 static int

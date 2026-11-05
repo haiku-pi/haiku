@@ -3892,21 +3892,21 @@ vchiq_dump_service_state(void *dump_context, VCHIQ_SERVICE_T *service)
 			vchiq_dump(dump_context, buf, len + 1);
 
 			len = snprintf(buf, sizeof(buf),
-				"  Ctrl: tx_count=%d, tx_bytes=%ju, "
-				"rx_count=%d, rx_bytes=%ju",
+				"  Ctrl: tx_count=%d, tx_bytes=%llu, "
+				"rx_count=%d, rx_bytes=%llu",
 				service->stats.ctrl_tx_count,
-				(uintmax_t) service->stats.ctrl_tx_bytes,
+				(unsigned long long) service->stats.ctrl_tx_bytes,
 				service->stats.ctrl_rx_count,
-				(uintmax_t) service->stats.ctrl_rx_bytes);
+				(unsigned long long) service->stats.ctrl_rx_bytes);
 			vchiq_dump(dump_context, buf, len + 1);
 
 			len = snprintf(buf, sizeof(buf),
-				"  Bulk: tx_count=%d, tx_bytes=%ju, "
-				"rx_count=%d, rx_bytes=%ju",
+				"  Bulk: tx_count=%d, tx_bytes=%llu, "
+				"rx_count=%d, rx_bytes=%llu",
 				service->stats.bulk_tx_count,
-				(uintmax_t) service->stats.bulk_tx_bytes,
+				(unsigned long long) service->stats.bulk_tx_bytes,
 				service->stats.bulk_rx_count,
-				(uintmax_t) service->stats.bulk_rx_bytes);
+				(unsigned long long) service->stats.bulk_rx_bytes);
 			vchiq_dump(dump_context, buf, len + 1);
 
 			len = snprintf(buf, sizeof(buf),

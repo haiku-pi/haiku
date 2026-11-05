@@ -468,12 +468,6 @@ make_report(vchiq_file* file)
 		return B_NO_MEMORY;
 
 	size_t length = 0;
-	append(report, length, "vchiq: doorbells %#" B_PRIxPHYSADDR ", interrupt %"
-		B_PRIu64 " (%" B_PRId32 " taken), DMA offset %#" B_PRIx64 " below %#"
-		B_PRIxPHYSADDR "%s\n", device->registers_physical, device->interrupt,
-		atomic_get(&device->interrupts), device->bus_offset, device->dma_end,
-		device->long_bulk_addresses ? ", 36-bit bulk addresses" : "");
-
 	char reply[256];
 	for (size_t i = 0; i < B_COUNT_OF(kGencmdCommands); i++) {
 		int32 result = 0;
@@ -487,6 +481,12 @@ make_report(vchiq_file* file)
 				strerror(status));
 		}
 	}
+
+	append(report, length, "vchiq: doorbells %#" B_PRIxPHYSADDR ", interrupt %"
+		B_PRIu64 " (%" B_PRId32 " taken), DMA offset %#" B_PRIx64 " below %#"
+		B_PRIxPHYSADDR "%s\n", device->registers_physical, device->interrupt,
+		atomic_get(&device->interrupts), device->bus_offset, device->dma_end,
+		device->long_bulk_addresses ? ", 36-bit bulk addresses" : "");
 
 	length += vchiq_haiku_dump_state(report + length,
 		kMaxReportSize - 1 - length);

@@ -154,10 +154,15 @@ typedef struct dump_context_struct {
 	loff_t offset;
 } DUMP_CONTEXT_T;
 
-#ifndef __HAIKU__
+#ifdef __HAIKU__
+/* Allocated by vchiq_init(): it is large (a semaphore for each possible
+   service), and the driver is loaded at every boot of the board. */
+VCHIQ_STATE_T *vchiq_haiku_state;
+#define g_state (*vchiq_haiku_state)
+#else
 static struct cdev *  vchiq_cdev;
-#endif
 VCHIQ_STATE_T g_state;
+#endif
 static DEFINE_SPINLOCK(msg_queue_spinlock);
 
 static const char *const ioctl_names[] = {
@@ -3237,6 +3242,12 @@ vchiq_init(void)
 #endif
 
 	spin_lock_init(&msg_queue_spinlock);
+
+#ifdef __HAIKU__
+	vchiq_haiku_state = kzalloc(sizeof(VCHIQ_STATE_T), GFP_KERNEL);
+	if (vchiq_haiku_state == NULL)
+		return ENOMEM;
+#endif
 
 	err = vchiq_platform_init(&g_state);
 	if (err != 0)
