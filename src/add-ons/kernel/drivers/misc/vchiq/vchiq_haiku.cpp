@@ -40,6 +40,7 @@
 #include <Drivers.h>
 #include <arch/cpu.h>
 #include <bus/FDT.h>
+#include <Notifications.h>
 #include <kernel.h>
 #include <team.h>
 #include <util/AutoLock.h>
@@ -189,6 +190,87 @@ vchiq_haiku_cache_line_size(void)
 }
 
 
+/*!	Bulk buffers of user teams. The VideoCore may still be reading or
+	writing one when its team goes away, and a team's areas are deleted
+	before its files are closed (and the transfers with them): when a team
+	is removed, its buffers move to kernel clones of their areas, which keep
+	the pages alive until the transfers end (as Linux keeps its page
+	references).
+*/
+static mutex sBuffersLock = MUTEX_INITIALIZER("vchiq buffers");
+static vchiq_haiku_buffer* sBuffers;
+
+
+static uint32
+lock_flags(vchiq_haiku_buffer* buffer)
+{
+	return buffer->device_writes ? B_READ_DEVICE : 0;
+}
+
+
+/*!	The buffer's pages, from its team's area to a kernel clone of that area,
+	without being unlocked in between. Called with sBuffersLock held.
+*/
+static void
+adopt_buffer(vchiq_haiku_buffer* buffer)
+{
+	area_info info;
+	status_t status = get_area_info(buffer->area, &info);
+	void* cloneBase = NULL;
+	area_id clone = -1;
+	if (status == B_OK) {
+		clone = vm_clone_area(B_SYSTEM_TEAM, "vchiq bulk buffer", &cloneBase,
+			B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA
+				| (buffer->device_writes ? B_KERNEL_WRITE_AREA : 0),
+			REGION_NO_PRIVATE_MAP, buffer->area, true);
+		status = clone >= 0 ? B_OK : clone;
+	}
+	void* address = (uint8*)cloneBase
+		+ ((addr_t)buffer->address - (addr_t)info.address);
+	if (status == B_OK) {
+		status = lock_memory_etc(B_SYSTEM_TEAM, address, buffer->size,
+			lock_flags(buffer));
+		if (status != B_OK)
+			delete_area(clone);
+	}
+	if (status != B_OK) {
+		ERROR("cannot keep a bulk buffer of team %" B_PRId32 " (area %" B_PRId32
+			"): %s\n", buffer->team, buffer->area, strerror(status));
+		return;
+	}
+
+	unlock_memory_etc(buffer->team, buffer->address, buffer->size,
+		lock_flags(buffer));
+	buffer->clone = clone;
+	buffer->clone_address = address;
+}
+
+
+class TeamListener : public NotificationListener {
+public:
+	virtual void EventOccurred(NotificationService& service,
+		const KMessage* event)
+	{
+		int32 eventCode;
+		team_id team;
+		if (event->FindInt32("event", &eventCode) != B_OK
+			|| eventCode != TEAM_REMOVED
+			|| event->FindInt32("team", &team) != B_OK) {
+			return;
+		}
+
+		MutexLocker locker(sBuffersLock);
+		for (vchiq_haiku_buffer* buffer = sBuffers; buffer != NULL;
+				buffer = buffer->next) {
+			if (buffer->team == team && buffer->clone < 0)
+				adopt_buffer(buffer);
+		}
+	}
+};
+
+static TeamListener* sTeamListener;
+
+
 status_t
 vchiq_haiku_buffer_lock(void* address, size_t size, bool deviceWrites,
 	vchiq_haiku_buffer** _buffer)
@@ -200,18 +282,32 @@ vchiq_haiku_buffer_lock(void* address, size_t size, bool deviceWrites,
 	if (buffer == NULL)
 		return B_NO_MEMORY;
 
-	buffer->team = IS_USER_ADDRESS(address)
-		? team_get_current_team_id() : B_SYSTEM_TEAM;
+	buffer->team = B_SYSTEM_TEAM;
 	buffer->address = address;
 	buffer->size = size;
 	buffer->device_writes = deviceWrites;
+	buffer->area = buffer->clone = -1;
 	if (size == 0) {
 		*_buffer = buffer;
 		return B_OK;
 	}
 
+	if (IS_USER_ADDRESS(address)) {
+		// one area, so that it can be cloned (a malloc()ed buffer is)
+		buffer->team = team_get_current_team_id();
+		buffer->area = area_for(address);
+		area_info info;
+		if (buffer->area < 0 || get_area_info(buffer->area, &info) != B_OK
+			|| (addr_t)address + size > (addr_t)info.address + info.size) {
+			ERROR("bulk buffer %p (%zu bytes) is not in one area\n", address,
+				size);
+			free(buffer);
+			return B_BAD_VALUE;
+		}
+	}
+
 	status_t status = lock_memory_etc(buffer->team, address, size,
-		deviceWrites ? B_READ_DEVICE : 0);
+		lock_flags(buffer));
 	if (status != B_OK) {
 		free(buffer);
 		return status;
@@ -221,12 +317,19 @@ vchiq_haiku_buffer_lock(void* address, size_t size, bool deviceWrites,
 	status = get_memory_map_etc(buffer->team, address, size, buffer->runs,
 		&count);
 	if (status != B_OK) {
-		unlock_memory_etc(buffer->team, address, size,
-			deviceWrites ? B_READ_DEVICE : 0);
+		unlock_memory_etc(buffer->team, address, size, lock_flags(buffer));
 		free(buffer);
 		return status;
 	}
 	buffer->run_count = count;
+
+	if (buffer->team != B_SYSTEM_TEAM) {
+		MutexLocker locker(sBuffersLock);
+		buffer->next = sBuffers;
+		if (sBuffers != NULL)
+			sBuffers->previous = buffer;
+		sBuffers = buffer;
+	}
 
 	*_buffer = buffer;
 	return B_OK;
@@ -236,9 +339,23 @@ vchiq_haiku_buffer_lock(void* address, size_t size, bool deviceWrites,
 void
 vchiq_haiku_buffer_unlock(vchiq_haiku_buffer* buffer)
 {
-	if (buffer->size > 0) {
+	if (buffer->team != B_SYSTEM_TEAM) {
+		MutexLocker locker(sBuffersLock);
+		if (buffer->previous != NULL)
+			buffer->previous->next = buffer->next;
+		else
+			sBuffers = buffer->next;
+		if (buffer->next != NULL)
+			buffer->next->previous = buffer->previous;
+	}
+
+	if (buffer->clone >= 0) {
+		unlock_memory_etc(B_SYSTEM_TEAM, buffer->clone_address, buffer->size,
+			lock_flags(buffer));
+		delete_area(buffer->clone);
+	} else if (buffer->size > 0) {
 		unlock_memory_etc(buffer->team, buffer->address, buffer->size,
-			buffer->device_writes ? B_READ_DEVICE : 0);
+			lock_flags(buffer));
 	}
 	free(buffer);
 }
@@ -366,6 +483,13 @@ init_vchiq(vchiq_device* device)
 	if (status == B_OK) {
 		status = install_io_interrupt_handler(device->interrupt,
 			&vchiq_interrupt, device, 0);
+	}
+	if (status == B_OK) {
+		sTeamListener = new(std::nothrow) TeamListener;
+		status = sTeamListener != NULL
+			? NotificationManager::Manager().AddListener("teams", TEAM_REMOVED,
+				*sTeamListener)
+			: B_NO_MEMORY;
 	}
 
 	device->init_status = status;

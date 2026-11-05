@@ -47,6 +47,15 @@ typedef struct vchiq_haiku_buffer {
 	void*			address;
 	size_t			size;
 	bool			device_writes;
+
+	/* the driver's: a buffer of a team that goes away while the VideoCore
+	   may still use it moves to a kernel clone of its area */
+	area_id			area;
+	area_id			clone;
+	void*			clone_address;
+	struct vchiq_haiku_buffer* next;
+	struct vchiq_haiku_buffer* previous;
+
 	uint32			run_count;
 	physical_entry	runs[];
 } vchiq_haiku_buffer;
