@@ -50,6 +50,12 @@
 #define PAGES_FLUSH_DURATION_GLOBAL_QUOTA		(5 * 1000 * 1000)
 	// target maximum time needed to write out all modified pages, in one & all queues
 
+static const uint32 kMaxTransferVecs = 128;
+	// the most I/O vectors one transfer collects: 512 KiB of pages that are
+	// not physically contiguous, what the I/O scheduler hands a disk with
+	// 512 byte blocks in one operation; the disk's DMA resource splits further
+	// where the device needs it
+
 ConditionVariable ModifiedPageQueue::sUnderQuotaCondition;
 int64 ModifiedPageQueue::sGlobalModifiedCount = 0;
 bigtime_t ModifiedPageQueue::sGlobalEstimatedWriteDuration = -1;
@@ -109,16 +115,19 @@ private:
 	uint32				fMaxPages;
 	uint32				fWrapperCount;
 	uint32				fTransferCount;
+	uint32				fUsedVecs;
 	int32				fPendingTransfers;
 	PageWriteWrapper*	fWrappers;
 	PageWriteTransfer*	fTransfers;
+	generic_io_vec*		fVecs;
 	ConditionVariable	fAllFinishedCondition;
 };
 
 
 class PageWriteTransfer : public AsyncIOCallback {
 public:
-	void SetTo(PageWriterRun* run, vm_page* page, int32 maxPages);
+	void SetTo(PageWriterRun* run, vm_page* page, int32 maxPages,
+		generic_io_vec* vecs, uint32 maxVecs);
 	bool AddPage(vm_page* page);
 
 	status_t Schedule(uint32 flags);
@@ -128,6 +137,7 @@ public:
 	status_t Status() const	{ return fStatus; }
 	struct VMCache* Cache() const { return fCache; }
 	uint32 PageCount() const { return fPageCount; }
+	uint32 VecCount() const { return fVecCount; }
 
 	virtual void IOFinished(status_t status, bool partialTransfer,
 		generic_size_t bytesTransferred);
@@ -140,7 +150,8 @@ private:
 	int32				fMaxPages;
 	status_t			fStatus;
 	uint32				fVecCount;
-	generic_io_vec		fVecs[32]; // TODO: make dynamic/configurable
+	uint32				fMaxVecs;
+	generic_io_vec*		fVecs;
 };
 
 
@@ -289,9 +300,12 @@ PageWriteWrapper::Done(status_t result)
 
 
 /*!	The page's cache must be locked.
+	\a vecs is an array of \a maxVecs I/O vectors, which the transfer uses until
+	it is set to another page; \a maxVecs must be at least 1.
 */
 void
-PageWriteTransfer::SetTo(PageWriterRun* run, vm_page* page, int32 maxPages)
+PageWriteTransfer::SetTo(PageWriterRun* run, vm_page* page, int32 maxPages,
+	generic_io_vec* vecs, uint32 maxVecs)
 {
 	fRun = run;
 	fCache = page->Cache();
@@ -300,6 +314,8 @@ PageWriteTransfer::SetTo(PageWriterRun* run, vm_page* page, int32 maxPages)
 	fMaxPages = maxPages;
 	fStatus = B_OK;
 
+	fVecs = vecs;
+	fMaxVecs = maxVecs;
 	fVecs[0].base = (phys_addr_t)page->physical_page_number << PAGE_SHIFT;
 	fVecs[0].length = B_PAGE_SIZE;
 	fVecCount = 1;
@@ -339,7 +355,7 @@ PageWriteTransfer::AddPage(vm_page* page)
 
 	if (((off_t)page->cache_offset == fOffset + fPageCount
 			|| (off_t)page->cache_offset == fOffset - 1)
-		&& fVecCount < sizeof(fVecs) / sizeof(fVecs[0])) {
+		&& fVecCount < fMaxVecs) {
 		// not physically contiguous or not in the right order
 		uint32 vectorIndex;
 		if ((off_t)page->cache_offset < fOffset) {
@@ -411,11 +427,13 @@ PageWriterRun::Init(uint32 maxPages)
 	fMaxPages = maxPages;
 	fWrapperCount = 0;
 	fTransferCount = 0;
+	fUsedVecs = 0;
 	fPendingTransfers = 0;
 
 	fWrappers = new(std::nothrow) PageWriteWrapper[maxPages];
 	fTransfers = new(std::nothrow) PageWriteTransfer[maxPages];
-	if (fWrappers == NULL || fTransfers == NULL)
+	fVecs = new(std::nothrow) generic_io_vec[maxPages];
+	if (fWrappers == NULL || fTransfers == NULL || fVecs == NULL)
 		return B_NO_MEMORY;
 
 	return B_OK;
@@ -426,6 +444,7 @@ PageWriterRun::~PageWriterRun()
 {
 	delete[] fWrappers;
 	delete[] fTransfers;
+	delete[] fVecs;
 }
 
 
@@ -434,6 +453,7 @@ PageWriterRun::PrepareNextRun()
 {
 	fWrapperCount = 0;
 	fTransferCount = 0;
+	fUsedVecs = 0;
 	fPendingTransfers = 0;
 }
 
@@ -446,8 +466,14 @@ PageWriterRun::AddPage(vm_page* page)
 	fWrappers[fWrapperCount++].SetTo(page);
 
 	if (fTransferCount == 0 || !fTransfers[fTransferCount - 1].AddPage(page)) {
+		// The transfers take their I/O vectors from fVecs in turn: only the
+		// last one still grows, and no page needs more than one vector, so
+		// fMaxPages vectors are enough for the run.
+		if (fTransferCount > 0)
+			fUsedVecs += fTransfers[fTransferCount - 1].VecCount();
 		fTransfers[fTransferCount++].SetTo(this, page,
-			page->Cache()->MaxPagesPerAsyncWrite());
+			page->Cache()->MaxPagesPerAsyncWrite(), fVecs + fUsedVecs,
+			std::min(kMaxTransferVecs, fMaxPages - fUsedVecs));
 	}
 }
 
@@ -769,19 +795,27 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 	const uint32 allocationFlags = HEAP_DONT_WAIT_FOR_MEMORY
 		| HEAP_DONT_LOCK_KERNEL_SPACE;
 
+	uint32 maxVecs = std::min(kMaxTransferVecs, (uint32)maxPages);
+
 	PageWriteWrapper stackWrappersPool[2];
 	PageWriteWrapper* stackWrappers[1];
+	generic_io_vec stackVecs[1];
 	PageWriteWrapper* wrapperPool
 		= new(malloc_flags(allocationFlags)) PageWriteWrapper[maxPages + 1];
 	PageWriteWrapper** wrappers
 		= new(malloc_flags(allocationFlags)) PageWriteWrapper*[maxPages];
-	if (wrapperPool == NULL || wrappers == NULL) {
+	generic_io_vec* vecs
+		= new(malloc_flags(allocationFlags)) generic_io_vec[maxVecs];
+	if (wrapperPool == NULL || wrappers == NULL || vecs == NULL) {
 		// don't fail, just limit our capabilities
 		delete[] wrapperPool;
 		delete[] wrappers;
+		delete[] vecs;
 		wrapperPool = stackWrappersPool;
 		wrappers = stackWrappers;
+		vecs = stackVecs;
 		maxPages = 1;
+		maxVecs = 1;
 	}
 
 	int32 nextWrapper = 0;
@@ -822,7 +856,7 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 
 			if (transferEmpty || transfer.AddPage(page)) {
 				if (transferEmpty) {
-					transfer.SetTo(NULL, page, maxPages);
+					transfer.SetTo(NULL, page, maxPages, vecs, maxVecs);
 					transferEmpty = false;
 				}
 
@@ -848,7 +882,7 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 		usedWrappers = 0;
 
 		if (page != NULL) {
-			transfer.SetTo(NULL, page, maxPages);
+			transfer.SetTo(NULL, page, maxPages, vecs, maxVecs);
 			wrappers[usedWrappers++] = wrapper;
 		} else
 			transferEmpty = true;
@@ -857,6 +891,7 @@ vm_page_write_modified_page_range(struct VMCache* cache, uint32 firstPage,
 	if (wrapperPool != stackWrappersPool) {
 		delete[] wrapperPool;
 		delete[] wrappers;
+		delete[] vecs;
 	}
 
 	return B_OK;
