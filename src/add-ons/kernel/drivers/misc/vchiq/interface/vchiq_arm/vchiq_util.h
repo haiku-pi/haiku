@@ -36,6 +36,8 @@
 
 #ifdef __FreeBSD__
 #include <interface/compat/vchi_bsd.h>
+#elif defined(__HAIKU__)
+#include <interface/compat/vchi_haiku.h>
 #endif
 
 #include "vchiq_if.h"

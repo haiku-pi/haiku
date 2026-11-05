@@ -34,7 +34,11 @@
 #ifndef VCHIQ_CORE_H
 #define VCHIQ_CORE_H
 
+#ifdef __HAIKU__
+#include <interface/compat/vchi_haiku.h>
+#else
 #include <interface/compat/vchi_bsd.h>
+#endif
 #include <interface/compat/list.h>
 
 #include "vchiq_cfg.h"

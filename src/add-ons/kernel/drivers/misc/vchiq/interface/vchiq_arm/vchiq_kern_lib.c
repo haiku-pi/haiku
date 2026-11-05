@@ -397,7 +397,7 @@ vchiq_blocking_bulk_transfer(VCHIQ_SERVICE_HANDLE_T handle, void *data,
 	lmutex_lock(&instance->bulk_waiter_list_mutex);
 	list_for_each(pos, &instance->bulk_waiter_list) {
 		if (list_entry(pos, struct bulk_waiter_node,
-				list)->pid == current->p_pid) {
+				list)->pid == VCHIQ_THREAD_ID(current)) {
 			waiter = list_entry(pos,
 				struct bulk_waiter_node,
 				list);
@@ -449,13 +449,13 @@ vchiq_blocking_bulk_transfer(VCHIQ_SERVICE_HANDLE_T handle, void *data,
 
 		kfree(waiter);
 	} else {
-		waiter->pid = current->p_pid;
+		waiter->pid = VCHIQ_THREAD_ID(current);
 		lmutex_lock(&instance->bulk_waiter_list_mutex);
 		list_add(&waiter->list, &instance->bulk_waiter_list);
 		lmutex_unlock(&instance->bulk_waiter_list_mutex);
 		vchiq_log_info(vchiq_arm_log_level,
 				"saved bulk_waiter %p for pid %d",
-				waiter, current->p_pid);
+				waiter, VCHIQ_THREAD_ID(current));
 	}
 
 	return status;

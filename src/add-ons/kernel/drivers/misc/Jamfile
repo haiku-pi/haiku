@@ -21,4 +21,5 @@ KernelAddon <driver>test :
 
 if $(TARGET_ARCH) = arm64 {
 	SubInclude HAIKU_TOP src add-ons kernel drivers misc arm64_pmu ;
+	SubInclude HAIKU_TOP src add-ons kernel drivers misc vchiq ;
 }

@@ -808,10 +808,10 @@ copy_message_data(
 			return callback_result;
 
 		if (!callback_result)
-			return -EIO;
+			return EIO;
 
 		if (callback_result > max_bytes)
-			return -EIO;
+			return EIO;
 
 		pos += callback_result;
 	}

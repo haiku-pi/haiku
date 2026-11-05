@@ -1,0 +1,31 @@
+SubDir HAIKU_TOP src add-ons kernel drivers misc vchiq ;
+
+# vchiq_ioctl.h takes the ioctl number encoding from <sys/ioccom.h>
+UseHeaders [ FDirName $(HAIKU_TOP) headers compatibility bsd ] : true ;
+UsePrivateKernelHeaders ;
+UsePrivateHeaders drivers ;
+
+# The core includes <interface/...> and its own headers
+SubDirSysHdrs $(SUBDIR) ;
+SubDirHdrs $(SUBDIR) interface vchiq_arm ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) interface compat ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) interface vchiq_arm ] ;
+
+# as FreeBSD's sys/conf/files.arm64; the core mixes signed and unsigned
+# counters throughout, which FreeBSD does not warn about either
+SubDirCcFlags -DUSE_VCHIQ_ARM -D__VCCOREVER__=0x04000000 -Wno-sign-compare ;
+
+KernelAddon vchiq :
+	vchiq_haiku.cpp
+	vchiq_gencmd.c
+
+	# the Linux primitives, on Haiku's (in place of FreeBSD's vchi_bsd.c)
+	vchi_haiku.c
+
+	# the core, from FreeBSD
+	vchiq_2835_arm.c
+	vchiq_arm.c
+	vchiq_connected.c
+	vchiq_core.c
+	vchiq_kern_lib.c
+	;

@@ -37,6 +37,10 @@
 #include "vchiq_ioctl.h"
 #include "vchiq_arm.h"
 
+#ifdef __HAIKU__
+#include "vchiq_haiku.h"
+#endif
+
 #define DEVICE_NAME "vchiq"
 
 /* Override the default prefix, which would be vchiq_arm (from the filename) */
@@ -150,7 +154,9 @@ typedef struct dump_context_struct {
 	loff_t offset;
 } DUMP_CONTEXT_T;
 
+#ifndef __HAIKU__
 static struct cdev *  vchiq_cdev;
+#endif
 VCHIQ_STATE_T g_state;
 static DEFINE_SPINLOCK(msg_queue_spinlock);
 
@@ -178,6 +184,7 @@ static const char *const ioctl_names[] = {
 vchiq_static_assert((sizeof(ioctl_names)/sizeof(ioctl_names[0])) ==
 	(VCHIQ_IOC_MAX + 1));
 
+#ifndef __HAIKU__
 static d_open_t		vchiq_open;
 static d_close_t	vchiq_close;
 static d_ioctl_t	vchiq_ioctl;
@@ -189,6 +196,7 @@ static struct cdevsw vchiq_cdevsw = {
 	.d_close	= vchiq_close,
 	.d_name		= DEVICE_NAME,
 };
+#endif
 
 #if 0
 static void
@@ -389,6 +397,7 @@ user_service_free(void *userdata)
 
 	_sema_destroy(&user_service->insert_event);
 	_sema_destroy(&user_service->remove_event);
+	_sema_destroy(&user_service->close_event);
 
 	kfree(user_service);
 }
@@ -468,7 +477,7 @@ vchiq_ioc_copy_element_data(
 			     bytes_this_round);
 
 	if (res != 0)
-		return -EFAULT;
+		return EFAULT;
 
 	copy_context->current_element_offset += bytes_this_round;
 	copy_context->current_offset += bytes_this_round;
@@ -507,7 +516,7 @@ vchiq_ioc_queue_message(VCHIQ_SERVICE_HANDLE_T handle,
 
 	for (i = 0; i < count; i++) {
 		if (!elements[i].data && elements[i].size != 0)
-			return -EFAULT;
+			return EFAULT;
 
 		total_size += elements[i].size;
 	}
@@ -522,21 +531,36 @@ vchiq_ioc_queue_message(VCHIQ_SERVICE_HANDLE_T handle,
 *
 ***************************************************************************/
 
+#ifdef __HAIKU__
+/*
+ * Called with a kernel copy of the argument (or of the value, for _IO
+ * commands). Returns Linux's values: >= 0 (a count for AWAIT_COMPLETION and
+ * DEQUEUE_MESSAGE, the id for GET_CLIENT_ID), or a (negative) error.
+ */
+int
+vchiq_haiku_ioctl(void *_instance, unsigned long cmd, void *_arg)
+{
+	VCHIQ_INSTANCE_T instance = _instance;
+	caddr_t arg = _arg;
+#else
 static int
 vchiq_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int fflag,
    struct thread *td)
 {
 	VCHIQ_INSTANCE_T instance;
+#endif
 	VCHIQ_STATUS_T status = VCHIQ_SUCCESS;
 	VCHIQ_SERVICE_T *service = NULL;
 	int ret = 0;
 	int i, rc;
 	DEBUG_INITIALISE(g_state.local)
 
+#ifndef __HAIKU__
 	if ((ret = devfs_get_cdevpriv((void**)&instance))) {
 		printf("vchiq_ioctl: devfs_get_cdevpriv failed: error %d\n", ret);
 		return (ret);
 	}
+#endif
 
 /* XXXBSD: HACK! */
 #define _IOC_NR(x) ((x) & 0xff)
@@ -591,7 +615,7 @@ vchiq_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int fflag,
 
 	case VCHIQ_IOC_CONNECT:
 		if (instance->connected) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 		rc = lmutex_lock_interruptible(&instance->state->mutex);
@@ -600,7 +624,7 @@ vchiq_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int fflag,
 				"vchiq: connect: could not lock mutex for "
 				"state %d: %d",
 				instance->state->id, rc);
-			ret = -EINTR;
+			ret = EINTR;
 			break;
 		}
 		status = vchiq_connect_internal(instance->state, instance);
@@ -643,13 +667,13 @@ _CF32_FORK(
 
 		user_service = kmalloc(sizeof(USER_SERVICE_T), GFP_KERNEL);
 		if (!user_service) {
-			ret = -ENOMEM;
+			ret = ENOMEM;
 			break;
 		}
 
 		if (args.is_open) {
 			if (!instance->connected) {
-				ret = -ENOTCONN;
+				ret = ENOTCONN;
 				kfree(user_service);
 				break;
 			}
@@ -691,7 +715,7 @@ _CF32_FORK(
 					vchiq_remove_service(service->handle);
 					service = NULL;
 					ret = (status == VCHIQ_RETRY) ?
-						-EINTR : -EIO;
+						EINTR : EIO;
 					break;
 				}
 			}
@@ -714,7 +738,7 @@ _CF32_FORK(
 
 			service = NULL;
 		} else {
-			ret = -EEXIST;
+			ret = EEXIST;
 			kfree(user_service);
 		}
 	} break;
@@ -749,7 +773,7 @@ _CF32_FORK(
 				status = VCHIQ_RETRY;
 		}
 		else
-			ret = -EINVAL;
+			ret = EINVAL;
 	} break;
 
 	case VCHIQ_IOC_REMOVE_SERVICE: {
@@ -781,7 +805,7 @@ _CF32_FORK(
 				status = VCHIQ_RETRY;
 		}
 		else
-			ret = -EINVAL;
+			ret = EINVAL;
 	} break;
 
 	case VCHIQ_IOC_USE_SERVICE:
@@ -812,10 +836,10 @@ _CF32_FORK(
 					VCHIQ_FOURCC_AS_4CHARS(
 						service->base.fourcc),
 					service->client_id);
-				ret = -EINVAL;
+				ret = EINVAL;
 			}
 		} else
-			ret = -EINVAL;
+			ret = EINVAL;
 	} break;
 
 #ifdef COMPAT_FREEBSD32
@@ -864,9 +888,9 @@ _CF32_FORK(
 					(args.handle,
 					elements, args.count);
 			else
-				ret = -EFAULT;
+				ret = EFAULT;
 		} else {
-			ret = -EINVAL;
+			ret = EINVAL;
 		}
 	} break;
 #undef _CF32_CASE
@@ -904,7 +928,7 @@ _CF32_FORK(
 
 		service = find_service_for_instance(instance, args.handle);
 		if (!service) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 
@@ -912,7 +936,7 @@ _CF32_FORK(
 			waiter = kzalloc(sizeof(struct bulk_waiter_node),
 				GFP_KERNEL);
 			if (!waiter) {
-				ret = -ENOMEM;
+				ret = ENOMEM;
 				break;
 			}
 			args.userdata = &waiter->bulk_waiter;
@@ -921,7 +945,7 @@ _CF32_FORK(
 			lmutex_lock(&instance->bulk_waiter_list_mutex);
 			list_for_each(pos, &instance->bulk_waiter_list) {
 				if (list_entry(pos, struct bulk_waiter_node,
-					list)->pid == current->p_pid) {
+					list)->pid == VCHIQ_THREAD_ID(current)) {
 					waiter = list_entry(pos,
 						struct bulk_waiter_node,
 						list);
@@ -933,13 +957,13 @@ _CF32_FORK(
 			if (!waiter) {
 				vchiq_log_error(vchiq_arm_log_level,
 					"no bulk_waiter found for pid %d",
-					current->p_pid);
-				ret = -ESRCH;
+					VCHIQ_THREAD_ID(current));
+				ret = ESRCH;
 				break;
 			}
 			vchiq_log_info(vchiq_arm_log_level,
 				"found bulk_waiter %zx for pid %d",
-				(size_t)waiter, current->p_pid);
+				(size_t)waiter, VCHIQ_THREAD_ID(current));
 			args.userdata = &waiter->bulk_waiter;
 		}
 
@@ -965,13 +989,13 @@ _CF32_FORK(
 		} else {
 			const VCHIQ_BULK_MODE_T mode_waiting =
 				VCHIQ_BULK_MODE_WAITING;
-			waiter->pid = current->p_pid;
+			waiter->pid = VCHIQ_THREAD_ID(current);
 			lmutex_lock(&instance->bulk_waiter_list_mutex);
 			list_add(&waiter->list, &instance->bulk_waiter_list);
 			lmutex_unlock(&instance->bulk_waiter_list_mutex);
 			vchiq_log_info(vchiq_arm_log_level,
 				"saved bulk_waiter %zx for pid %d",
-				(size_t)waiter, current->p_pid);
+				(size_t)waiter, VCHIQ_THREAD_ID(current));
 
 _CF32_FORK(
 			memcpy((void *)
@@ -1001,7 +1025,7 @@ _CF32_FORK(
 
 		DEBUG_TRACE(AWAIT_COMPLETION_LINE);
 		if (!instance->connected) {
-			ret = -ENOTCONN;
+			ret = ENOTCONN;
 			break;
 		}
 
@@ -1032,7 +1056,7 @@ _CF32_FORK(
 				DEBUG_TRACE(AWAIT_COMPLETION_LINE);
 				vchiq_log_info(vchiq_arm_log_level,
 					"AWAIT_COMPLETION interrupted");
-				ret = -EINTR;
+				ret = EINTR;
 				break;
 			}
 		}
@@ -1086,7 +1110,7 @@ _CF32_FORK(
 						WARN(1, "invalid message "
 							"size\n");
 						if (count == 0)
-							ret = -EMSGSIZE;
+							ret = EMSGSIZE;
 						break;
 					}
 					if (msgbufcount <= 0)
@@ -1104,7 +1128,7 @@ _CF32_FORK(
 						&msgbufs32[msgbufcount],
 						sizeof(msgbuf32)) != 0) {
 						if (count == 0)
-							ret = -EFAULT;
+							ret = EFAULT;
 						break;
 					}
 					msgbuf = (void __user *)(uintptr_t)msgbuf32;
@@ -1114,7 +1138,7 @@ _CF32_FORK(
 						&args.msgbufs[msgbufcount],
 						sizeof(msgbuf)) != 0) {
 						if (count == 0)
-							ret = -EFAULT;
+							ret = EFAULT;
 						break;
 					}
 )
@@ -1123,7 +1147,7 @@ _CF32_FORK(
 					if (copy_to_user(msgbuf, header,
 						msglen) != 0) {
 						if (count == 0)
-							ret = -EFAULT;
+							ret = EFAULT;
 						break;
 					}
 
@@ -1162,7 +1186,7 @@ _CF32_FORK(
 						buf_loc, &comp32, sizeof(comp32)
 					) != 0) {
 						if (ret == 0)
-							ret = -EFAULT;
+							ret = EFAULT;
 				}
 ,
 				if (copy_to_user((void __user *)(
@@ -1171,7 +1195,7 @@ _CF32_FORK(
 					completion,
 					sizeof(VCHIQ_COMPLETION_DATA_T)) != 0) {
 						if (ret == 0)
-							ret = -EFAULT;
+							ret = EFAULT;
 					break;
 				}
 )
@@ -1217,8 +1241,14 @@ _CF32_FORK(
 		if (count != 0)
 			up(&instance->remove_event);
 
+#ifdef __HAIKU__
+		/* As Linux: the number of completions passed */
+		if (ret == 0)
+			ret = count;
+#endif
 		if ((ret == 0) && instance->closing)
-			ret = -ENOTCONN;
+			ret = ENOTCONN;
+#ifndef __HAIKU__
 		/*
 		 * XXXBSD: ioctl return codes are not negative as in linux, so
 		 * we can not indicate success with positive number of passed
@@ -1226,6 +1256,7 @@ _CF32_FORK(
 		 */
 		if (ret > 0)
 			ret = 0;
+#endif
 
 		lmutex_unlock(&instance->completion_mutex);
 		DEBUG_TRACE(AWAIT_COMPLETION_LINE);
@@ -1255,12 +1286,12 @@ _CF32_FORK(
 )
 		service = find_service_for_instance(instance, args.handle);
 		if (!service) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 		user_service = (USER_SERVICE_T *)service->base.userdata;
 		if (user_service->is_vchi == 0) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 
@@ -1269,7 +1300,7 @@ _CF32_FORK(
 			if (!args.blocking) {
 				spin_unlock(&msg_queue_spinlock);
 				DEBUG_TRACE(DEQUEUE_MESSAGE_LINE);
-				ret = -EWOULDBLOCK;
+				ret = EWOULDBLOCK;
 				break;
 			}
 			user_service->dequeue_pending = 1;
@@ -1280,7 +1311,7 @@ _CF32_FORK(
 					&user_service->insert_event) != 0) {
 					vchiq_log_info(vchiq_arm_log_level,
 						"DEQUEUE_MESSAGE interrupted");
-					ret = -EINTR;
+					ret = EINTR;
 					break;
 				}
 				spin_lock(&msg_queue_spinlock);
@@ -1301,7 +1332,7 @@ _CF32_FORK(
 
 		up(&user_service->remove_event);
 		if (header == NULL)
-			ret = -ENOTCONN;
+			ret = ENOTCONN;
 		else if (header->size <= args.bufsize) {
 			/* Copy to user space if msgbuf is not NULL */
 			if ((args.buf == NULL) ||
@@ -1325,15 +1356,19 @@ _CF32_FORK(
 				vchiq_release_message(
 					service->handle,
 					header);
+#ifdef __HAIKU__
+				/* As Linux: the size of the message */
+				ret = args.bufsize;
+#endif
 			} else
-				ret = -EFAULT;
+				ret = EFAULT;
 		} else {
 			vchiq_log_error(vchiq_arm_log_level,
 				"header %zx: bufsize %x < size %x",
 				(size_t)header, args.bufsize,
 				header->size);
 			WARN(1, "invalid size\n");
-			ret = -EMSGSIZE;
+			ret = EMSGSIZE;
 		}
 		DEBUG_TRACE(DEQUEUE_MESSAGE_LINE);
 	} break;
@@ -1366,14 +1401,14 @@ _CF32_FORK(
 		memcpy(&args, (const void*)arg, sizeof(args));
 )
 		if (args.config_size > sizeof(config)) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 		status = vchiq_get_config(instance, args.config_size, &config);
 		if (status == VCHIQ_SUCCESS) {
 			if (copy_to_user((void __user *)args.pconfig,
 				    &config, args.config_size) != 0) {
-				ret = -EFAULT;
+				ret = EFAULT;
 				break;
 			}
 		}
@@ -1387,7 +1422,7 @@ _CF32_FORK(
 
 		service = find_service_for_instance(instance, args.handle);
 		if (!service) {
-			ret = -EINVAL;
+			ret = EINVAL;
 			break;
 		}
 
@@ -1419,10 +1454,14 @@ _CF32_FORK(
 #undef _CF32_CASE
 
 	case VCHIQ_IOC_LIB_VERSION: {
+#ifdef __HAIKU__
+		size_t lib_version = *(size_t *)arg;
+#else
 		size_t lib_version = (size_t)arg;
+#endif
 
 		if (lib_version < VCHIQ_VERSION_MIN)
-			ret = -EINVAL;
+			ret = EINVAL;
 		else if (lib_version >= VCHIQ_VERSION_CLOSE_DELIVERED)
 			instance->use_close_delivered = 1;
 	} break;
@@ -1438,11 +1477,11 @@ _CF32_FORK(
 			close_delivered(user_service);
 		}
 		else
-			ret = -EINVAL;
+			ret = EINVAL;
 	} break;
 
 	default:
-		ret = -ENOTTY;
+		ret = ENOTTY;
 		break;
 	}
 #undef _CF32_FORK
@@ -1452,13 +1491,13 @@ _CF32_FORK(
 
 	if (ret == 0) {
 		if (status == VCHIQ_ERROR)
-			ret = -EIO;
+			ret = EIO;
 		else if (status == VCHIQ_RETRY)
-			ret = -EINTR;
+			ret = EINTR;
 	}
 
-	if ((status == VCHIQ_SUCCESS) && (ret < 0) && (ret != -EINTR) &&
-		(ret != -EWOULDBLOCK))
+	if ((status == VCHIQ_SUCCESS) && (ret < 0) && (ret != EINTR) &&
+		(ret != EWOULDBLOCK))
 		vchiq_log_info(vchiq_arm_log_level,
 			"  ioctl instance %lx, cmd %s -> status %d, %d",
 			(unsigned long)instance,
@@ -1475,9 +1514,11 @@ _CF32_FORK(
 				"<invalid>",
 			status, ret);
 
+#ifndef __HAIKU__
 	/* XXXBSD: report BSD-style error to userland */
 	if (ret < 0)
 		ret = -ret;
+#endif
 
 	return ret;
 }
@@ -1491,8 +1532,13 @@ _CF32_FORK(
 ***************************************************************************/
 static void instance_dtr(void *data);
 
+#ifdef __HAIKU__
+status_t
+vchiq_haiku_open(team_id team, void **_instance)
+#else
 static int
 vchiq_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
+#endif
 {
 	vchiq_log_info(vchiq_arm_log_level, "vchiq_open");
 	/* XXXBSD: do we really need this check? */
@@ -1503,16 +1549,20 @@ vchiq_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 		if (!state) {
 			vchiq_log_error(vchiq_arm_log_level,
 				"vchiq has no connection to VideoCore");
-			return -ENOTCONN;
+			return ENOTCONN;
 		}
 
 		instance = kmalloc(sizeof(*instance), GFP_KERNEL);
 		if (!instance)
-			return -ENOMEM;
+			return ENOMEM;
 
 		instance->state = state;
+#ifdef __HAIKU__
+		instance->pid = team;
+#else
 		/* XXXBSD: PID or thread ID? */
 		instance->pid = td->td_proc->p_pid;
+#endif
 
 #ifdef notyet
 		ret = vchiq_proc_add_instance(instance);
@@ -1528,12 +1578,16 @@ vchiq_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 		lmutex_init(&instance->bulk_waiter_list_mutex);
 		INIT_LIST_HEAD(&instance->bulk_waiter_list);
 
+#ifdef __HAIKU__
+		*_instance = instance;
+#else
 		devfs_set_cdevpriv(instance, instance_dtr);
+#endif
 	}
 	else {
 		vchiq_log_error(vchiq_arm_log_level,
 			"Unknown minor device");
-		return -ENXIO;
+		return ENXIO;
 	}
 
 	return 0;
@@ -1559,7 +1613,7 @@ _vchiq_close_instance(VCHIQ_INSTANCE_T instance)
 		(unsigned long)instance);
 
 	if (!state) {
-		ret = -EPERM;
+		ret = EPERM;
 		goto out;
 	}
 
@@ -1677,9 +1731,22 @@ instance_dtr(void *data)
 {
 	VCHIQ_INSTANCE_T instance =  data;
 	_vchiq_close_instance(instance);
+#ifdef __HAIKU__
+	_sema_destroy(&instance->insert_event);
+	_sema_destroy(&instance->remove_event);
+	lmutex_destroy(&instance->completion_mutex);
+	lmutex_destroy(&instance->bulk_waiter_list_mutex);
+#endif
 	kfree(data);
 }
 
+#ifdef __HAIKU__
+void
+vchiq_haiku_free(void *instance)
+{
+	instance_dtr(instance);
+}
+#else
 static int
 vchiq_close(struct cdev *dev, int flags __unused, int fmt __unused,
                 struct thread *td)
@@ -1691,6 +1758,7 @@ vchiq_close(struct cdev *dev, int flags __unused, int fmt __unused,
 	return(0);
 
 }
+#endif
 
 /****************************************************************************
 *
@@ -1729,6 +1797,22 @@ vchiq_dump(void *dump_context, const char *str, int len)
 		}
 	}
 }
+
+#ifdef __HAIKU__
+size_t
+vchiq_haiku_dump_state(char *buffer, size_t size)
+{
+	DUMP_CONTEXT_T context;
+	context.buf = buffer;
+	context.actual = 0;
+	context.space = size;
+	context.offset = 0;
+
+	vchiq_dump_state(&context, &g_state);
+
+	return context.actual;
+}
+#endif
 
 /****************************************************************************
 *
@@ -3143,12 +3227,14 @@ vchiq_init(void)
 		goto failed_proc_init;
 #endif
 
+#ifndef __HAIKU__
 	vchiq_cdev = make_dev(&vchiq_cdevsw, 0,
 	    UID_ROOT, GID_WHEEL, 0600, "vchiq");
 	if (!vchiq_cdev) {
 		printf("Failed to create /dev/vchiq");
-		return (-ENXIO);
+		return (ENXIO);
 	}
+#endif
 
 	spin_lock_init(&msg_queue_spinlock);
 
@@ -3163,10 +3249,12 @@ vchiq_init(void)
 	return 0;
 
 failed_platform_init:
+#ifndef __HAIKU__
 	if (vchiq_cdev) {
 		destroy_dev(vchiq_cdev);
 		vchiq_cdev = NULL;
 	}
+#endif
 	vchiq_log_warning(vchiq_arm_log_level, "could not load vchiq");
 	return err;
 }
@@ -3226,7 +3314,7 @@ static int vchiq_proc_add_instance(VCHIQ_INSTANCE_T instance)
 fail_use_count:
 	remove_proc_entry(top->name, clients);
 fail_top:
-	return -ENOMEM;
+	return ENOMEM;
 }
 
 static void vchiq_proc_remove_instance(VCHIQ_INSTANCE_T instance)
@@ -3250,8 +3338,10 @@ vchiq_exit(void)
 {
 
 	vchiq_platform_exit(&g_state);
+#ifndef __HAIKU__
 	if (vchiq_cdev) {
 		destroy_dev(vchiq_cdev);
 		vchiq_cdev = NULL;
 	}
+#endif
 }
