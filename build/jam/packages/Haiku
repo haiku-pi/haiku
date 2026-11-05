@@ -142,6 +142,9 @@ AddNewDriversToPackage graphics :
 	v3d@arm64
 	virtio_gpu
 	;
+AddNewDriversToPackage misc :
+	vchiq@arm64
+	;
 AddNewDriversToPackage video :
 	rpivid@arm64
 	;
