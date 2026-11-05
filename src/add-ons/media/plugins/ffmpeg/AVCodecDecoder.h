@@ -16,6 +16,8 @@
 
 #include <MediaFormats.h>
 
+#include <vector>
+
 
 extern "C" {
 	#include "avcodec.h"
@@ -68,7 +70,13 @@ public:
 
 private:
 			void		_ResetTempPacket();
+			void		_CreateCodecContext();
 			void		_PreferHardwareDecoder();
+			bool		_HardwareDecoderFailed(int error);
+			status_t	_FallBackToSoftwareDecoder(const char* reason);
+			void		_RecordPacket();
+			void		_ForgetRecordedPackets();
+			bool		_ReplayPacket();
 
 			status_t	_NegotiateAudioOutputFormat(media_format* inOutFormat);
 
@@ -122,6 +130,13 @@ private:
 			const AVCodec*		fSoftwareCodec;
 									// fCodec's fallback when fCodec is a
 									// hardware decoder
+			bool				fRecordPackets;
+			std::vector<AVPacket*> fRecordedPackets;
+									// what the hardware decoder was given
+									// before its first frame, for the
+									// fallback
+			size_t				fReplayIndex;
+			bool				fSkipToKeyFrame;
 			AVCodecContext*		fCodecContext;
 			SwrContext*			fResampleContext;
 			uint8_t*			fDecodedData;

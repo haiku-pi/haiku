@@ -89,6 +89,9 @@ AVCodecDecoder::AVCodecDecoder()
 	fIsAudio(false),
 	fCodec(NULL),
 	fSoftwareCodec(NULL),
+	fRecordPackets(false),
+	fReplayIndex(0),
+	fSkipToKeyFrame(false),
 	fCodecContext(NULL),
 	fResampleContext(NULL),
 	fDecodedData(NULL),
@@ -169,6 +172,7 @@ AVCodecDecoder::~AVCodecDecoder()
 	delete[] fExtraData;
 
 	av_packet_free(&fTempPacket);
+	_ForgetRecordedPackets();
 }
 
 
@@ -220,6 +224,7 @@ AVCodecDecoder::Setup(media_format* ioEncodedFormat, const void* infoBuffer,
 		fSoftwareCodec = NULL;
 		if (!fIsAudio)
 			_PreferHardwareDecoder();
+		fRecordPackets = fSoftwareCodec != NULL;
 
 		const void* extraData = infoBuffer;
 		fExtraDataSize = infoSize;
@@ -277,6 +282,11 @@ AVCodecDecoder::SeekedTo(int64 frame, bigtime_t time)
 		_ResetTempPacket();
 	}
 
+	// What a hardware decoder was given before the seek is no use to its
+	// fallback any more
+	_ForgetRecordedPackets();
+	fSkipToKeyFrame = false;
+
 	// Flush internal buffers as well.
 	free(fChunkBuffer);
 	fChunkBuffer = NULL;
@@ -304,35 +314,12 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 #endif
 
 	// close any previous instance
-	if (fCodecContext != NULL) {
-		fCodecContext->extradata = NULL;
-		avcodec_free_context(&fCodecContext);
-	}
-
-	fCodecContext = avcodec_alloc_context3(fCodec);
-	fCodecInitDone = false;
-
-	system_info info;
-	get_system_info(&info);
-
-	fCodecContext->err_recognition = AV_EF_CAREFUL;
-	fCodecContext->error_concealment = 3;
-	fCodecContext->thread_count = info.cpu_count;
+	_CreateCodecContext();
 
 	if (fIsAudio)
 		return _NegotiateAudioOutputFormat(inOutFormat);
 
 	status_t status = _NegotiateVideoOutputFormat(inOutFormat);
-	if (status != B_OK && fSoftwareCodec != NULL) {
-		// The hardware decoder did not open or decode the first frame (no
-		// device, or none free): the software decoder instead. If it took
-		// packets, the software decoder starts after them.
-		printf("AVCodecDecoder: %s failed, using %s\n", fCodec->name,
-			fSoftwareCodec->name);
-		fCodec = fSoftwareCodec;
-		fSoftwareCodec = NULL;
-		return NegotiateOutputFormat(inOutFormat);
-	}
 	if (status == B_OK && fSoftwareCodec != NULL)
 		printf("AVCodecDecoder: video decoder %s\n", fCodec->name);
 	return status;
@@ -359,10 +346,31 @@ AVCodecDecoder::Decode(void* outBuffer, int64* outFrameCount,
 // #pragma mark -
 
 
+/*!	A new codec context for fCodec (the previous one closed). */
+void
+AVCodecDecoder::_CreateCodecContext()
+{
+	if (fCodecContext != NULL) {
+		fCodecContext->extradata = NULL;
+		avcodec_free_context(&fCodecContext);
+	}
+
+	fCodecContext = avcodec_alloc_context3(fCodec);
+	fCodecInitDone = false;
+
+	system_info info;
+	get_system_info(&info);
+
+	fCodecContext->err_recognition = AV_EF_CAREFUL;
+	fCodecContext->error_concealment = 3;
+	fCodecContext->thread_count = info.cpu_count;
+}
+
+
 /*!	Takes the hardware decoder FFmpeg has for the stream's codec, if any (on
 	the Raspberry Pi 4: H.264 on the VideoCore through MMAL), and keeps the
-	software decoder as its fallback. FFMPEG_H264_MMAL=0 in the environment
-	keeps the software decoder.
+	software decoder as its fallback (see _HardwareDecoderFailed()).
+	FFMPEG_H264_MMAL=0 in the environment keeps the software decoder.
 */
 void
 AVCodecDecoder::_PreferHardwareDecoder()
@@ -389,6 +397,128 @@ AVCodecDecoder::_PreferHardwareDecoder()
 		}
 		return;
 	}
+}
+
+
+/*!	Whether \a error, from a hardware decoder, made the decoder fall back to
+	the software one: a hardware decoder that fails (no free decoder in the
+	device, a device that stopped) gives the stream to the software decoder.
+	Before the hardware decoder's first frame, the software decoder is given
+	the packets from the start again (they were recorded); afterwards, from
+	the next key frame on.
+*/
+bool
+AVCodecDecoder::_HardwareDecoderFailed(int error)
+{
+	if (fSoftwareCodec == NULL || error >= 0 || error == AVERROR(EAGAIN)
+		|| error == AVERROR_EOF) {
+		return false;
+	}
+
+	char reason[AV_ERROR_MAX_STRING_SIZE];
+	av_strerror(error, reason, sizeof(reason));
+	return _FallBackToSoftwareDecoder(reason) == B_OK;
+}
+
+
+status_t
+AVCodecDecoder::_FallBackToSoftwareDecoder(const char* reason)
+{
+	const bool fromTheStart = fRecordPackets;
+	printf("AVCodecDecoder: %s failed (%s): %s continues%s\n", fCodec->name,
+		reason, fSoftwareCodec->name, fromTheStart ? " from the start"
+			: " at the next key frame");
+
+	fCodec = fSoftwareCodec;
+	fSoftwareCodec = NULL;
+	_CreateCodecContext();
+	_ApplyEssentialVideoContainerPropertiesToContext();
+	if (avcodec_open2(fCodecContext, fCodec, NULL) < 0)
+		return B_ERROR;
+	fCodecInitDone = true;
+
+	// the software decoder's frames may differ in format
+#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
+	if (fSwsContext != NULL)
+		sws_freeContext(fSwsContext);
+	fSwsContext = NULL;
+#else
+	fFormatConversionFunc = NULL;
+#endif
+
+	fRecordPackets = false;
+	fReplayIndex = 0;
+	if (!fromTheStart) {
+		_ForgetRecordedPackets();
+		fSkipToKeyFrame = true;
+	}
+	_ResetTempPacket();
+	return B_OK;
+}
+
+
+/*!	Keeps a copy of fTempPacket while a hardware decoder has not given its
+	first frame (at most a few seconds of a stream).
+*/
+void
+AVCodecDecoder::_RecordPacket()
+{
+	if (!fRecordPackets)
+		return;
+
+	static const size_t kMaxRecordedPackets = 300;
+	AVPacket* packet = fRecordedPackets.size() < kMaxRecordedPackets
+		? av_packet_clone(fTempPacket) : NULL;
+	if (packet == NULL) {
+		_ForgetRecordedPackets();
+		return;
+	}
+	try {
+		fRecordedPackets.push_back(packet);
+	} catch (...) {
+		av_packet_free(&packet);
+		_ForgetRecordedPackets();
+	}
+}
+
+
+/*!	No more recording either. */
+void
+AVCodecDecoder::_ForgetRecordedPackets()
+{
+	for (size_t i = 0; i < fRecordedPackets.size(); i++)
+		av_packet_free(&fRecordedPackets[i]);
+	fRecordedPackets.clear();
+	fReplayIndex = 0;
+	fRecordPackets = false;
+}
+
+
+/*!	The next recorded packet into fTempPacket, after a fallback. */
+bool
+AVCodecDecoder::_ReplayPacket()
+{
+	if (fRecordPackets || fReplayIndex >= fRecordedPackets.size()) {
+		if (!fRecordPackets && !fRecordedPackets.empty())
+			_ForgetRecordedPackets();
+		return false;
+	}
+
+	AVPacket* packet = fRecordedPackets[fReplayIndex];
+	fRecordedPackets[fReplayIndex++] = NULL;
+	if (_CopyChunkToChunkBufferAndAddPadding(packet->data, packet->size)
+			== B_OK) {
+		fTempPacket->data = fChunkBuffer;
+		fTempPacket->size = fChunkBufferSize;
+		fTempPacket->pts = packet->pts;
+		fTempPacket->dts = packet->dts;
+		fTempPacket->stream_index = packet->stream_index;
+		fTempPacket->flags = packet->flags;
+		fTempPacket->duration = packet->duration;
+		fTempPacket->pos = packet->pos;
+	}
+	av_packet_free(&packet);
+	return true;
 }
 
 
@@ -531,7 +661,10 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 
 	if (avcodec_open2(fCodecContext, fCodec, NULL) < 0) {
 		TRACE("avcodec_open() failed to init codec!\n");
-		return B_ERROR;
+		if (fSoftwareCodec == NULL
+			|| _FallBackToSoftwareDecoder("does not open") != B_OK) {
+			return B_ERROR;
+		}
 	}
 	fCodecInitDone = true;
 
@@ -1308,6 +1441,8 @@ AVCodecDecoder::_DecodeNextVideoFrame()
 #endif
 
 	error = avcodec_receive_frame(fCodecContext, fRawDecodedPicture);
+	if (_HardwareDecoderFailed(error))
+		error = AVERROR(EAGAIN);
 
 	if (error == AVERROR_EOF)
 		return B_LAST_BUFFER_ERROR;
@@ -1331,6 +1466,10 @@ AVCodecDecoder::_DecodeNextVideoFrame()
 				timestamp);
 
 			send_error = avcodec_send_packet(fCodecContext, fTempPacket);
+			if (_HardwareDecoderFailed(send_error)) {
+				error = AVERROR(EAGAIN);
+				continue;
+			}
 			if (send_error < 0 && send_error != AVERROR(EAGAIN)) {
 				TRACE("[v] AVCodecDecoder: ignoring error in decoding frame %" B_PRId64 ": %d\n",
 					fFrame, error);
@@ -1341,6 +1480,10 @@ AVCodecDecoder::_DecodeNextVideoFrame()
 			fTempPacket->size = 0;
 
 			error = avcodec_receive_frame(fCodecContext, fRawDecodedPicture);
+			if (_HardwareDecoderFailed(error)) {
+				error = AVERROR(EAGAIN);
+				continue;
+			}
 			if (error != 0 && error != AVERROR(EAGAIN)) {
 				TRACE("[v] frame %" B_PRId64 " decoding error: error code: %d, chunk size: %ld\n",
 					fFrame, error, fChunkBufferSize);
@@ -1438,41 +1581,56 @@ AVCodecDecoder::_LoadNextChunkIfNeededAndAssignStartTime()
 	if (fTempPacket->size > 0)
 		return B_OK;
 
+	if (_ReplayPacket())
+		return B_OK;
+
 	const void* chunkBuffer = NULL;
 	size_t chunkBufferSize = 0;
 		// In the case that GetNextChunk() returns an error fChunkBufferSize
 		// should be left untouched.
 	media_header chunkMediaHeader;
 
-	status_t getNextChunkStatus = GetNextChunk(&chunkBuffer, &chunkBufferSize,
-		&chunkMediaHeader);
-	if (getNextChunkStatus != B_OK)
-		return getNextChunkStatus;
+	while (true) {
+		status_t getNextChunkStatus = GetNextChunk(&chunkBuffer,
+			&chunkBufferSize, &chunkMediaHeader);
+		if (getNextChunkStatus != B_OK)
+			return getNextChunkStatus;
 
-	status_t chunkBufferPaddingStatus
-		= _CopyChunkToChunkBufferAndAddPadding(chunkBuffer, chunkBufferSize);
-	if (chunkBufferPaddingStatus != B_OK)
-		return chunkBufferPaddingStatus;
+		status_t chunkBufferPaddingStatus
+			= _CopyChunkToChunkBufferAndAddPadding(chunkBuffer,
+				chunkBufferSize);
+		if (chunkBufferPaddingStatus != B_OK)
+			return chunkBufferPaddingStatus;
 
-	fTempPacket->data = fChunkBuffer;
-	fTempPacket->size = fChunkBufferSize;
+		fTempPacket->data = fChunkBuffer;
+		fTempPacket->size = fChunkBufferSize;
 
-	fTempPacket->dts = chunkMediaHeader.start_time;
-		// Let FFMPEG handle the correct relationship between start_time and
-		// decoded a/v frame. By doing so we are simply copying the way how it
-		// is implemented in ffplay.c for video frames (for audio frames it
-		// works, too, but isn't used by ffplay.c).
-		// \see http://git.videolan.org/?p=ffmpeg.git;a=blob;f=ffplay.c;h=09623db374e5289ed20b7cc28c262c4375a8b2e4;hb=9153b33a742c4e2a85ff6230aea0e75f5a8b26c2#l1502
+		fTempPacket->dts = chunkMediaHeader.start_time;
+			// Let FFMPEG handle the correct relationship between start_time
+			// and decoded a/v frame. By doing so we are simply copying the way
+			// how it is implemented in ffplay.c for video frames (for audio
+			// frames it works, too, but isn't used by ffplay.c).
+			// \see http://git.videolan.org/?p=ffmpeg.git;a=blob;f=ffplay.c;h=09623db374e5289ed20b7cc28c262c4375a8b2e4;hb=9153b33a742c4e2a85ff6230aea0e75f5a8b26c2#l1502
 
-	if (chunkMediaHeader.user_data_type == AVPACKET_USER_DATA_TYPE) {
-		avpacket_user_data* data = (avpacket_user_data*)&chunkMediaHeader.user_data;
-		fTempPacket->pts = data->pts;
-		fTempPacket->dts = data->dts;
-		fTempPacket->stream_index = data->stream_index;
-		fTempPacket->flags = data->flags;
-		fTempPacket->duration = data->duration;
-		fTempPacket->pos = data->pos;
+		if (chunkMediaHeader.user_data_type == AVPACKET_USER_DATA_TYPE) {
+			avpacket_user_data* data
+				= (avpacket_user_data*)&chunkMediaHeader.user_data;
+			fTempPacket->pts = data->pts;
+			fTempPacket->dts = data->dts;
+			fTempPacket->stream_index = data->stream_index;
+			fTempPacket->flags = data->flags;
+			fTempPacket->duration = data->duration;
+			fTempPacket->pos = data->pos;
+		} else
+			fSkipToKeyFrame = false;
+
+		// after a hardware decoder's failure, from the next key frame on
+		if (!fSkipToKeyFrame || (fTempPacket->flags & AV_PKT_FLAG_KEY) != 0)
+			break;
+		fTempPacket->size = 0;
 	}
+	fSkipToKeyFrame = false;
+	_RecordPacket();
 
 #ifdef LOG_STREAM_TO_FILE
 	BFile* logFile = fIsAudio ? &sAudioStreamLogFile : &sVideoStreamLogFile;
@@ -1550,6 +1708,10 @@ AVCodecDecoder::_CopyChunkToChunkBufferAndAddPadding(const void* chunk,
 status_t
 AVCodecDecoder::_HandleNewVideoFrameAndUpdateSystemState()
 {
+	// a hardware decoder that has given a frame: no fallback from the start
+	if (fRecordPackets)
+		_ForgetRecordedPackets();
+
 	_UpdateMediaHeaderForVideoFrame();
 	status_t postProcessStatus = _DeinterlaceAndColorConvertVideoFrame();
 	if (postProcessStatus != B_OK)
