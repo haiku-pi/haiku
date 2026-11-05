@@ -30,6 +30,7 @@
 #include <LaunchRosterPrivate.h>
 #include <locks.h>
 #include <MessengerPrivate.h>
+#include <RegistrarDefs.h>
 #include <RosterPrivate.h>
 #include <syscalls.h>
 #include <system_info.h>
@@ -66,6 +67,7 @@ using BSupportKit::BPrivate::JobQueue;
 #ifndef TEST_MODE
 static const char* kLaunchDirectory = "launch";
 static const char* kUserLaunchDirectory = "user_launch";
+static const bigtime_t kRegistrarTimeout = 1000000;
 #endif
 
 
@@ -207,6 +209,7 @@ private:
 									uint32 options);
 			bool				_LaunchJob(Job* job, uint32 options = 0);
 			void				_StopJob(Job* job, bool force);
+			bool				_IsShutDownInProgress();
 			void				_AddTarget(Target* target);
 			void				_SetCondition(BaseJob* job,
 									const BMessage& message);
@@ -580,16 +583,9 @@ LaunchDaemon::MessageReceived(BMessage* message)
 				fLog.JobTerminated(job, exitStatus);
 				job->TeamDeleted();
 
-				if (job->IsService()) {
-					bool inProgress = false;
-					BRoster roster;
-					BRoster::Private rosterPrivate(roster);
-					status_t status = rosterPrivate.IsShutDownInProgress(
-						&inProgress);
-					if (status != B_OK || !inProgress) {
-						// TODO: take restart throttle into account
-						_LaunchJob(job);
-					}
+				if (job->IsService() && !_IsShutDownInProgress()) {
+					// TODO: take restart throttle into account
+					_LaunchJob(job);
 				}
 			}
 			break;
@@ -1849,6 +1845,48 @@ LaunchDaemon::_LaunchJob(Job* job, uint32 options)
 	}
 
 	return true;
+}
+
+
+/*!	Returns whether the registrar is shutting the system down; a service that
+	ends then is not restarted.
+*/
+bool
+LaunchDaemon::_IsShutDownInProgress()
+{
+	bool inProgress = false;
+
+	if (fUserMode) {
+		BRoster roster;
+		BRoster::Private rosterPrivate(roster);
+		return rosterPrivate.IsShutDownInProgress(&inProgress) == B_OK
+			&& inProgress;
+	}
+
+	// The system launch_daemon cannot use BRoster: it finds the registrar by
+	// asking the launch_daemon, which is this thread (get_launch_daemon_port()
+	// refuses that), so the question always failed and every service that
+	// ended during a shutdown was started again. The registrar is our own job,
+	// though, so we know its port. Don't wait for it for long: while it starts,
+	// it may be waiting for this thread itself.
+	Job* registrar = FindJob(get_leaf(B_REGISTRAR_SIGNATURE));
+	if (registrar == NULL || !registrar->IsRunning()
+		|| registrar->DefaultPort() < 0) {
+		return false;
+	}
+
+	BMessenger messenger;
+	BMessenger::Private(messenger).SetTo(registrar->Team(),
+		registrar->DefaultPort(), B_PREFERRED_TOKEN);
+
+	BMessage request(B_REG_IS_SHUT_DOWN_IN_PROGRESS);
+	BMessage reply;
+	if (messenger.SendMessage(&request, &reply, kRegistrarTimeout,
+			kRegistrarTimeout) != B_OK || reply.what != B_REG_SUCCESS) {
+		return false;
+	}
+
+	return reply.FindBool("in-progress", &inProgress) == B_OK && inProgress;
 }
 
 
