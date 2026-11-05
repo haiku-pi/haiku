@@ -30,8 +30,9 @@ extern device_manager_info gDeviceManagerModule;
 // any above 1 GB for the Raspberry Pi 4's SD controller, or a disk offset not
 // aligned to the block size) is done in operations of at most one bounce buffer
 // each. At 16 kB, a 256 kB read from an SD card took 16 commands, and ran at a
-// third of the card's speed.
-const phys_size_t kMaxBounceBufferSize = 32 * B_PAGE_SIZE;
+// third of the card's speed; SD cards also write much faster in 512 kB
+// commands than in 128 kB ones. No larger than the device's maximum transfer.
+const phys_size_t kMaxBounceBufferSize = 128 * B_PAGE_SIZE;
 
 
 DMABuffer*
@@ -194,6 +195,10 @@ DMAResource::Init(const dma_restrictions& restrictions,
 			* min_c(fRestrictions.max_segment_count, 4);
 		if (fBounceBufferSize > kMaxBounceBufferSize)
 			fBounceBufferSize = kMaxBounceBufferSize;
+		if (fBounceBufferSize > fRestrictions.max_transfer_size) {
+			fBounceBufferSize = ROUNDUP(fRestrictions.max_transfer_size,
+				B_PAGE_SIZE);
+		}
 		TRACE("DMAResource::Init(): chose bounce buffer size %lu\n",
 			fBounceBufferSize);
 	}
@@ -201,11 +206,13 @@ DMAResource::Init(const dma_restrictions& restrictions,
 	dprintf("DMAResource@%p: low/high %" B_PRIxGENADDR "/%" B_PRIxGENADDR
 		", max segment count %" B_PRIu32 ", align %" B_PRIuGENADDR ", "
 		"boundary %" B_PRIuGENADDR ", max transfer %" B_PRIuGENADDR
-		", max segment size %" B_PRIuGENADDR "\n", this,
+		", max segment size %" B_PRIuGENADDR ", bounce buffers %" B_PRIu32
+		" x %" B_PRIuPHYSADDR "\n", this,
 		fRestrictions.low_address, fRestrictions.high_address,
 		fRestrictions.max_segment_count, fRestrictions.alignment,
 		fRestrictions.boundary, fRestrictions.max_transfer_size,
-		fRestrictions.max_segment_size);
+		fRestrictions.max_segment_size,
+		fBounceBufferSize != 0 ? fBounceBufferCount : 0, fBounceBufferSize);
 
 	fScratchVecs = (generic_io_vec*)malloc(
 		sizeof(generic_io_vec) * fRestrictions.max_segment_count);
