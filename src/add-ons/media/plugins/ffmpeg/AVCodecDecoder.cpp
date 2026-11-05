@@ -18,6 +18,7 @@
 #include <new>
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <Bitmap.h>
@@ -87,6 +88,7 @@ AVCodecDecoder::AVCodecDecoder()
 	fFrame(0),
 	fIsAudio(false),
 	fCodec(NULL),
+	fSoftwareCodec(NULL),
 	fCodecContext(NULL),
 	fResampleContext(NULL),
 	fDecodedData(NULL),
@@ -215,6 +217,9 @@ AVCodecDecoder::Setup(media_format* ioEncodedFormat, const void* infoBuffer,
 			return B_ERROR;
 		}
 		TRACE("  found decoder %s\n", fCodec->name);
+		fSoftwareCodec = NULL;
+		if (!fIsAudio)
+			_PreferHardwareDecoder();
 
 		const void* extraData = infoBuffer;
 		fExtraDataSize = infoSize;
@@ -316,8 +321,21 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 
 	if (fIsAudio)
 		return _NegotiateAudioOutputFormat(inOutFormat);
-	else
-		return _NegotiateVideoOutputFormat(inOutFormat);
+
+	status_t status = _NegotiateVideoOutputFormat(inOutFormat);
+	if (status != B_OK && fSoftwareCodec != NULL) {
+		// The hardware decoder did not open or decode the first frame (no
+		// device, or none free): the software decoder instead. If it took
+		// packets, the software decoder starts after them.
+		printf("AVCodecDecoder: %s failed, using %s\n", fCodec->name,
+			fSoftwareCodec->name);
+		fCodec = fSoftwareCodec;
+		fSoftwareCodec = NULL;
+		return NegotiateOutputFormat(inOutFormat);
+	}
+	if (status == B_OK && fSoftwareCodec != NULL)
+		printf("AVCodecDecoder: video decoder %s\n", fCodec->name);
+	return status;
 }
 
 
@@ -339,6 +357,39 @@ AVCodecDecoder::Decode(void* outBuffer, int64* outFrameCount,
 
 
 // #pragma mark -
+
+
+/*!	Takes the hardware decoder FFmpeg has for the stream's codec, if any (on
+	the Raspberry Pi 4: H.264 on the VideoCore through MMAL), and keeps the
+	software decoder as its fallback. FFMPEG_H264_MMAL=0 in the environment
+	keeps the software decoder.
+*/
+void
+AVCodecDecoder::_PreferHardwareDecoder()
+{
+	static const struct {
+		AVCodecID	id;
+		const char*	name;
+		const char*	setting;
+	} kHardwareDecoders[] = {
+		{ AV_CODEC_ID_H264, "h264_mmal", "FFMPEG_H264_MMAL" },
+	};
+
+	for (size_t i = 0; i < B_COUNT_OF(kHardwareDecoders); i++) {
+		if (fCodec->id != kHardwareDecoders[i].id)
+			continue;
+		const char* setting = getenv(kHardwareDecoders[i].setting);
+		if (setting != NULL && strcmp(setting, "0") == 0)
+			return;
+		const AVCodec* hardware
+			= avcodec_find_decoder_by_name(kHardwareDecoders[i].name);
+		if (hardware != NULL) {
+			fSoftwareCodec = fCodec;
+			fCodec = hardware;
+		}
+		return;
+	}
+}
 
 
 void

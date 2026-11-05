@@ -68,6 +68,7 @@ public:
 
 private:
 			void		_ResetTempPacket();
+			void		_PreferHardwareDecoder();
 
 			status_t	_NegotiateAudioOutputFormat(media_format* inOutFormat);
 
@@ -118,6 +119,9 @@ private:
 
 			// FFmpeg related members
 			const AVCodec*		fCodec;
+			const AVCodec*		fSoftwareCodec;
+									// fCodec's fallback when fCodec is a
+									// hardware decoder
 			AVCodecContext*		fCodecContext;
 			SwrContext*			fResampleContext;
 			uint8_t*			fDecodedData;
