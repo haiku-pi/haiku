@@ -5980,10 +5980,12 @@ BView::SetToolTip(const char* text)
 		return;
 	}
 
-	if (BTextToolTip* tip = dynamic_cast<BTextToolTip*>(fToolTip))
-		tip->SetText(text);
-	else
-		SetToolTip(new BTextToolTip(text));
+	if (BTextToolTip* textTip = dynamic_cast<BTextToolTip*>(fToolTip)) {
+		textTip->SetText(text);
+	} else {
+		BReference<BToolTip> tip(new BTextToolTip(text), true);
+		SetToolTip(tip.Get());
+	}
 }
 
 
@@ -6736,14 +6738,12 @@ BView::_DrawAfterChildren(BRect updateRect)
 
 
 void
-BView::_FontsUpdated(BMessage* message)
+BView::_PropagateMessage(BMessage* message)
 {
 	MessageReceived(message);
 
-	for (BView* child = fFirstChild; child != NULL;
-			child = child->fNextSibling) {
-		child->_FontsUpdated(message);
-	}
+	for (BView* child = fFirstChild; child != NULL;	child = child->fNextSibling)
+		child->_PropagateMessage(message);
 }
 
 

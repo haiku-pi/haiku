@@ -2657,7 +2657,9 @@ vm_change_cache_of_clones(area_id areaId, struct VMCache* toCache)
 {
 	AddressSpaceReadLocker addressSpaceLocker;
 	VMArea* fromArea;
-	addressSpaceLocker.SetFromArea(areaId, fromArea);
+	status_t status = addressSpaceLocker.SetFromArea(areaId, fromArea);
+	if (status != B_OK)
+		return status;
 
 	VMCache* cache = vm_area_get_locked_cache(fromArea);
 	addressSpaceLocker.Unlock();
@@ -3183,6 +3185,7 @@ vm_set_area_protection(area_id areaID, uint32 newProtection,
 	TRACE(("vm_set_area_protection(team = %#" B_PRIx32 ", area = %#" B_PRIx32
 		", protection = %#" B_PRIx32 ")\n", team_get_current_team_id(), areaID, newProtection));
 
+	const uint32 nonPageProtectionMask = B_OVERCOMMITTING_AREA | B_SHARED_AREA | B_KERNEL_AREA;
 	bool becomesWritable
 		= (newProtection & (B_WRITE_AREA | B_KERNEL_WRITE_AREA)) != 0;
 
@@ -3239,9 +3242,9 @@ vm_set_area_protection(area_id areaID, uint32 newProtection,
 			return B_NOT_ALLOWED;
 		}
 
-		// The flags saying how the area was created are not part of its
-		// protection.
-		newProtection |= area->protection & B_AREA_CREATION_FLAGS;
+		// keep non-page-protection area flags
+		newProtection &= ~nonPageProtectionMask;
+		newProtection |= area->protection & nonPageProtectionMask;
 		if (area->protection == newProtection)
 			return B_OK;
 
@@ -3871,7 +3874,7 @@ vm_page_fault(addr_t address, addr_t faultAddress, bool isWrite, bool isExecute,
 						? SEGV_ACCERR : SEGV_MAPERR,
 					EFAULT, thread->team->id);
 				signal.SetAddress((void*)address);
-				send_fault_signal(thread, signal);
+				send_signal_to_thread_forced(thread, signal);
 			}
 		}
 	}
@@ -5418,9 +5421,8 @@ lock_memory_etc(team_id team, void* address, size_t numBytes, uint32 flags)
 				range->~VMAreaWiredRange();
 				free_etc(range, mallocFlags);
 			} else {
-				// Only the pages before nextAddress are wired, and that is the
-				// range unlock_memory_etc() will look for when reverting.
-				range->size = nextAddress - areaStart;
+				// remove the part we couldn't wire before bailing out with unlock_memory_etc()
+				range->size -= areaEnd - nextAddress;
 				cacheChainLocker.Unlock();
 			}
 
@@ -6227,6 +6229,11 @@ _user_unmap_memory(void* _address, size_t size)
 status_t
 _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 {
+	// the flags allowed for this call
+	const uint32 userProtectionMask = B_READ_AREA | B_WRITE_AREA | B_EXECUTE_AREA;
+	const uint32 protectionMask
+		= userProtectionMask | B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA | B_KERNEL_EXECUTE_AREA;
+
 	// check address range
 	addr_t address = (addr_t)_address;
 	size = PAGE_ALIGN(size);
@@ -6238,7 +6245,7 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 		return ENOMEM;
 	}
 
-	if ((protection & ~(B_READ_AREA | B_WRITE_AREA | B_EXECUTE_AREA)) != 0)
+	if ((protection & ~userProtectionMask) != 0)
 		return B_BAD_VALUE;
 
 	team_id team = team_get_current_team_id();
@@ -6349,10 +6356,9 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 		sizeLeft -= rangeSize;
 
 		if (area->page_protections == NULL) {
-			if ((area->protection & ~(B_AREA_CREATION_FLAGS | B_CLONEABLE_AREA))
-					== protection) {
+			// only compare the masked protection
+			if ((area->protection & protectionMask) == protection)
 				continue;
-			}
 
 			if (offset == 0 && rangeSize == area->Size()) {
 				// The whole area is covered: don't allocate page_protections.
@@ -6413,8 +6419,8 @@ _user_set_memory_protection(void* _address, size_t size, uint32 protection)
 		}
 
 		if (area->page_protections == NULL) {
-			area->protection = protection
-				| (area->protection & (B_AREA_CREATION_FLAGS | B_CLONEABLE_AREA));
+			// keep the non-page-protection flags
+			area->protection = (area->protection & ~protectionMask) | protection;
 		}
 
 		map->Lock();

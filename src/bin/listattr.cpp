@@ -72,9 +72,16 @@ show_attr_contents(BNode& node, const char* attribute, const attr_info& info)
 
 	char buffer[kLimit];
 	ssize_t bytesRead = node.ReadAttr(attribute, info.type, 0, buffer, size);
+	if (bytesRead < 0) {
+		fprintf(stderr, "Error: Failed to read attribute data: %s\n", strerror(bytesRead));
+		return;
+	}
+
 	if (bytesRead != size) {
-		fprintf(stderr, "Could only read %" B_PRIdOFF " bytes from attribute!\n",
-			size);
+		fprintf(stderr,
+			"Could only read %" B_PRIdSSIZE " bytes from attribute!, "
+			"while expected size is %" B_PRIdOFF " bytes\n",
+			bytesRead, size);
 		return;
 	}
 	buffer[min_c(bytesRead, kLimit - 1)] = '\0';
@@ -133,7 +140,7 @@ show_attr_contents(BNode& node, const char* attribute, const attr_info& info)
 		case B_MESSAGE_TYPE:
 		{
 			BMessage message;
-			if (!cut && message.Unflatten(buffer) == B_OK) {
+			if (!cut && message.Unflatten(buffer, size) == B_OK) {
 				putchar('\n');
 				message.PrintToStream();
 				putchar('\n');

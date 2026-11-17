@@ -6,6 +6,8 @@
 
 #include "ShortAttribute.h"
 
+#include "Utility.h"
+
 
 ShortAttribute::ShortAttribute(Inode* inode)
 	:
@@ -81,7 +83,7 @@ ShortAttribute::Stat(attr_cookie* cookie, struct stat& stat)
 
 	// We have valid attribute entry to stat
 	stat.st_type = B_XATTR_TYPE;
-	stat.st_size = _DataLength(fEntry);
+	stat.st_size = fEntry->valuelen;
 
 	return B_OK;
 }
@@ -113,7 +115,8 @@ ShortAttribute::Read(attr_cookie* cookie, off_t pos, uint8* buffer, size_t* leng
 	char* ptrToOffset = (char*) fHeader + sizeof(AShortFormHeader)
 		+ 3 * sizeof(uint8) + fEntry->namelen;
 
-	memcpy(buffer, ptrToOffset, lengthToRead);
+	if (user_memcpy(buffer, ptrToOffset, lengthToRead) != B_OK)
+		return B_BAD_ADDRESS;
 
 	*length = lengthToRead;
 
@@ -156,12 +159,9 @@ ShortAttribute::Lookup(const char* name, size_t* nameLength)
 
 	AShortFormEntry* entry = _FirstEntry();
 
-	int status;
-
 	for (int i = 0; i < fHeader->count; i++) {
-		char* PtrToOffset = (char*)entry + 3 * sizeof(uint8);
-		status = strncmp(name, PtrToOffset, *nameLength);
-		if (status == 0) {
+		char* ptrToOffset = (char*)entry + 3 * sizeof(uint8);
+		if (xfs_name_comp(name, *nameLength, ptrToOffset, entry->namelen)) {
 			fEntry = entry;
 			return B_OK;
 		}

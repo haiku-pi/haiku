@@ -153,7 +153,8 @@ AVCodecDecoder::~AVCodecDecoder()
 
 	av_frame_free(&fPostProcessedDecodedPicture);
 	av_frame_free(&fRawDecodedPicture);
-	av_free(fRawDecodedAudio->opaque);
+	if (fRawDecodedAudio != NULL)
+		av_free(fRawDecodedAudio->opaque);
 	av_frame_free(&fRawDecodedAudio);
 	if (fCodecContext != NULL) {
 		fCodecContext->extradata = NULL;
@@ -193,6 +194,11 @@ AVCodecDecoder::Setup(media_format* ioEncodedFormat, const void* infoBuffer,
 	if (ioEncodedFormat->type != B_MEDIA_ENCODED_AUDIO
 		&& ioEncodedFormat->type != B_MEDIA_ENCODED_VIDEO)
 		return B_ERROR;
+
+	// Frames are allocated in the constructor, which can't report errors.
+	if (fPostProcessedDecodedPicture == NULL || fRawDecodedPicture == NULL
+			|| fRawDecodedAudio == NULL || fDecodedDataBuffer == NULL)
+	return B_NO_MEMORY;
 
 	fIsAudio = (ioEncodedFormat->type == B_MEDIA_ENCODED_AUDIO);
 	TRACE("[%c] AVCodecDecoder::Setup()\n", fIsAudio ? 'a' : 'v');
@@ -314,7 +320,8 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 #endif
 
 	// close any previous instance
-	_CreateCodecContext();
+	if (_CreateCodecContext() != B_OK)
+		return B_NO_MEMORY;
 
 	if (fIsAudio)
 		return _NegotiateAudioOutputFormat(inOutFormat);
@@ -347,7 +354,7 @@ AVCodecDecoder::Decode(void* outBuffer, int64* outFrameCount,
 
 
 /*!	A new codec context for fCodec (the previous one closed). */
-void
+status_t
 AVCodecDecoder::_CreateCodecContext()
 {
 	if (fCodecContext != NULL) {
@@ -355,8 +362,13 @@ AVCodecDecoder::_CreateCodecContext()
 		avcodec_free_context(&fCodecContext);
 	}
 
-	fCodecContext = avcodec_alloc_context3(fCodec);
 	fCodecInitDone = false;
+	fCodecContext = avcodec_alloc_context3(fCodec);
+	if (fCodecContext == NULL)
+		return B_NO_MEMORY;
+
+	// The AVFormatReader hands over pts/dts/duration in microseconds
+	fCodecContext->pkt_timebase = av_make_q(1, 1000000);
 
 	system_info info;
 	get_system_info(&info);
@@ -364,6 +376,7 @@ AVCodecDecoder::_CreateCodecContext()
 	fCodecContext->err_recognition = AV_EF_CAREFUL;
 	fCodecContext->error_concealment = 3;
 	fCodecContext->thread_count = info.cpu_count;
+	return B_OK;
 }
 
 
@@ -431,7 +444,8 @@ AVCodecDecoder::_FallBackToSoftwareDecoder(const char* reason)
 
 	fCodec = fSoftwareCodec;
 	fSoftwareCodec = NULL;
-	_CreateCodecContext();
+	if (_CreateCodecContext() != B_OK)
+		return B_NO_MEMORY;
 	_ApplyEssentialVideoContainerPropertiesToContext();
 	if (avcodec_open2(fCodecContext, fCodec, NULL) < 0)
 		return B_ERROR;
@@ -621,8 +635,9 @@ AVCodecDecoder::_NegotiateAudioOutputFormat(media_format* inOutFormat)
 	if (fRawDecodedAudio->opaque == NULL)
 		return B_NO_MEMORY;
 
+	// sets the passed pointer to NULL
+	swr_free(&fResampleContext);
 	if (av_sample_fmt_is_planar(fCodecContext->sample_fmt)) {
-		fResampleContext = NULL;
 		swr_alloc_set_opts2(&fResampleContext,
 			&fCodecContext->ch_layout,
 			fCodecContext->request_sample_fmt,
@@ -1890,8 +1905,11 @@ AVCodecDecoder::_DeinterlaceAndColorConvertVideoFrame()
 		posix_memalign(reinterpret_cast<void**>(&fDecodedData),
 			kOptimalAlignmentForColorConversion, fDecodedDataSizeInBytes + 63);
 	}
-	if (fDecodedData == NULL)
+	if (fDecodedData == NULL) {
+		if (useDeinterlacedPicture)
+			av_freep(&deinterlacedPicture.data[0]);
 		return B_NO_MEMORY;
+	}
 
 	fPostProcessedDecodedPicture->data[0] = fDecodedData;
 	fPostProcessedDecodedPicture->linesize[0]

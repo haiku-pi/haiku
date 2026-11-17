@@ -501,6 +501,9 @@ do_sync_handler(iframe * frame)
 			syscall_dispatcher(syscall, (void*)args, &frame->x[0]);
 			return;
 		}
+
+		default:
+			panic("unhandled exception: %" B_PRIu64, ESR_ELx_EXCEPTION(frame->esr));
 	}
 
 	if (isUser) {
@@ -525,7 +528,7 @@ do_sync_handler(iframe * frame)
 			Signal signal(signalNumber, signalCode, B_ERROR,
 				thread->team->id);
 			signal.SetAddress((void*)signalAddress);
-			send_fault_signal(thread, signal);
+			send_signal_to_thread_forced(thread, signal);
 		}
 	} else {
 		panic("unhandled exception! FAR=%lx ELR=%lx ESR=%lx (EC=%lx)",

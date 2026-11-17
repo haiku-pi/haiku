@@ -12,7 +12,7 @@
 #include <driver_settings.h>
 #include <keyboard_mouse_driver.h>
 #include <safemode_defs.h>
-#include <syscalls.h>
+#include <drivers/safemode_settings.h>
 
 #include <AppServerLink.h>
 #include <MessagePrivate.h>
@@ -1488,28 +1488,8 @@ InputServer::ControlDevices(const char* name, input_device_type type,
 bool
 InputServer::SafeMode()
 {
-	char parameter[32];
-	size_t parameterLength = sizeof(parameter);
-
-	if (_kern_get_safemode_option(B_SAFEMODE_SAFE_MODE, parameter,
-			&parameterLength) == B_OK) {
-		if (!strcasecmp(parameter, "enabled") || !strcasecmp(parameter, "on")
-			|| !strcasecmp(parameter, "true") || !strcasecmp(parameter, "yes")
-			|| !strcasecmp(parameter, "enable") || !strcmp(parameter, "1")) {
-			return true;
-		}
-	}
-
-	if (_kern_get_safemode_option(B_SAFEMODE_DISABLE_USER_ADD_ONS, parameter,
-			&parameterLength) == B_OK) {
-		if (!strcasecmp(parameter, "enabled") || !strcasecmp(parameter, "on")
-			|| !strcasecmp(parameter, "true") || !strcasecmp(parameter, "yes")
-			|| !strcasecmp(parameter, "enable") || !strcmp(parameter, "1")) {
-			return true;
-		}
-	}
-
-	return false;
+	return __get_safemode_boolean(B_SAFEMODE_SAFE_MODE, false)
+		|| __get_safemode_boolean(B_SAFEMODE_DISABLE_USER_ADD_ONS, false);
 }
 
 
@@ -1587,7 +1567,7 @@ InputServer::_EventLoop()
 		if (length > 0) {
 			BMessage* event = new BMessage;
 
-			if ((err = event->Unflatten(buffer)) < 0) {
+			if ((err = event->Unflatten(buffer, length)) < 0) {
 				PRINTERR(("[InputServer] Unflatten() error: (0x%" B_PRIx32
 					") %s\n", err, strerror(err)));
 				delete event;

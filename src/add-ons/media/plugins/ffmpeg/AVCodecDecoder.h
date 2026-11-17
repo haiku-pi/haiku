@@ -70,7 +70,7 @@ public:
 
 private:
 			void		_ResetTempPacket();
-			void		_CreateCodecContext();
+			status_t	_CreateCodecContext();
 			void		_PreferHardwareDecoder();
 			bool		_HardwareDecoderFailed(int error);
 			status_t	_FallBackToSoftwareDecoder(const char* reason);

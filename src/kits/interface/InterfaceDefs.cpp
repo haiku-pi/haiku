@@ -57,6 +57,8 @@
 
 using namespace BPrivate;
 
+
+#ifdef __HAIKU_BEOS_COMPATIBLE
 // some other weird struct exported by BeOS, it's not initialized, though
 struct general_ui_info {
 	rgb_color	background_color;
@@ -69,6 +71,7 @@ struct general_ui_info {
 struct general_ui_info general_info;
 
 menu_info *_menu_info_ptr_;
+#endif
 
 extern "C" const char B_NOTIFICATION_SENDER[] = "be:sender";
 
@@ -1334,12 +1337,16 @@ ui_color(color_which which)
 
 
 rgb_color
-BPrivate::GetSystemColor(color_which colorConstant, bool darkVariant) {
-	if (darkVariant) {
-		return _kDefaultColorsDark[color_which_to_index(colorConstant)];
-	} else {
-		return _kDefaultColors[color_which_to_index(colorConstant)];
-	}
+BPrivate::GetSystemColor(color_which colorConstant, bool darkVariant)
+{
+	int32 index = color_which_to_index(colorConstant);
+	if (index < 0)
+		return B_TRANSPARENT_COLOR;
+
+	if (darkVariant)
+		return _kDefaultColorsDark[index];
+	else
+		return _kDefaultColors[index];
 }
 
 
@@ -1473,6 +1480,61 @@ shift_color(rgb_color color, float shift)
 }
 
 
+//	#pragma mark - menu_info functions
+
+
+status_t
+_init_menu_info_()
+{
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_GET_MENU_INFO);
+
+	status_t status = B_ERROR;
+	if (link.FlushWithReply(status) == B_OK && status == B_OK)
+		link.Read<menu_info>(&BMenu::sMenuInfo);
+
+#ifdef __HAIKU_BEOS_COMPATIBLE
+	_menu_info_ptr_ = &BMenu::sMenuInfo;
+#endif
+
+	return status;
+}
+
+
+status_t
+set_menu_info(menu_info* info)
+{
+	if (!info)
+		return B_BAD_VALUE;
+
+	BPrivate::AppServerLink link;
+	link.StartMessage(AS_SET_MENU_INFO);
+	link.Attach<menu_info>(*info);
+
+	status_t status = B_ERROR;
+	link.FlushWithReply(status);
+
+	// Don't update the local sMenuInfo, as it'll be re-fetched
+	// when we get B_MENU_INFO_UPDATED.
+
+	return status;
+}
+
+
+status_t
+get_menu_info(menu_info* info)
+{
+	if (info == NULL)
+		return B_BAD_VALUE;
+
+	*info = BMenu::sMenuInfo;
+	return B_OK;
+}
+
+
+//	#pragma mark - initialization/destruction
+
+
 extern "C" status_t
 _init_interface_kit_()
 {
@@ -1510,17 +1572,17 @@ _init_interface_kit_()
 	if (status != B_OK)
 		return status;
 
-	_menu_info_ptr_ = &BMenu::sMenuInfo;
-
-	status = get_menu_info(&BMenu::sMenuInfo);
+	status = _init_menu_info_();
 	if (status != B_OK)
 		return status;
 
+#ifdef __HAIKU_BEOS_COMPATIBLE
 	general_info.background_color = ui_color(B_PANEL_BACKGROUND_COLOR);
 	general_info.mark_color = ui_color(B_CONTROL_MARK_COLOR);
 	general_info.highlight_color = ui_color(B_CONTROL_HIGHLIGHT_COLOR);
 	general_info.window_frame_color = ui_color(B_WINDOW_TAB_COLOR);
 	general_info.color_frame = true;
+#endif
 
 	// TODO: fill the other static members
 

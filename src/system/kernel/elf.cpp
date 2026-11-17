@@ -604,111 +604,218 @@ elf_hash(const char* _name)
 }
 
 
-static elf_sym *
-elf_find_symbol(struct elf_image_info *image, const char *name,
-	const elf_version_info *lookupVersion, bool lookupDefault)
+uint32
+elf_gnuhash(const char* _name)
+{
+	const uint8* name = (const uint8*)_name;
+
+	uint32 h = 5381;
+	for (uint8 c = *name; c != '\0'; c = *++name)
+		h = (h * 33) + c;
+
+	return h;
+}
+
+
+struct match_result {
+	elf_sym* symbol;
+	elf_sym* versioned_symbol;
+	uint32 versioned_symbol_count;
+
+	match_result() : symbol(NULL), versioned_symbol(NULL), versioned_symbol_count(0) {}
+};
+
+
+struct SymbolLookupInfo {
+	const char*				name;
+	uint32					hash, gnuhash;
+	const elf_version_info*	version;
+	bool					lookupDefault;
+
+	SymbolLookupInfo(const char* name, const elf_version_info* version = NULL,
+		bool lookupDefault = false)
+		:
+		name(name),
+		hash(0),
+		gnuhash(0),
+		version(version),
+		lookupDefault(lookupDefault)
+	{
+	}
+};
+
+
+static bool
+match_symbol(struct elf_image_info *image, const SymbolLookupInfo& lookupInfo, uint32 symIndex,
+	struct match_result& result)
+{
+	elf_sym* symbol = &image->syms[symIndex];
+
+	// consider only symbols with the right name and binding
+	if (symbol->st_shndx == SHN_UNDEF
+		|| ((symbol->Bind() != STB_GLOBAL) && (symbol->Bind() != STB_WEAK))
+		|| strcmp(SYMNAME(image, symbol), lookupInfo.name) != 0) {
+		return false;
+	}
+
+	// check the version
+
+	// Handle the simple cases -- the image doesn't have version
+	// information -- first.
+	if (image->symbol_versions == NULL) {
+		if (lookupInfo.version == NULL) {
+			// No specific symbol version was requested either, so the
+			// symbol is just fine.
+			result.symbol = symbol;
+			return true;
+		}
+
+		// A specific version is requested. Since the only possible
+		// dependency is the kernel itself, the add-on was obviously linked
+		// against a newer kernel.
+		dprintf("Kernel add-on requires version support, but the kernel "
+			"is too old.\n");
+		return false;
+	}
+
+	// The image has version information. Let's see what we've got.
+	uint32 versionID = image->symbol_versions[symIndex];
+	uint32 versionIndex = VER_NDX(versionID);
+	elf_version_info& version = image->versions[versionIndex];
+
+	// skip local versions
+	if (versionIndex == VER_NDX_LOCAL)
+		return false;
+
+	if (lookupInfo.version != NULL) {
+		// a specific version is requested
+
+		// compare the versions
+		if (version.hash == lookupInfo.version->hash
+			&& strcmp(version.name, lookupInfo.version->name) == 0) {
+			// versions match
+			result.symbol = symbol;
+			return true;
+		}
+
+		// The versions don't match. We're still fine with the
+		// base version, if it is public and we're not looking for
+		// the default version.
+		if ((versionID & VER_NDX_FLAG_HIDDEN) == 0
+			&& versionIndex == VER_NDX_GLOBAL
+			&& !lookupInfo.lookupDefault) {
+			// TODO: Revise the default version case! That's how
+			// FreeBSD implements it, but glibc doesn't handle it
+			// specially.
+			result.symbol = symbol;
+			return true;
+		}
+	} else {
+		// No specific version requested, but the image has version
+		// information. This can happen in either of these cases:
+		//
+		// * The dependent object was linked against an older version
+		//   of the now versioned dependency.
+		// * The symbol is looked up via find_image_symbol() or dlsym().
+		//
+		// In the first case we return the base version of the symbol
+		// (VER_NDX_GLOBAL or VER_NDX_INITIAL), or, if that doesn't
+		// exist, the unique, non-hidden versioned symbol.
+		//
+		// In the second case we want to return the public default
+		// version of the symbol. The handling is pretty similar to the
+		// first case, with the exception that we treat VER_NDX_INITIAL
+		// as regular version.
+
+		// VER_NDX_GLOBAL is always good, VER_NDX_INITIAL is fine, if
+		// we don't look for the default version.
+		if (versionIndex == VER_NDX_GLOBAL
+			|| (!lookupInfo.lookupDefault && versionIndex == VER_NDX_INITIAL)) {
+			result.symbol = symbol;
+			return true;
+		}
+
+		// If not hidden, remember the version -- we'll return it, if
+		// it is the only one.
+		if ((versionID & VER_NDX_FLAG_HIDDEN) == 0) {
+			result.versioned_symbol_count++;
+			result.versioned_symbol = symbol;
+		}
+	}
+	return false;
+}
+
+
+static elf_sym*
+elf_find_symbol_gnuhash(struct elf_image_info *image, const SymbolLookupInfo& lookupInfo)
+{
+	// Test against the Bloom filter.
+	const uint32 wordSize = sizeof(elf_addr) * 8;
+	const uint32 firstHash = lookupInfo.gnuhash & (wordSize - 1);
+	const uint32 secondHash = lookupInfo.gnuhash >> image->gnuhash.shift2;
+	const uint32 index = (lookupInfo.gnuhash / wordSize) & image->gnuhash.mask_words_count_mask;
+	const elf_addr bloomWord = image->gnuhash.bloom[index];
+	if (((bloomWord >> firstHash) & (bloomWord >> secondHash) & 1) == 0)
+		return NULL;
+
+	// Locate hash chain and corresponding value element.
+	const uint32 bucket = image->gnuhash.buckets[lookupInfo.gnuhash % image->gnuhash.bucket_count];
+	if (bucket == 0)
+		return NULL;
+
+	match_result result;
+	const uint32* chain0 = image->gnuhash.chain0;
+	const uint32* hashValue = &chain0[bucket];
+	do {
+		if (((*hashValue ^ lookupInfo.gnuhash) >> 1) != 0)
+			continue;
+
+		uint32 symIndex = hashValue - chain0;
+		if (match_symbol(image, lookupInfo, symIndex, result))
+			return result.symbol;
+	} while ((*hashValue++ & 1) == 0);
+
+	if (result.versioned_symbol_count == 1)
+		return result.versioned_symbol;
+	return NULL;
+}
+
+
+static elf_sym*
+elf_find_symbol_sysv(struct elf_image_info *image, const SymbolLookupInfo& lookupInfo)
 {
 	if (image->dynamic_section == 0 || HASHTABSIZE(image) == 0)
 		return NULL;
 
-	elf_sym* versionedSymbol = NULL;
-	uint32 versionedSymbolCount = 0;
+	match_result result;
 
-	uint32 hash = elf_hash(name) % HASHTABSIZE(image);
-	for (uint32 i = HASHBUCKETS(image)[hash]; i != STN_UNDEF;
-			i = HASHCHAINS(image)[i]) {
-		elf_sym* symbol = &image->syms[i];
-
-		// consider only symbols with the right name and binding
-		if (symbol->st_shndx == SHN_UNDEF
-			|| ((symbol->Bind() != STB_GLOBAL) && (symbol->Bind() != STB_WEAK))
-			|| strcmp(SYMNAME(image, symbol), name) != 0) {
-			continue;
-		}
-
-		// check the version
-
-		// Handle the simple cases -- the image doesn't have version
-		// information -- first.
-		if (image->symbol_versions == NULL) {
-			if (lookupVersion == NULL) {
-				// No specific symbol version was requested either, so the
-				// symbol is just fine.
-				return symbol;
-			}
-
-			// A specific version is requested. Since the only possible
-			// dependency is the kernel itself, the add-on was obviously linked
-			// against a newer kernel.
-			dprintf("Kernel add-on requires version support, but the kernel "
-				"is too old.\n");
-			return NULL;
-		}
-
-		// The image has version information. Let's see what we've got.
-		uint32 versionID = image->symbol_versions[i];
-		uint32 versionIndex = VER_NDX(versionID);
-		elf_version_info& version = image->versions[versionIndex];
-
-		// skip local versions
-		if (versionIndex == VER_NDX_LOCAL)
-			continue;
-
-		if (lookupVersion != NULL) {
-			// a specific version is requested
-
-			// compare the versions
-			if (version.hash == lookupVersion->hash
-				&& strcmp(version.name, lookupVersion->name) == 0) {
-				// versions match
-				return symbol;
-			}
-
-			// The versions don't match. We're still fine with the
-			// base version, if it is public and we're not looking for
-			// the default version.
-			if ((versionID & VER_NDX_FLAG_HIDDEN) == 0
-				&& versionIndex == VER_NDX_GLOBAL
-				&& !lookupDefault) {
-				// TODO: Revise the default version case! That's how
-				// FreeBSD implements it, but glibc doesn't handle it
-				// specially.
-				return symbol;
-			}
-		} else {
-			// No specific version requested, but the image has version
-			// information. This can happen in either of these cases:
-			//
-			// * The dependent object was linked against an older version
-			//   of the now versioned dependency.
-			// * The symbol is looked up via find_image_symbol() or dlsym().
-			//
-			// In the first case we return the base version of the symbol
-			// (VER_NDX_GLOBAL or VER_NDX_INITIAL), or, if that doesn't
-			// exist, the unique, non-hidden versioned symbol.
-			//
-			// In the second case we want to return the public default
-			// version of the symbol. The handling is pretty similar to the
-			// first case, with the exception that we treat VER_NDX_INITIAL
-			// as regular version.
-
-			// VER_NDX_GLOBAL is always good, VER_NDX_INITIAL is fine, if
-			// we don't look for the default version.
-			if (versionIndex == VER_NDX_GLOBAL
-				|| (!lookupDefault && versionIndex == VER_NDX_INITIAL)) {
-				return symbol;
-			}
-
-			// If not hidden, remember the version -- we'll return it, if
-			// it is the only one.
-			if ((versionID & VER_NDX_FLAG_HIDDEN) == 0) {
-				versionedSymbolCount++;
-				versionedSymbol = symbol;
-			}
-		}
+	uint32 bucket = lookupInfo.hash % HASHTABSIZE(image);
+	for (uint32 symIndex = HASHBUCKETS(image)[bucket]; symIndex != STN_UNDEF;
+			symIndex = HASHCHAINS(image)[symIndex]) {
+		if (match_symbol(image, lookupInfo, symIndex, result))
+			return result.symbol;
 	}
 
-	return versionedSymbolCount == 1 ? versionedSymbol : NULL;
+	if (result.versioned_symbol_count == 1)
+		return result.versioned_symbol;
+	return NULL;
+}
+
+
+static elf_sym *
+elf_find_symbol(struct elf_image_info *image, const char *name,
+	const elf_version_info *lookupVersion, bool lookupDefault)
+{
+	SymbolLookupInfo lookupInfo(name, lookupVersion, lookupDefault);
+	if (image->gnuhash.buckets != NULL) {
+		if (lookupInfo.gnuhash == 0)
+			lookupInfo.gnuhash = elf_gnuhash(name);
+		return elf_find_symbol_gnuhash(image, lookupInfo);
+	}
+
+	if (lookupInfo.hash == 0)
+		lookupInfo.hash = elf_hash(name);
+	return elf_find_symbol_sysv(image, lookupInfo);
 }
 
 
@@ -723,6 +830,7 @@ elf_parse_dynamic_section(struct elf_image_info *image)
 	image->symhash = 0;
 	image->syms = 0;
 	image->strtab = 0;
+	image->gnuhash.buckets = 0;
 
 	d = (elf_dyn *)image->dynamic_section;
 	if (!d)
@@ -797,14 +905,30 @@ elf_parse_dynamic_section(struct elf_image_info *image)
 					image->symbolic = true;
 				break;
 			}
+			case DT_GNU_HASH:
+			{
+				uint32* gnuhash = (uint32*)(d[i].d_un.d_ptr + image->text_region.delta);
+				const uint32 bucketCount = gnuhash[0];
+				const uint32 symIndex = gnuhash[1];
+				const uint32 maskWordsCount = gnuhash[2];
+				const uint32 bloomSize = maskWordsCount * (sizeof(elf_addr) / 4);
+
+				image->gnuhash.mask_words_count_mask = maskWordsCount - 1;
+				image->gnuhash.shift2 = gnuhash[3];
+				image->gnuhash.bucket_count = bucketCount;
+				image->gnuhash.bloom = (elf_addr*)(gnuhash + 4);
+				image->gnuhash.buckets = gnuhash + 4 + bloomSize;
+				image->gnuhash.chain0 = image->gnuhash.buckets + bucketCount - symIndex;
+				break;
+			}
 
 			default:
-				continue;
+				break;
 		}
 	}
 
 	// lets make sure we found all the required sections
-	if (!image->symhash || !image->syms || !image->strtab)
+	if ((image->symhash == 0 && image->gnuhash.buckets == NULL) || !image->syms || !image->strtab)
 		return B_ERROR;
 
 	TRACE(("needed_offset = %ld\n", neededOffset));
@@ -1349,6 +1473,14 @@ error1:
 
 
 class UserSymbolLookup {
+private:
+	struct MatchResult {
+		addr_t deltaFound = INT_MAX;
+		bool exactMatch = false;
+		elf_sym symbolFound;
+		MatchResult() : deltaFound(INT_MAX), exactMatch(false) {}
+	};
+
 public:
 	static UserSymbolLookup& Default()
 	{
@@ -1361,8 +1493,8 @@ public:
 		return B_OK;
 	}
 
-	status_t LookupSymbolAddress(addr_t address, addr_t *_baseAddress,
-		const char **_symbolName, const char **_imageName, bool *_exactMatch)
+	status_t LookupSymbolAddress(addr_t address, addr_t* _baseAddress,
+		const char** _symbolName, const char** _imageName, bool* _exactMatch)
 	{
 		// Note, that this function doesn't find all symbols that we would like
 		// to find. E.g. static functions do not appear in the symbol table
@@ -1374,7 +1506,7 @@ public:
 		// from the shared object.
 
 		// get the image for the address
-		struct image *image;
+		struct image* image;
 		status_t error = _FindImageAtAddress(address, image);
 		if (error != B_OK)
 			return error;
@@ -1393,74 +1525,21 @@ public:
 		}
 
 		const extended_image_info& info = image->info;
-		const uint32 *symhash = (uint32 *)info.symbol_hash;
-		elf_sym *syms = (elf_sym *)info.symbol_table;
+		const addr_t loadDelta = (addr_t)info.basic_info.text;
 
 		strlcpy(fImageName, info.basic_info.name, sizeof(fImageName));
 
-		// symbol hash table size
-		uint32 hashTabSize;
-		if (!_Read(symhash, hashTabSize))
-			return B_BAD_ADDRESS;
+		MatchResult result;
 
-		// remote pointers to hash buckets and chains
-		const uint32* hashBuckets = symhash + 2;
-		const uint32* hashChains = symhash + 2 + hashTabSize;
+		if (info.gnuhash.buckets != NULL)
+			error = _LookupSymbolAddressGnuhash(address, info, result);
+		else if (info.symbol_hash != 0)
+			error = _LookupSymbolAddressSysv(address, info, result);
+		else
+			error = B_ENTRY_NOT_FOUND;
 
-		const addr_t loadDelta = (addr_t)info.basic_info.text;
-
-		// search the image for the symbol
-		elf_sym symbolFound;
-		addr_t deltaFound = INT_MAX;
-		bool exactMatch = false;
-
-		// to get rid of the erroneous "uninitialized" warnings
-		symbolFound.st_name = 0;
-		symbolFound.st_value = 0;
-
-		for (uint32 i = 0; i < hashTabSize; i++) {
-			uint32 bucket;
-			if (!_Read(&hashBuckets[i], bucket))
-				return B_BAD_ADDRESS;
-
-			for (uint32 j = bucket; j != STN_UNDEF;
-					_Read(&hashChains[j], j) ? 0 : j = STN_UNDEF) {
-
-				elf_sym symbol;
-				if (!_Read(syms + j, symbol))
-					continue;
-
-				// The symbol table contains not only symbols referring to
-				// functions and data symbols within the shared object, but also
-				// referenced symbols of other shared objects, as well as
-				// section and file references. We ignore everything but
-				// function and data symbols that have an st_value != 0 (0
-				// seems to be an indication for a symbol defined elsewhere
-				// -- couldn't verify that in the specs though).
-				if ((symbol.Type() != STT_FUNC && symbol.Type() != STT_OBJECT)
-					|| symbol.st_value == 0
-					|| (symbol.st_value + symbol.st_size) > (elf_addr)info.basic_info.text_size) {
-					continue;
-				}
-
-				// skip symbols starting after the given address
-				addr_t symbolAddress = symbol.st_value + loadDelta;
-				if (symbolAddress > address)
-					continue;
-				addr_t symbolDelta = address - symbolAddress;
-
-				if (symbolDelta < deltaFound) {
-					deltaFound = symbolDelta;
-					symbolFound = symbol;
-
-					if (symbolDelta >= 0 && symbolDelta < symbol.st_size) {
-						// exact match
-						exactMatch = true;
-						break;
-					}
-				}
-			}
-		}
+		if (error != B_OK)
+			return error;
 
 		if (_imageName)
 			*_imageName = fImageName;
@@ -1468,30 +1547,31 @@ public:
 		if (_symbolName) {
 			*_symbolName = NULL;
 
-			if (deltaFound < INT_MAX) {
-				if (_ReadString(info, symbolFound.st_name, fSymbolName,
+			if (result.deltaFound < INT_MAX) {
+				if (_ReadString(info, result.symbolFound.st_name, fSymbolName,
 						sizeof(fSymbolName))) {
 					*_symbolName = fSymbolName;
 				} else {
 					// we can't get its name, so forget the symbol
-					deltaFound = INT_MAX;
+					result.deltaFound = INT_MAX;
 				}
 			}
 		}
 
 		if (_baseAddress) {
-			if (deltaFound < INT_MAX)
-				*_baseAddress = symbolFound.st_value + loadDelta;
+			if (result.deltaFound < INT_MAX)
+				*_baseAddress = result.symbolFound.st_value + loadDelta;
 			else
 				*_baseAddress = loadDelta;
 		}
 
 		if (_exactMatch)
-			*_exactMatch = exactMatch;
+			*_exactMatch = result.exactMatch;
 
 		return B_OK;
 	}
 
+private:
 	status_t _FindImageAtAddress(addr_t address, struct image*& _image)
 	{
 		for (struct image* image = fTeam->image_list.First();
@@ -1510,6 +1590,109 @@ public:
 		}
 
 		return B_ENTRY_NOT_FOUND;
+	}
+
+	bool _MatchSymbol(addr_t address, uint32 index, elf_sym* syms, const extended_image_info& info,
+		MatchResult& result)
+	{
+		elf_sym symbol;
+		if (!_Read(syms + index, symbol))
+			return false;
+
+		// The symbol table contains not only symbols referring to
+		// functions and data symbols within the shared object, but also
+		// referenced symbols of other shared objects, as well as
+		// section and file references. We ignore everything but
+		// function and data symbols that have an st_value != 0 (0
+		// seems to be an indication for a symbol defined elsewhere
+		// -- couldn't verify that in the specs though).
+		if ((symbol.Type() != STT_FUNC && symbol.Type() != STT_OBJECT)
+			|| symbol.st_value == 0
+			|| (symbol.st_value + symbol.st_size) > (elf_addr)info.basic_info.text_size) {
+			return false;
+		}
+
+		const addr_t loadDelta = (addr_t)info.basic_info.text;
+
+		// skip symbols starting after the given address
+		addr_t symbolAddress = symbol.st_value + loadDelta;
+		if (symbolAddress > address)
+			return false;
+		addr_t symbolDelta = address - symbolAddress;
+
+		if (symbolDelta < result.deltaFound) {
+			result.deltaFound = symbolDelta;
+			result.symbolFound = symbol;
+
+			if (symbolDelta >= 0 && symbolDelta < symbol.st_size) {
+				// exact match
+				result.exactMatch = true;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	status_t _LookupSymbolAddressSysv(addr_t address, const extended_image_info& info,
+		MatchResult& result)
+	{
+		elf_sym* syms = (elf_sym *)info.symbol_table;
+		const uint32* symhash = (uint32 *)info.symbol_hash;
+
+		// symbol hash table size
+		uint32 hashTabSize;
+		if (!_Read(symhash, hashTabSize))
+			return B_BAD_ADDRESS;
+
+		// remote pointers to hash buckets and chains
+		const uint32* hashBuckets = symhash + 2;
+		const uint32* hashChains = symhash + 2 + hashTabSize;
+
+		// to get rid of the erroneous "uninitialized" warnings
+		result.symbolFound.st_name = 0;
+		result.symbolFound.st_value = 0;
+
+		for (uint32 i = 0; i < hashTabSize; i++) {
+			uint32 bucket;
+			if (!_Read(&hashBuckets[i], bucket))
+				return B_BAD_ADDRESS;
+
+			for (uint32 j = bucket; j != STN_UNDEF;
+					_Read(&hashChains[j], j) ? 0 : j = STN_UNDEF) {
+
+				if (_MatchSymbol(address, j, syms, info, result))
+					return B_OK;
+			}
+		}
+		return B_OK;
+	}
+
+	status_t _LookupSymbolAddressGnuhash(addr_t address, const extended_image_info& info,
+		MatchResult& result)
+	{
+		elf_sym* syms = (elf_sym*)info.symbol_table;
+
+		// to get rid of the erroneous "uninitialized" warnings
+		result.symbolFound.st_name = 0;
+		result.symbolFound.st_value = 0;
+
+		for (uint32 i = 0; i < info.gnuhash.bucket_count; i++) {
+			uint32 bucket;
+			if (!_Read(&info.gnuhash.buckets[i], bucket))
+				return B_BAD_ADDRESS;
+
+			const uint32* chain0 = info.gnuhash.chain0;
+			const uint32* hashValue = &chain0[bucket];
+			uint32 hash = 0;
+			do {
+				uint32 symIndex = hashValue - chain0;
+				if (_MatchSymbol(address, symIndex, syms, info, result))
+					return B_OK;
+				if (!_Read(hashValue++, hash))
+					return B_BAD_ADDRESS;
+			} while ((hash & 1) == 0);
+		}
+		return B_OK;
 	}
 
 	bool _ReadString(const extended_image_info& info, uint32 offset, char* buffer,

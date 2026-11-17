@@ -341,6 +341,9 @@ wlan_control(void* cookie, uint32 op, void* arg, size_t length)
 			ifr.ifr_data = (uint8_t*)&nwid;
 
 			if (op == SIOCS80211) {
+				if (ireq.i_len > IEEE80211_NWID_LEN)
+					return B_BAD_VALUE;
+
 				nwid.i_len = ireq.i_len;
 				if (user_memcpy(nwid.i_nwid, ireq.i_data, ireq.i_len) != B_OK)
 					return B_BAD_ADDRESS;

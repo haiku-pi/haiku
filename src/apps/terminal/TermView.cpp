@@ -267,8 +267,8 @@ TermView::_InitObject(const ShellParameters& shellParameters)
 	fFontWidth = 0;
 	fFontHeight = 0;
 	fFontAscent = 0;
-	fEmulateBold = false;
-	fAllowBold = true;
+	fBoldStyle = BOLD_USE_FONT;
+	fBrightenAnsi = true;
 	fFrameResized = false;
 	fResizeViewDisableCount = 0;
 	fLastActivityTime = 0;
@@ -310,6 +310,10 @@ TermView::_InitObject(const ShellParameters& shellParameters)
 	fVisibleTextBuffer = new(std::nothrow) BasicTerminalBuffer;
 	if (fVisibleTextBuffer == NULL)
 		return B_NO_MEMORY;
+
+	bool alternateScroll = PrefHandler::Default()->getBool(PREF_ALTERNATE_SCROLL);
+	if (alternateScroll)
+		fTextBuffer->SetMode(MODE_ALTERNATE_SCROLL);
 
 	// TODO: Make the special word chars user-settable!
 	fCharClassifier = new(std::nothrow) DefaultCharClassifier(
@@ -815,11 +819,13 @@ TermView::SetTermFont(const BFont *font)
 	bool blinking = PrefHandler::Default()->getBool(PREF_BLINK_CURSOR);
 	SwitchCursorBlinking(blinking);
 
-	fEmulateBold = PrefHandler::Default() == NULL ? false
-		: PrefHandler::Default()->getBool(PREF_EMULATE_BOLD);
+	fBrightenAnsi = PrefHandler::Default() == NULL
+		? false
+		: PrefHandler::Default()->getBool(PREF_BRIGHTEN_ANSI);
 
-	fAllowBold = PrefHandler::Default() == NULL ? false
-		: PrefHandler::Default()->getBool(PREF_ALLOW_BOLD);
+	fBoldStyle = PrefHandler::Default() == NULL
+		? false
+		: PrefHandler::Default()->getBoldStyle(PREF_BOLD_STYLE);
 
 	_ScrollTo(0, false);
 	if (fScrollBar != NULL)
@@ -1062,14 +1068,10 @@ void
 TermView::_DrawLinePart(float x1, float y1, Attributes attr,
 	char *buf, int32 width, Highlight* highlight, bool cursor, BView *inView)
 {
-	if (attr.IsHidden())
-		return;
-
 	if (highlight != NULL)
 		attr.state = highlight->Highlighter()->AdjustTextAttributes(attr.state);
 
-	inView->SetFont(attr.IsBold() && !fEmulateBold && fAllowBold
-		? &fBoldFont : &fHalfFont);
+	inView->SetFont(attr.IsBold() && fBoldStyle == BOLD_USE_FONT ? &fBoldFont : &fHalfFont);
 
 	// Set pen point
 	float x2 = x1 + fFontWidth * width;
@@ -1082,7 +1084,7 @@ TermView::_DrawLinePart(float x1, float y1, Attributes attr,
 
 	// color attribute
 	if (attr.IsForeSet())
-		rgb_fore = attr.ForegroundColor(fTextBuffer->Palette());
+		rgb_fore = attr.ForegroundColor(fTextBuffer->Palette(), fBrightenAnsi);
 	if (attr.IsBackSet())
 		rgb_back = attr.BackgroundColor(fTextBuffer->Palette());
 	if (attr.IsUnderSet())
@@ -1108,6 +1110,9 @@ TermView::_DrawLinePart(float x1, float y1, Attributes attr,
 	inView->SetHighColor(rgb_back);
 	inView->FillRect(BRect(x1, y1, x2 - 1, y2 - 1));
 	inView->SetLowColor(rgb_back);
+
+	if (attr.IsHidden())
+		return;
 
 	// underline attribute
 	if (attr.IsUnder()) {
@@ -1170,25 +1175,16 @@ TermView::_DrawLinePart(float x1, float y1, Attributes attr,
 
 	// Draw character.
 	if (attr.IsBold()) {
-		if (fEmulateBold) {
+		if (fBoldStyle == BOLD_SIMULATED) {
 			inView->MovePenTo(x1 - 1, y1 + fFontAscent - 1);
 			inView->DrawString((char *)buf);
 			inView->SetDrawingMode(B_OP_BLEND);
-		} else {
-			rgb_color bright = rgb_fore;
-
-			bright.red = saturated_add<uint8>(bright.red, 64);
-			bright.green = saturated_add<uint8>(bright.green, 64);
-			bright.blue = saturated_add<uint8>(bright.blue, 64);
-
-			inView->SetHighColor(bright);
 		}
 	}
 
 	inView->MovePenTo(x1, y1 + fFontAscent);
 	inView->DrawString((char *)buf);
 	inView->SetDrawingMode(B_OP_COPY);
-
 }
 
 
@@ -1834,17 +1830,18 @@ TermView::MessageReceived(BMessage *message)
 
 		case B_MOUSE_WHEEL_CHANGED:
 		{
-			// overridden to allow scrolling emulation in alternative screen
-			// mode
 			BAutolock locker(fTextBuffer);
+			bool alternateScroll = fTextBuffer->IsMode(MODE_ALTERNATE_SCROLL);
 			float deltaY = 0;
-			if (fTextBuffer->IsAlternateScreenActive()
-				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK
-				&& deltaY != 0) {
+			bool alternateScreenActive = fTextBuffer->IsAlternateScreenActive();
+			bool mouseOff = fTextBuffer->IsMouseMode(MOUSE_MODE_OFF);
+			locker.Unlock();
+
+			if (alternateScroll && alternateScreenActive
+				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0) {
 				// We are in alternative screen mode and have a vertical delta
 				// we can work with -- emulate scrolling via terminal escape
 				// sequences.
-				locker.Unlock();
 
 				// scroll pagewise, if one of Option, Command, or Control is
 				// pressed
@@ -1869,9 +1866,20 @@ TermView::MessageReceived(BMessage *message)
 					toWrite << stepString;
 
 				_WritePTY(toWrite.String(), toWrite.Length());
+			} else if (!alternateScroll && !mouseOff
+				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0) {
+				// The application has requested mouse events, encode wheel up/down and pass along.
+				BPoint where;
+				uint32 buttons;
+				GetMouse(&where, &buttons, false);
+				_UpdateModifiers();
+				TermPos clickPos = _ConvertToTerminal(where);
+				_SendMouseEvent(buttons, modifiers(), clickPos.x, clickPos.y, false, false,
+					deltaY > 0 ? MOUSE_WHEEL_DOWN : MOUSE_WHEEL_UP);
+				fMouseButtons = buttons;
+				fLastClickPoint = where;
 			} else {
 				// let the BView's implementation handle the standard scrolling
-				locker.Unlock();
 				BView::MessageReceived(message);
 			}
 
@@ -2510,57 +2518,90 @@ TermView::_MouseDistanceSinceLastClick(BPoint where)
 
 
 void
-TermView::_SendMouseEvent(int32 buttons, int32 mode, int32 x, int32 y,
-	bool motion, bool upEvent)
+TermView::_SendMouseEvent(int32 buttons, int32 modifiers, int32 x, int32 y, bool motion,
+	bool upEvent, int wheelButtons)
 {
-	if (!fTextBuffer->IsMode(MODE_EXTENDED_MOUSE_COORDINATES)) {
-		char xtermButtons;
-		if (buttons == B_PRIMARY_MOUSE_BUTTON)
-			xtermButtons = 32 + 0;
-		else if (buttons == B_SECONDARY_MOUSE_BUTTON)
-			xtermButtons = 32 + 1;
-		else if (buttons == B_TERTIARY_MOUSE_BUTTON)
-			xtermButtons = 32 + 2;
-		else
-			xtermButtons = 32 + 3;
+	// Filter events based on active mode.
+	if (fTextBuffer->IsMouseMode(MOUSE_MODE_OFF))
+		return;
 
-		// dragging motion
-		if (buttons != 0 && motion && fTextBuffer->IsMode(MODE_REPORT_BUTTON_MOUSE_EVENT))
-			xtermButtons += 32;
+	if (fTextBuffer->IsMouseMode(MOUSE_MODE_X10) && (upEvent || motion))
+		return;
 
-		char xtermX = x + 1 + 32;
-		char xtermY = y + 1 + 32;
+	if (fTextBuffer->IsMouseMode(MOUSE_MODE_NORMAL) && motion)
+		return;
 
-		char destBuffer[6];
-		destBuffer[0] = '\033';
-		destBuffer[1] = '[';
-		destBuffer[2] = 'M';
-		destBuffer[3] = xtermButtons;
-		destBuffer[4] = xtermX;
-		destBuffer[5] = xtermY;
-		fShell->Write(destBuffer, 6);
-	} else {
-		char xtermButtons;
-		if ((buttons & B_PRIMARY_MOUSE_BUTTON)
-			!= (motion ? 0 : (fMouseButtons & B_PRIMARY_MOUSE_BUTTON))) {
-			xtermButtons = 0;
-		} else if ((buttons & B_SECONDARY_MOUSE_BUTTON)
-			!= (motion ? 0 : (fMouseButtons & B_SECONDARY_MOUSE_BUTTON))) {
-			xtermButtons = 2;
-		} else if ((buttons & B_TERTIARY_MOUSE_BUTTON)
-			!= (motion ? 0 : (fMouseButtons & B_TERTIARY_MOUSE_BUTTON))) {
-			xtermButtons = 1;
-		} else
-			xtermButtons = 3;
-
-		// nur button events requested
-		if (buttons == 0 && motion && fTextBuffer->IsMode(MODE_REPORT_BUTTON_MOUSE_EVENT))
+	if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_X10) && fEncoding == M_UTF8) {
+		// Coordinates outside (160,94) (1-based) in X10 encoding result in byte pairs that can be
+		// decoded as a single UTF8 character, which could corrupt the stream. Do not send data
+		// outside that range.
+		if (x >= 160 || y >= 94)
 			return;
+	}
 
-		// dragging motion
-		if (buttons != 0 && motion && fTextBuffer->IsMode(MODE_REPORT_BUTTON_MOUSE_EVENT))
-			xtermButtons += 32;
+	if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_UTF8)) {
+		// XTerm UTF8 encoding is limited to 2015.  Do not send data outside that range.
+		if (x > 2015 || y > 2015)
+			return;
+	}
 
+	// Terminal buttons follow X10 convention: button 1 is left (primary), button 2 is middle
+	// (paste), and button 3 is right (popup). To match the API meaning here we must map button 2
+	// to TERTIARY and button 3 to SECONDARY.
+	bool button1 = (buttons & B_PRIMARY_MOUSE_BUTTON) != 0;
+	bool button2 = (buttons & B_TERTIARY_MOUSE_BUTTON) != 0;
+	bool button3 = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
+	bool oldButton1 = (fMouseButtons & B_PRIMARY_MOUSE_BUTTON) != 0;
+	bool oldButton2 = (fMouseButtons & B_TERTIARY_MOUSE_BUTTON) != 0;
+	bool oldButton3 = (fMouseButtons & B_SECONDARY_MOUSE_BUTTON) != 0;
+	int shiftModifier = (modifiers & B_SHIFT_KEY) != 0 ? 4 : 0;
+	int metaModifier = (modifiers & B_OPTION_KEY) != 0 ? 8 : 0;
+	int ctrlModifier = (modifiers & B_CONTROL_KEY) != 0 ? 16 : 0;
+
+	if (fTextBuffer->IsMouseMode(MOUSE_MODE_BUTTON_EVENT) && motion
+		&& !(button1 || button2 || button3)) {
+		return;
+	}
+
+	// The event will be sent, now encode it.
+	int xtermButtons;
+
+	if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_SGR) && upEvent) {
+		// SGR encoding identifies the specific button that was released. This requires checking
+		// against the previous button state, which is in fMouseButtons.
+		if (oldButton1 && !button1) {
+			xtermButtons = 0;
+		} else if (oldButton2 && !button2) {
+			xtermButtons = 1;
+		} else if (oldButton3 && !button3) {
+			xtermButtons = 2;
+		} else {
+			// Unknown button state, bail out. This should not happen: upEvent should only be true
+			// when one of the specifically these three (1, 2, 3) previously-down buttons was
+			// released.
+			return;
+		}
+	} else {
+		if (button1 && (!oldButton1 || motion))
+			xtermButtons = 0;
+		else if (button2 && (!oldButton2 || motion))
+			xtermButtons = 1;
+		else if (button3 && (!oldButton3 || motion))
+			xtermButtons = 2;
+		else if ((wheelButtons & MOUSE_WHEEL_UP) != 0)
+			xtermButtons = 64;
+		else if ((wheelButtons & MOUSE_WHEEL_DOWN) != 0)
+			xtermButtons = 65;
+		else
+			xtermButtons = 3;
+	}
+
+	if (motion)
+		xtermButtons += 32;
+
+	xtermButtons |= shiftModifier | metaModifier | ctrlModifier;
+
+	if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_SGR)) {
 		int16 xtermX = x + 1;
 		int16 xtermY = y + 1;
 
@@ -2568,6 +2609,37 @@ TermView::_SendMouseEvent(int32 buttons, int32 mode, int32 x, int32 y,
 		int size = snprintf(destBuffer, sizeof(destBuffer), "\033[<%u;%u;%u%c",
 			xtermButtons, xtermX, xtermY, upEvent ? 'm' : 'M');
 		fShell->Write(destBuffer, size);
+		return;
+	}
+
+	// X10 and UTF8 encoding
+	uint8 xtermX = x + 1 + 32;
+	uint8 xtermY = y + 1 + 32;
+
+	char destBuffer[6];
+	destBuffer[0] = '\033';
+	destBuffer[1] = '[';
+	destBuffer[2] = 'M';
+	destBuffer[3] = (uint8)(xtermButtons + 32);
+	destBuffer[4] = xtermX;
+	destBuffer[5] = xtermY;
+
+	if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_X10)) {
+		fShell->Write(destBuffer, 6);
+	} else if (fTextBuffer->IsMouseProtocol(MOUSE_PROTOCOL_UTF8)) {
+		char utf8Buffer[2];
+		for (int i = 0; i < 6; i++) {
+			uint8 ch = (uint8)destBuffer[i];
+			int n = 1;
+			if (ch <= 0x7F) {
+				utf8Buffer[0] = (char)ch;
+			} else {
+				utf8Buffer[0] = (uint8)(0xC0 | ((ch >> 6) & 0x1F));
+				utf8Buffer[1] = (uint8)(0x80 | (ch & 0x3F));
+				n = 2;
+			}
+			fShell->Write(utf8Buffer, n);
+		}
 	}
 }
 

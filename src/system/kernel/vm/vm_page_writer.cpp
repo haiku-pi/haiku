@@ -590,16 +590,23 @@ ModifiedPageQueue::_PageWriter()
 	page_num_t pagesSinceLastSuccessfulWrite = 0;
 
 	while (fWriterThread >= 0) {
-		if (queue.Count() < kNumPages) {
-			// wait the full amount when no one triggers us, then write what
-			// there is: skipping the write on a timeout left the last pages
-			// below kNumPages (up to 1 MB of a file) unwritten until a sync
+		if (queue.Count() < kNumPages && sUnderQuotaCondition.EntriesCount() == 0) {
+			// wait the full amount when nobody's waiting for us, then write
+			// what there is: skipping the write on a timeout left the last
+			// pages below kNumPages (up to 1 MB of a file) unwritten until a
+			// sync
 			fPageWriterCondition.Wait(PAGES_FLUSH_DURATION_LOCAL_QUOTA, true);
 		}
 
 		page_num_t modifiedPages = queue.Count();
-		if (modifiedPages == 0)
+		if (modifiedPages == 0) {
+			if (!IsOverQuota()) {
+				// If write_modified_page_range() wrote out pages, or if
+				// modified pages were discarded, there could be waiters.
+				sUnderQuotaCondition.NotifyAll();
+			}
 			continue;
+		}
 
 		if (modifiedPages <= pagesSinceLastSuccessfulWrite) {
 			// We ran through the whole queue without being able to write a

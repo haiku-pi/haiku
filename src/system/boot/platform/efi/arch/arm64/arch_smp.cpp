@@ -38,7 +38,7 @@ extern "C" {
 
 extern "C" void arch_enter_kernel(struct kernel_args* kernelArgs,
 	addr_t kernelEntry, addr_t kernelStackTop, uint32 cpu);
-void arm64_common_cpu_startup();
+void arm64_common_cpu_startup(uint32 cpu);
 
 static void arm64_psci_call_smc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
 static void arm64_psci_call_hvc(uint64 func, uint64 arg0, uint64 arg1, uint64 arg2);
@@ -173,7 +173,7 @@ arm64_current_cpu_index()
 extern "C" void
 arm64_secondary_startup2(uint32 cpu)
 {
-	arm64_common_cpu_startup();
+	arm64_common_cpu_startup(cpu);
 
 	// What this CPU stored with its caches off (the compiler may keep "cpu"
 	// on the stack) need not be what it reads now that they are on: look the
@@ -225,16 +225,16 @@ arch_smp_boot_other_cpus(addr_t ttbr1, uint64 kernelEntry, addr_t virtKernelArgs
 			sPsciCallFn(PSCI_CPU_ON, cpu->mpidr, (uint64)arm64_secondary_startup, 0);
 			break;
 		case CpuEnableMethod::SpinTable:
-		{
-			// The CPU polls its release address with its caches off, so the
-			// write must reach the point of coherency before the event.
-			uint64* releaseAddr = (uint64*)cpu->releaseAddr;
-			*releaseAddr = (uint64)arm64_secondary_startup;
-			asm volatile("dc civac, %0\n"
+			*((uint64*)cpu->releaseAddr) = (uint64)arm64_secondary_startup;
+			// The secondary CPUs have to read from RAM because their caches are disabled.
+			// Clean the cache line holding the release address before waking them.
+			asm volatile(
+				"dc cvac, %0\n"
 				"dsb sy\n"
-				"sev" : : "r" (releaseAddr) : "memory");
+				"sev\n"
+				:: "r" (cpu->releaseAddr) : "memory"
+			);
 			break;
-		}
 		default:
 			// Unreachable, we set sCpuCount to 0 already
 			break;

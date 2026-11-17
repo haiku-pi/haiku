@@ -54,7 +54,7 @@ arch_convert_kernel_args(void)
 
 
 void
-arm64_common_cpu_startup()
+arm64_common_cpu_startup(uint32 cpu)
 {
 	arch_cache_disable();
 
@@ -221,7 +221,7 @@ arch_start_kernel(addr_t kernelEntry)
 	serial_init();
 	serial_enable();
 
-	arm64_common_cpu_startup();
+	arm64_common_cpu_startup(0);
 
 	smp_boot_other_cpus(ttbr1, kernelEntry, (addr_t)&gKernelArgs);
 
