@@ -731,9 +731,16 @@ AVCodecEncoder::_EncodeVideoFrame(AVFrame* frame, AVPacket* pkt, media_encode_in
 					fCodecContext->time_base.num, fCodecContext->time_base.den);
 			}
 	
-			// Setup media_encode_info, most important is the time stamp.
-			info->start_time = (bigtime_t)(fFramesWritten * 1000000LL
-				/ fInputFormat.u.raw_video.field_rate);
+			// Setup media_encode_info, most important is the time stamp:
+			// the packet's own (an encoder with a delay - h264_mmal - can
+			// give two packets for one frame sent, or none)
+			if (pkt->pts != AV_NOPTS_VALUE) {
+				info->start_time = av_rescale_q(pkt->pts,
+					fCodecContext->time_base, (AVRational){1, 1000000});
+			} else {
+				info->start_time = (bigtime_t)(fFramesWritten * 1000000LL
+					/ fInputFormat.u.raw_video.field_rate);
+			}
 	
 			info->flags = 0;
 			if (pkt->flags & AV_PKT_FLAG_KEY)
