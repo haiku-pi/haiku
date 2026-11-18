@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <GraphicsDefs.h>
 #include <MediaTrack.h>
 
 #include "ColorSpaceToString.h"
@@ -21,6 +22,23 @@ using std::nothrow;
 #  include <File.h>
 #  include <TranslatorRoster.h>
 #endif // DEBUG_DECODED_FRAME
+
+/*!	The fewest bytes per row of a frame in \a format (a planar B_YUV420
+	frame: 3 bytes per 2 pixels in all, its luma rows 2/3 of them).
+*/
+static uint32
+min_bytes_per_row(color_space format, uint32 width)
+{
+	switch (format) {
+		case B_YCbCr422:
+			return ((width * 2 + 3) / 4) * 4;
+		case B_YUV420:
+			return (width + 3) / 4 * 6;
+		default:
+			return width * 4;
+	}
+}
+
 
 // constructor
 MediaTrackVideoSupplier::MediaTrackVideoSupplier(BMediaTrack* track,
@@ -314,11 +332,17 @@ MediaTrackVideoSupplier::_SwitchFormat(color_space format, uint32 bytesPerRow)
 		}
 	}
 
-	uint32 minBytesPerRow;
-	if (format == B_YCbCr422)
-		minBytesPerRow = ((width * 2 + 3) / 4) * 4;
-	else
-		minBytesPerRow = width * 4;
+	if (format == B_YUV420) {
+		// only worth it on an overlay: the display converts it, nothing
+		// else draws it
+		uint32 flags = 0;
+		if (!bitmaps_support_space(B_YUV420, &flags)
+			|| (flags & B_BITMAPS_SUPPORT_OVERLAY) == 0) {
+			format = B_RGB32;
+		}
+	}
+
+	uint32 minBytesPerRow = min_bytes_per_row(format, width);
 	bytesPerRow = max_c(bytesPerRow, minBytesPerRow);
 
 	ret = _SetDecodedFormat(width, height, format, bytesPerRow);
@@ -345,10 +369,7 @@ MediaTrackVideoSupplier::_SwitchFormat(color_space format, uint32 bytesPerRow)
 			color_space_to_string(fFormat.u.raw_video.display.format));
 		// check if the codec forgot to adjust bytes_per_row
 		format = fFormat.u.raw_video.display.format;
-		if (format == B_YCbCr422)
-			minBytesPerRow = ((width * 2 + 3) / 4) * 4;
-		else
-			minBytesPerRow = width * 4;
+		minBytesPerRow = min_bytes_per_row(format, width);
 		if (minBytesPerRow > fFormat.u.raw_video.display.bytes_per_row) {
 			printf("  -> stupid codec forgot to adjust bytes_per_row!\n");
 
