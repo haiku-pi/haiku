@@ -323,8 +323,10 @@ MediaTrackVideoSupplier::_SwitchFormat(color_space format, uint32 bytesPerRow)
 		format = fFormat.u.encoded_video.output.display.format;
 		if (format == B_NO_COLOR_SPACE) {
 			// if still no preferred format, try the most commonly
-			// supported overlay format
-			format = B_YCbCr422;
+			// supported overlay format: planar 4:2:0, what most video is
+			// (a decoder gives RGB for others); B_RGB32 without such
+			// overlays (below)
+			format = B_YUV420;
 		} else {
 			printf("MediaTrackVideoSupplier::_SwitchFormat() - "
 				"preferred color space: %s\n",
