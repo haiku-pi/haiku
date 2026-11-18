@@ -9,7 +9,6 @@
 
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -63,7 +62,6 @@ VideoConsumer::VideoConsumer(const char* name, BMediaAddOn* addon,
 	  fTargetLock(),
 	  fTarget(target),
 	  fLastBufferIndex(-1),
-	  fRetiringBufferIndex(-1),
 	  fTryOverlay(true)
 {
 	FUNCTION("VideoConsumer::VideoConsumer\n");
@@ -74,7 +72,6 @@ VideoConsumer::VideoConsumer(const char* name, BMediaAddOn* addon,
 	for (uint32 i = 0; i < kBufferCount; i++) {
 		fBitmap[i] = NULL;
 		fBufferMap[i] = NULL;
-		fBitmapBits[i] = NULL;
 	}
 	
 	SetPriority(B_DISPLAY_PRIORITY);
@@ -250,7 +247,6 @@ VideoConsumer::CreateBuffers(const media_format& format)
 					"BUFFER TO GROUP\n");
 			}
 			fBufferMap[i] = buffer;
-			fBitmapBits[i] = bits;
 		} else {
 			ERROR("VideoConsumer::CreateBuffers - ERROR CREATING VIDEO RING "
 				"BUFFER (Index %" B_PRId32 " Width %" B_PRId32 " Height %"
@@ -276,7 +272,6 @@ VideoConsumer::DeleteBuffers()
 				fTarget->SetBitmap(NULL);
 			fLastBufferIndex = -1;
 		}
-		fRetiringBufferIndex = -1;
 		fTargetLock.Unlock();
 
 		delete fBuffers;
@@ -329,12 +324,10 @@ VideoConsumer::Connected(const media_source& producer,
 	int32 changeTag = 1;
 	status_t ret = CreateBuffers(format);
 	if (ret == B_OK) {
-		// The producer writes into the bitmaps themselves, overlay bitmaps
-		// too (their buffers are areas every team may clone);
-		// MEDIAPLAYER_OVERLAY_COPY=1 has it write into buffers of its own
-		// that are copied into overlay bitmaps, as before.
-		const char* copy = getenv("MEDIAPLAYER_OVERLAY_COPY");
-		if (!fTryOverlay || copy == NULL || strcmp(copy, "1") != 0) {
+		// TODO: With overlay bitmaps, there seems to be a problem with
+		// mapping the BBitmap areas into the BBuffers. Until that is fixed,
+		// don't enable a shared BBufferGroup.
+		if (!fTryOverlay) {
 			ret = SetOutputBuffersFor(producer, fIn.destination, 
 				fBuffers, &userData, &changeTag, true);
 			if (ret != B_OK)
@@ -590,12 +583,6 @@ VideoConsumer::_HandleBuffer(BBuffer* buffer)
 		if (!fOurBuffers) {
 			memcpy(fBitmap[index]->Bits(), buffer->Data(),
 				fBitmap[index]->BitsLength());
-		} else if (fBitmap[index]->Bits() != fBitmapBits[index]
-			&& fBitmap[index]->Bits() != NULL) {
-			// an overlay bitmap moved (a mode change suspends and resumes
-			// overlays): the buffer still maps its old memory
-			memcpy(fBitmap[index]->Bits(), buffer->Data(),
-				fBitmap[index]->BitsLength());
 		}
 		bigtime_t tooEarly = buffer->Header()->start_time - now;
 		if (tooEarly > 3000)
@@ -605,15 +592,8 @@ VideoConsumer::_HandleBuffer(BBuffer* buffer)
 		if (fTarget) {
 			fTarget->SetBitmap(fBitmap[index]);
 			if (fOurBuffers) {
-				// Recycle the previous but not the current buffer. An overlay
-				// takes the new bitmap at the display's next update point
-				// and scans the previous one out until then: the producer
-				// gets it back only once a later frame was shown.
-				if (fTryOverlay) {
-					if (fRetiringBufferIndex >= 0)
-						fBufferMap[fRetiringBufferIndex]->Recycle();
-					fRetiringBufferIndex = fLastBufferIndex;
-				} else if (fLastBufferIndex >= 0)
+				// recycle the previous but not the current buffer
+				if (fLastBufferIndex >= 0)
 					fBufferMap[fLastBufferIndex]->Recycle();
 				recycle = false;
 			}
@@ -643,13 +623,9 @@ VideoConsumer::_UnsetTargetBuffer()
 	if (fLastBufferIndex >= 0) {
 		if (fTarget)
 			fTarget->SetBitmap(NULL);
-		if (fOurBuffers) {
+		if (fOurBuffers)
 			fBufferMap[fLastBufferIndex]->Recycle();
-			if (fRetiringBufferIndex >= 0)
-				fBufferMap[fRetiringBufferIndex]->Recycle();
-		}
 		fLastBufferIndex = -1;
-		fRetiringBufferIndex = -1;
 	}
 	fTargetLock.Unlock();
 }
