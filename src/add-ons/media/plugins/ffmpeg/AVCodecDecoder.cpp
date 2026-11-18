@@ -768,8 +768,9 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 
 /*!	Chooses the output's color space and rows for the request \a requested,
 	the size of the decoded picture: B_YUV420 (planar 4:2:0, as most decoders
-	put it out: a copy of their planes) when the caller asks for it and the
-	size is even, else B_RGB32. The caller's bytes per row are kept when they
+	put it out: a copy of their planes) when the caller asks for it, the
+	decoder's pictures are YCbCr 4:2:0 (of any depth) and their size is even,
+	else B_RGB32. The caller's bytes per row are kept when they
 	fit (a consumer's bitmap may have wider rows).
 */
 void
@@ -781,8 +782,15 @@ AVCodecDecoder::_ChooseVideoOutput(const media_format& requested)
 	const uint32 requestedBytesPerRow
 		= requested.u.raw_video.display.bytes_per_row;
 
-	if (requestedSpace == B_YUV420 && fYUV420Allowed && fOutputWidth % 2 == 0
-		&& fOutputHeight % 2 == 0) {
+	const AVPixFmtDescriptor* pictureFormat
+		= av_pix_fmt_desc_get(fCodecContext->pix_fmt);
+	const bool yuv420 = pictureFormat != NULL
+		&& (pictureFormat->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL
+			| AV_PIX_FMT_FLAG_HWACCEL)) == 0
+		&& pictureFormat->nb_components >= 3
+		&& pictureFormat->log2_chroma_w == 1 && pictureFormat->log2_chroma_h == 1;
+	if (requestedSpace == B_YUV420 && fYUV420Allowed && yuv420
+		&& fOutputWidth % 2 == 0 && fOutputHeight % 2 == 0) {
 		// as a B_YUV420 BBitmap: 3 bytes per 2 pixels, i.e. luma rows of 2/3
 		// and chroma rows of 1/3 of bytes_per_row, the Cb plane after the
 		// luma, the Cr plane after it (bytes_per_row * height in all)
@@ -852,8 +860,11 @@ AVCodecDecoder::_FillVideoOutputFormat(media_format* outFormat)
 	if (fromFormat < 70)
 		outFormat->u.raw_video.field_rate = fromFormat;
 	// See if the codec knows better (adapted from av_guess_frame_rate in ffmpeg)
+	// (not a hardware decoder: h264_mmal reports the rate it told the
+	// VideoCore, 24000/1001, whatever the stream's is)
 	AVRational codec_fr = fCodecContext->framerate;
-	if (codec_fr.num > 0 && codec_fr.den > 0
+	if ((fCodec->capabilities & AV_CODEC_CAP_HARDWARE) == 0
+		&& codec_fr.num > 0 && codec_fr.den > 0
 		&& (fromFormat == 0 || av_q2d(codec_fr) < fromFormat * 0.7)) {
 		outFormat->u.raw_video.field_rate = av_q2d(fCodecContext->framerate);
 	}
