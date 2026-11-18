@@ -23,6 +23,21 @@ const EncoderDescription gEncoderTable[] = {
 		23
 	},
 	{
+		// FFmpeg's H.264 encoder, if it has one (on the Raspberry Pi 4:
+		// h264_mmal, the VideoCore's encoder)
+		{
+			"H.264 video",
+			"h264",
+			0,
+			AV_CODEC_ID_H264,
+			{ 0 }
+		},
+		B_ANY_FORMAT_FAMILY,
+		B_MEDIA_RAW_VIDEO,
+		B_MEDIA_ENCODED_VIDEO,
+		46
+	},
+	{
 		{
 			"MPEG-1 video",
 			"mpeg1video",
