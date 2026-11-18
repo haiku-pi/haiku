@@ -1131,9 +1131,6 @@ JPEGTranslator::Decompress(BPositionIO* in, BPositionIO* out,
 		}
 	}
 
-	// Initialize decompression
-	jpeg_start_decompress(&cinfo);
-
 	// retrieve orientation from settings/EXIF
 	int32 orientation;
 	if (ioExtension == NULL
@@ -1141,6 +1138,20 @@ JPEGTranslator::Decompress(BPositionIO* in, BPositionIO* out,
 		if (exif.FindInt32("Orientation", &orientation) != B_OK)
 			orientation = 1;
 	}
+
+#ifdef JCS_ALPHA_EXTENSIONS
+	if (orientation == 1 && converter == convert_from_24_to_32
+		&& cinfo.out_color_space == JCS_RGB) {
+		// libjpeg-turbo writes B_RGB32 itself (with its SIMD colour
+		// conversion) instead of RGB that a loop here turns into B_RGB32 one
+		// pixel at a time
+		cinfo.out_color_space = JCS_EXT_BGRA;
+		converter = NULL;
+	}
+#endif
+
+	// Initialize decompression
+	jpeg_start_decompress(&cinfo);
 
 	if (orientation != 1 && converter == NULL)
 		converter = translate_8;
