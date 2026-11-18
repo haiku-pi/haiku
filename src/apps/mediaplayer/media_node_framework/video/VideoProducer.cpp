@@ -771,9 +771,16 @@ VideoProducer::_FrameGeneratorThread()
 					}
 					// clean the buffer if something went wrong
 					if (err != B_OK && err != B_LAST_BUFFER_ERROR) {
-						// TODO: should use "back value" according
-						// to color space!
-						memset(buffer->Data(), 0, h->size_used);
+						// black (in planar 4:2:0: Y 16 in the first 2/3,
+						// Cb and Cr 128 after it)
+						// TODO: other color spaces' black
+						if (fConnectedFormat.display.format == B_YUV420) {
+							const size_t luma = h->size_used / 3 * 2;
+							memset(buffer->Data(), 16, luma);
+							memset((uint8*)buffer->Data() + luma, 128,
+								h->size_used - luma);
+						} else
+							memset(buffer->Data(), 0, h->size_used);
 						err = B_OK;
 					} else if (err == B_LAST_BUFFER_ERROR) {
 						wasCached = true;
