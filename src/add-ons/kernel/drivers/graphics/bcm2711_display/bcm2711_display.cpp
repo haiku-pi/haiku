@@ -1000,7 +1000,6 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 	}
 	switch (request.image_type) {
 		case BCM2711_DISPLAY_IMAGE_XRGB8888:
-		case BCM2711_DISPLAY_IMAGE_YUV422_YUYV:
 		case BCM2711_DISPLAY_IMAGE_YUV420:
 		case BCM2711_DISPLAY_IMAGE_YUV_UV:
 			break;

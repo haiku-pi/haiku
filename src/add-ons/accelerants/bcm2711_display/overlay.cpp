@@ -10,6 +10,13 @@
 	instead: while an overlay is visible, the driver scans the desktop out
 	above the overlays, and app_server keeps the desktop opaque except where
 	it holds the overlay's key color (B_OVERLAY_KEYING_USES_ALPHA).
+
+	Color spaces: B_RGB32/B_RGBA32, and B_YUV420 as planar I420 (what video
+	decoders put out): Y, then Cb and Cr of half the width and height. Its
+	bytes_per_row is that of the whole picture, as for any B_YUV420 bitmap
+	(3 bytes per 2 pixels, so that bytes_per_row * height is its size): the
+	luma rows are 2/3 of it, the chroma rows 1/3. The display's scaler has no
+	packed 4:2:2 format, so B_YCbCr422 is not offered.
 */
 
 
@@ -29,6 +36,8 @@ struct overlay {
 	area_id			area;
 	uint32			physical;
 	uint32			image_type;
+	uint32			pitch;
+		// of the first plane: the firmware derives the chroma planes' pitch
 };
 
 // A token is the address of its plane's slot. app_server may release a
@@ -42,7 +51,7 @@ static plane_slot sPlanes[BCM2711_DISPLAY_OVERLAY_PLANES];
 static pthread_mutex_t sLock = PTHREAD_MUTEX_INITIALIZER;
 
 static const uint32 kSupportedSpaces[] = {
-	B_RGB32, B_RGBA32, B_YCbCr422, B_YUV420, 0
+	B_RGB32, B_RGBA32, B_YUV420, 0
 };
 
 
@@ -97,42 +106,38 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 	uint16 height)
 {
 	uint32 imageType;
-	uint32 bytesPerPixel;
 	switch (colorSpace) {
 		case B_RGB32:
 		case B_RGBA32:
 			// the alpha channel is ignored: frames are opaque
 			imageType = BCM2711_DISPLAY_IMAGE_XRGB8888;
-			bytesPerPixel = 4;
-			break;
-		case B_YCbCr422:
-			imageType = BCM2711_DISPLAY_IMAGE_YUV422_YUYV;
-			bytesPerPixel = 2;
 			break;
 		case B_YUV420:
 			imageType = BCM2711_DISPLAY_IMAGE_YUV420;
-			bytesPerPixel = 1;
-				// of the luma plane
 			break;
 		default:
 			return NULL;
 	}
 	if (width < 2 || height < 2 || gInfo->shared_info->overlay_planes == 0)
 		return NULL;
-	if (colorSpace == B_YCbCr422 || colorSpace == B_YUV420)
+
+	// 64-byte rows (the chroma rows of 4:2:0 are still 32-byte aligned)
+	uint32 pitch;
+	uint32 bytesPerRow;
+	if (colorSpace == B_YUV420) {
 		width = (width + 1) & ~1;
-	if (colorSpace == B_YUV420)
 		height = (height + 1) & ~1;
+		pitch = (width + 63) & ~63;
+		bytesPerRow = pitch * 3 / 2;
+	} else {
+		pitch = (width * 4 + 63) & ~63;
+		bytesPerRow = pitch;
+	}
+	const uint32 size = bytesPerRow * height;
 
 	overlay* info = new(std::nothrow) overlay;
 	if (info == NULL)
 		return NULL;
-
-	// 64-byte rows: the chroma rows of 4:2:0 are still 32-byte aligned
-	const uint32 bytesPerRow = (width * bytesPerPixel + 63) & ~63;
-	uint32 size = bytesPerRow * height;
-	if (colorSpace == B_YUV420)
-		size += size / 2;
 
 	bcm2711_display_overlay_buffer request = {};
 	request.size = size;
@@ -151,6 +156,7 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 	info->area = request.area;
 	info->physical = request.physical;
 	info->image_type = imageType;
+	info->pitch = pitch;
 	return &info->buffer;
 }
 
@@ -180,11 +186,11 @@ bcm2711_get_overlay_constraints(const display_mode* mode,
 	memset(constraints, 0, sizeof(overlay_constraints));
 
 	// the source rectangle, in buffer pixels: 4:2:x chroma comes in pairs
-	const bool yuv = buffer->space == B_YCbCr422 || buffer->space == B_YUV420;
+	const bool yuv = buffer->space == B_YUV420;
 	constraints->view.h_alignment = yuv ? 1 : 0;
-	constraints->view.v_alignment = buffer->space == B_YUV420 ? 1 : 0;
+	constraints->view.v_alignment = yuv ? 1 : 0;
 	constraints->view.width_alignment = yuv ? 1 : 0;
-	constraints->view.height_alignment = buffer->space == B_YUV420 ? 1 : 0;
+	constraints->view.height_alignment = yuv ? 1 : 0;
 	constraints->view.width.min = 2;
 	constraints->view.width.max = buffer->width;
 	constraints->view.height.min = 2;
@@ -285,7 +291,7 @@ bcm2711_configure_overlay(overlay_token token, const overlay_buffer* buffer,
 	request.physical = info->physical;
 	request.width = buffer->width;
 	request.height = buffer->height;
-	request.bytes_per_row = buffer->bytes_per_row;
+	request.bytes_per_row = info->pitch;
 	request.source_x = (uint32)view->h_start << 16;
 	request.source_y = (uint32)view->v_start << 16;
 	request.source_width = (uint32)view->width << 16;
