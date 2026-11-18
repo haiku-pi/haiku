@@ -51,6 +51,13 @@ extern "C" {
 #define DRM_V3D_HAIKU_IMPORT_MEMORY               0x30
 #define DRM_V3D_HAIKU_SYNC_BO                     0x31
 
+/* Haiku extension: drm_v3d_mmap_bo.flags value that maps the BO at the address
+ * passed in "offset" (page-aligned; the whole BO), replacing what the calling
+ * team has mapped there in one step (GL_MESA_map_buffer_client_pointer). The
+ * parameter reads 1 where the kernel supports it. */
+#define DRM_V3D_HAIKU_MMAP_BO_PLACED              (1u << 31)
+#define DRM_V3D_PARAM_HAIKU_MMAP_BO_PLACED        0x1000
+
 #define DRM_IOCTL_V3D_SUBMIT_CL           DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_SUBMIT_CL, struct drm_v3d_submit_cl)
 #define DRM_IOCTL_V3D_WAIT_BO             DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_WAIT_BO, struct drm_v3d_wait_bo)
 #define DRM_IOCTL_V3D_CREATE_BO           DRM_IOWR(DRM_COMMAND_BASE + DRM_V3D_CREATE_BO, struct drm_v3d_create_bo)

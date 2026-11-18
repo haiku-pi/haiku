@@ -14,6 +14,10 @@
 	Haiku cannot mmap() a device, so MMAP_BO clones the BO's area into the
 	calling team and returns the address of the clone in "offset"; the client
 	uses it as its mapping and deletes it with munmap() (or delete_area()).
+	With DRM_V3D_HAIKU_MMAP_BO_PLACED the clone replaces, in one step, what
+	the client has mapped at the address it passes in "offset": a range its
+	own client gave it (GL_MESA_map_buffer_client_pointer); an mmap() with
+	MAP_FIXED over the clone gives the range back as plain memory.
 
 	Freeing a BO never returns memory the GPU may still write: its page table
 	entries are cleared first, and its pages and GPU addresses are released
@@ -180,8 +184,15 @@ static status_t
 mmap_bo(v3d_file* file, drm_v3d_mmap_bo* args)
 {
 	v3d_device* device = file->device;
-	if (args->flags != 0)
+	const bool placed = args->flags == DRM_V3D_HAIKU_MMAP_BO_PLACED;
+	if (args->flags != 0 && !placed)
 		return B_BAD_VALUE;
+	void* address = NULL;
+	if (placed) {
+		address = (void*)(addr_t)args->offset;
+		if (!IS_USER_ADDRESS(address) || (addr_t)address % B_PAGE_SIZE != 0)
+			return B_BAD_ADDRESS;
+	}
 
 	MutexLocker locker(device->lock);
 	v3d_bo* bo = v3d_bo_lookup(file, args->handle);
@@ -194,10 +205,10 @@ mmap_bo(v3d_file* file, drm_v3d_mmap_bo* args)
 		// keeps the BO while we clone it unlocked
 	locker.Unlock();
 
-	void* address = NULL;
-	area_id clone = vm_clone_area(team_get_current_team_id(), "v3d bo map",
-		&address, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA,
-		REGION_NO_PRIVATE_MAP, bo->area, true);
+	area_id clone = vm_clone_area_etc(team_get_current_team_id(),
+		"v3d bo map", &address, placed ? B_EXACT_ADDRESS : B_ANY_ADDRESS,
+		B_READ_AREA | B_WRITE_AREA, REGION_NO_PRIVATE_MAP, bo->area,
+		placed ? CREATE_AREA_UNMAP_ADDRESS_RANGE : 0, true);
 	status_t status = clone >= 0 ? B_OK : clone;
 	if (status == B_OK) {
 		// A clone of RAM does not inherit the memory type of its source.

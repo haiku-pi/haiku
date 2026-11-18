@@ -395,6 +395,9 @@ get_param(v3d_file* file, drm_v3d_get_param* args)
 		case DRM_V3D_PARAM_GLOBAL_RESET_COUNTER:
 			args->value = device->resets;
 			return B_OK;
+		case DRM_V3D_PARAM_HAIKU_MMAP_BO_PLACED:
+			args->value = 1;
+			return B_OK;
 	}
 
 	// The identification, read live from the hardware.
