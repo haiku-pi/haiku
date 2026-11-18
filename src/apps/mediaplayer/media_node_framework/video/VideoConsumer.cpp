@@ -581,8 +581,14 @@ VideoConsumer::_HandleBuffer(BBuffer* buffer)
 		// Only display the buffer if it's not too late, or if we are
 		// in B_OFFLINE run-mode.
 		if (!fOurBuffers) {
-			memcpy(fBitmap[index]->Bits(), buffer->Data(),
-				fBitmap[index]->BitsLength());
+			// An overlay bitmap has no memory while app_server suspends
+			// overlays (a mode change): LockBits() fails then, and the
+			// frame is not copied.
+			BBitmap* bitmap = fBitmap[index];
+			if (bitmap->LockBits() == B_OK) {
+				memcpy(bitmap->Bits(), buffer->Data(), bitmap->BitsLength());
+				bitmap->UnlockBits();
+			}
 		}
 		bigtime_t tooEarly = buffer->Header()->start_time - now;
 		if (tooEarly > 3000)
