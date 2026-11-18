@@ -112,11 +112,16 @@ private:
 			bool				fOurBuffers;
 			BBufferGroup*		fBuffers;
 			BBuffer*			fBufferMap[kBufferCount];	
+			void*				fBitmapBits[kBufferCount];
+									// where fBufferMap's buffers write
 
 			NodeManager*		fManager;
 			BLocker				fTargetLock;	// locks the following variable
 			VideoTarget* volatile	fTarget;
 			int32				fLastBufferIndex;
+			int32				fRetiringBufferIndex;
+									// the one shown before the last, while
+									// an overlay may still scan it out
 
 			bool				fTryOverlay;
 };
