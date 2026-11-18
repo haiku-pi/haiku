@@ -25,6 +25,7 @@ extern "C" {
 	#include "buffersink.h"
 	#include "buffersrc.h"
 	#include "imgutils.h"
+	#include "pixdesc.h"
 	#include "swresample.h"
 	#include "swscale.h"
 	#include "timestamp.h"
@@ -81,6 +82,8 @@ private:
 			status_t	_NegotiateAudioOutputFormat(media_format* inOutFormat);
 
 			status_t	_NegotiateVideoOutputFormat(media_format* inOutFormat);
+			void		_ChooseVideoOutput(const media_format& requested);
+			void		_FillVideoOutputFormat(media_format* outFormat);
 
 			status_t	_DecodeAudio(void* outBuffer, int64* outFrameCount,
 							media_header* mediaHeader,
@@ -107,7 +110,8 @@ private:
 			status_t	_HandleNewVideoFrameAndUpdateSystemState();
 			status_t	_FlushOneVideoFrameFromDecoderBuffer();
 			void		_UpdateMediaHeaderForVideoFrame();
-			status_t	_DeinterlaceAndColorConvertVideoFrame();
+			status_t	_DeinterlaceVideoFrame();
+			status_t	_ColorConvertVideoFrame(uint8* destination);
 
 			// video deinterlace filter graph
 			status_t	_InitFilterGraph(enum AVPixelFormat pixfmt,
@@ -143,6 +147,11 @@ private:
 			size_t				fDecodedDataSizeInBytes;
 			AVFrame*			fPostProcessedDecodedPicture;
 			AVFrame*			fRawDecodedPicture;
+			AVFrame*			fDeinterlacedPicture;
+			bool				fUseDeinterlacedPicture;
+									// the decoded picture waiting for
+									// Decode(), which converts it into the
+									// caller's buffer
 			AVFrame*			fRawDecodedAudio;
 
 			bool 				fCodecInitDone;
@@ -157,6 +166,12 @@ private:
 			int					fBlockAlign;
 
 			color_space			fOutputColorSpace;
+			uint32				fOutputBytesPerRow;
+			uint32				fOutputWidth;
+			uint32				fOutputHeight;
+			bool				fYUV420Allowed;
+									// B_YUV420 output when the caller asks
+									// for it (FFMPEG_YUV420=0: never)
 			int32				fOutputFrameCount;
 			float				fOutputFrameRate;
 									// only for audio streams

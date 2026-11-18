@@ -98,6 +98,8 @@ AVCodecDecoder::AVCodecDecoder()
 	fDecodedDataSizeInBytes(0),
 	fPostProcessedDecodedPicture(av_frame_alloc()),
 	fRawDecodedPicture(av_frame_alloc()),
+	fDeinterlacedPicture(av_frame_alloc()),
+	fUseDeinterlacedPicture(false),
 	fRawDecodedAudio(av_frame_alloc()),
 
 	fCodecInitDone(false),
@@ -113,6 +115,10 @@ AVCodecDecoder::AVCodecDecoder()
 	fBlockAlign(0),
 
 	fOutputColorSpace(B_NO_COLOR_SPACE),
+	fOutputBytesPerRow(0),
+	fOutputWidth(0),
+	fOutputHeight(0),
+	fYUV420Allowed(true),
 	fOutputFrameCount(0),
 	fOutputFrameRate(1.0),
 	fOutputFrameSize(0),
@@ -132,6 +138,10 @@ AVCodecDecoder::AVCodecDecoder()
 	fFilterFrame(NULL)
 {
 	TRACE("AVCodecDecoder::AVCodecDecoder()\n");
+
+	const char* setting = getenv("FFMPEG_YUV420");
+	if (setting != NULL && strcmp(setting, "0") == 0)
+		fYUV420Allowed = false;
 }
 
 
@@ -153,6 +163,7 @@ AVCodecDecoder::~AVCodecDecoder()
 
 	av_frame_free(&fPostProcessedDecodedPicture);
 	av_frame_free(&fRawDecodedPicture);
+	av_frame_free(&fDeinterlacedPicture);
 	if (fRawDecodedAudio != NULL)
 		av_free(fRawDecodedAudio->opaque);
 	av_frame_free(&fRawDecodedAudio);
@@ -319,6 +330,21 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 	TRACE("  [%c]  requested format = %s\n", fIsAudio ? 'a' : 'v', buffer);
 #endif
 
+	if (!fIsAudio && fCodecInitDone && fOutputColorSpace != B_NO_COLOR_SPACE
+		&& (inOutFormat->u.raw_video.display.format != fOutputColorSpace
+			|| inOutFormat->u.raw_video.display.bytes_per_row
+				!= fOutputBytesPerRow)) {
+		// Only the output changes (the consumer's buffers are in another
+		// color space or have other rows): the decoder goes on, and the
+		// picture it has decoded already is converted into the new format.
+		_ChooseVideoOutput(*inOutFormat);
+		_FillVideoOutputFormat(inOutFormat);
+		printf("AVCodecDecoder: video output now %s, %" B_PRIu32 " bytes per "
+			"row\n", fOutputColorSpace == B_YUV420 ? "B_YUV420" : "B_RGB32",
+			fOutputBytesPerRow);
+		return B_OK;
+	}
+
 	// close any previous instance
 	if (_CreateCodecContext() != B_OK)
 		return B_NO_MEMORY;
@@ -329,6 +355,12 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 	status_t status = _NegotiateVideoOutputFormat(inOutFormat);
 	if (status == B_OK && fSoftwareCodec != NULL)
 		printf("AVCodecDecoder: video decoder %s\n", fCodec->name);
+	if (status == B_OK && fOutputColorSpace == B_YUV420) {
+		printf("AVCodecDecoder: video output B_YUV420 (%s %s, %" B_PRIu32
+			"x%" B_PRIu32 ")\n", fCodec->name,
+			av_get_pix_fmt_name(fCodecContext->pix_fmt), fOutputWidth,
+			fOutputHeight);
+	}
 	return status;
 }
 
@@ -683,17 +715,7 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 	}
 	fCodecInitDone = true;
 
-#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-	fOutputColorSpace = B_RGB32;
-#else
-	// Make MediaPlayer happy (if not in rgb32 screen depth and no overlay,
-	// it will only ask for YCbCr, which DrawBitmap doesn't handle, so the
-	// default colordepth is RGB32).
-	if (inOutFormat->u.raw_video.display.format == B_YCbCr422)
-		fOutputColorSpace = B_YCbCr422;
-	else
-		fOutputColorSpace = B_RGB32;
-#endif
+	fOutputColorSpace = B_NO_COLOR_SPACE;
 
 #if USE_SWS_FOR_COLOR_SPACE_CONVERSION
 	if (fSwsContext != NULL)
@@ -729,18 +751,85 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 	}
 #endif
 
-	inOutFormat->type = B_MEDIA_RAW_VIDEO;
-	inOutFormat->require_flags = 0;
-	inOutFormat->deny_flags = B_MEDIA_MAUI_UNDEFINED_FLAGS;
-	inOutFormat->u.raw_video = fInputFormat.u.encoded_video.output;
-	inOutFormat->u.raw_video.interlace = 1;
+	_ChooseVideoOutput(*inOutFormat);
+	_FillVideoOutputFormat(inOutFormat);
+
+#ifdef TRACE_AV_CODEC
+	char buffer[1024];
+	string_for_format(*inOutFormat, buffer, sizeof(buffer));
+	TRACE("[v]  outFormat = %s\n", buffer);
+	TRACE("  returned  video format 0x%x\n",
+		inOutFormat->u.raw_video.display.format);
+#endif
+
+	return B_OK;
+}
+
+
+/*!	Chooses the output's color space and rows for the request \a requested,
+	the size of the decoded picture: B_YUV420 (planar 4:2:0, as most decoders
+	put it out: a copy of their planes) when the caller asks for it and the
+	size is even, else B_RGB32. The caller's bytes per row are kept when they
+	fit (a consumer's bitmap may have wider rows).
+*/
+void
+AVCodecDecoder::_ChooseVideoOutput(const media_format& requested)
+{
+	fOutputWidth = fHeader.u.raw_video.display_line_width;
+	fOutputHeight = fHeader.u.raw_video.display_line_count;
+	const color_space requestedSpace = requested.u.raw_video.display.format;
+	const uint32 requestedBytesPerRow
+		= requested.u.raw_video.display.bytes_per_row;
+
+	if (requestedSpace == B_YUV420 && fYUV420Allowed && fOutputWidth % 2 == 0
+		&& fOutputHeight % 2 == 0) {
+		// as a B_YUV420 BBitmap: 3 bytes per 2 pixels, i.e. luma rows of 2/3
+		// and chroma rows of 1/3 of bytes_per_row, the Cb plane after the
+		// luma, the Cr plane after it (bytes_per_row * height in all)
+		fOutputColorSpace = B_YUV420;
+		fOutputBytesPerRow = (fOutputWidth + 3) / 4 * 6;
+		if (requestedBytesPerRow > fOutputBytesPerRow
+			&& requestedBytesPerRow % 3 == 0) {
+			fOutputBytesPerRow = requestedBytesPerRow;
+		}
+		return;
+	}
+
+#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
+	fOutputColorSpace = B_RGB32;
+#else
+	// Make MediaPlayer happy (if not in rgb32 screen depth and no overlay,
+	// it will only ask for YCbCr, which DrawBitmap doesn't handle, so the
+	// default colordepth is RGB32).
+	if (requestedSpace == B_YCbCr422)
+		fOutputColorSpace = B_YCbCr422;
+	else
+		fOutputColorSpace = B_RGB32;
+#endif
+	fOutputBytesPerRow = CalculateBytesPerRowWithColorSpaceAndVideoWidth(
+		fOutputColorSpace, fOutputWidth);
+	if (requestedBytesPerRow > fOutputBytesPerRow
+		&& requestedBytesPerRow % 4 == 0) {
+		fOutputBytesPerRow = requestedBytesPerRow;
+	}
+}
+
+
+void
+AVCodecDecoder::_FillVideoOutputFormat(media_format* outFormat)
+{
+	outFormat->type = B_MEDIA_RAW_VIDEO;
+	outFormat->require_flags = 0;
+	outFormat->deny_flags = B_MEDIA_MAUI_UNDEFINED_FLAGS;
+	outFormat->u.raw_video = fInputFormat.u.encoded_video.output;
+	outFormat->u.raw_video.interlace = 1;
 		// Progressive (non-interlaced) video frames are delivered
-	inOutFormat->u.raw_video.first_active
+	outFormat->u.raw_video.first_active
 		= fHeader.u.raw_video.first_active_line;
-	inOutFormat->u.raw_video.last_active = fHeader.u.raw_video.line_count;
-	inOutFormat->u.raw_video.pixel_width_aspect
+	outFormat->u.raw_video.last_active = fHeader.u.raw_video.line_count;
+	outFormat->u.raw_video.pixel_width_aspect
 		= fHeader.u.raw_video.pixel_width_aspect;
-	inOutFormat->u.raw_video.pixel_height_aspect
+	outFormat->u.raw_video.pixel_height_aspect
 		= fHeader.u.raw_video.pixel_height_aspect;
 	// The framerate in fCodecContext is not always equivalent to the field rate. Instead it can
 	// be some internal value of the codec, for example mpeg4 uses a framerate of 90000 and then
@@ -761,30 +850,18 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 	// in that case (since we let ffmpeg do the deinterlacing).
 	float fromFormat = fInputFormat.u.encoded_video.output.field_rate;
 	if (fromFormat < 70)
-		inOutFormat->u.raw_video.field_rate = fromFormat;
+		outFormat->u.raw_video.field_rate = fromFormat;
 	// See if the codec knows better (adapted from av_guess_frame_rate in ffmpeg)
 	AVRational codec_fr = fCodecContext->framerate;
 	if (codec_fr.num > 0 && codec_fr.den > 0
 		&& (fromFormat == 0 || av_q2d(codec_fr) < fromFormat * 0.7)) {
-		inOutFormat->u.raw_video.field_rate = av_q2d(fCodecContext->framerate);
+		outFormat->u.raw_video.field_rate = av_q2d(fCodecContext->framerate);
 	}
-	inOutFormat->u.raw_video.display.format = fOutputColorSpace;
-	inOutFormat->u.raw_video.display.line_width
-		= fHeader.u.raw_video.display_line_width;
-	inOutFormat->u.raw_video.display.line_count
-		= fHeader.u.raw_video.display_line_count;
-	inOutFormat->u.raw_video.display.bytes_per_row
-		= fHeader.u.raw_video.bytes_per_row;
+	outFormat->u.raw_video.display.format = fOutputColorSpace;
+	outFormat->u.raw_video.display.line_width = fOutputWidth;
+	outFormat->u.raw_video.display.line_count = fOutputHeight;
+	outFormat->u.raw_video.display.bytes_per_row = fOutputBytesPerRow;
 
-#ifdef TRACE_AV_CODEC
-	char buffer[1024];
-	string_for_format(*inOutFormat, buffer, sizeof(buffer));
-	TRACE("[v]  outFormat = %s\n", buffer);
-	TRACE("  returned  video format 0x%x\n",
-		inOutFormat->u.raw_video.display.format);
-#endif
-
-	return B_OK;
 }
 
 
@@ -855,13 +932,17 @@ AVCodecDecoder::_DecodeVideo(void* outBuffer, int64* outFrameCount,
 	if (videoDecodingStatus != B_OK)
 		return videoDecodingStatus;
 
+	// the decoded picture goes into the caller's buffer only now, in the
+	// format negotiated last (no copy of it in between)
+	fHeader.size_used = fOutputBytesPerRow * fOutputHeight;
+	fHeader.u.raw_video.bytes_per_row = fOutputBytesPerRow;
 	*outFrameCount = 1;
 	*mediaHeader = fHeader;
-	memcpy(outBuffer, fDecodedData, mediaHeader->size_used);
+	status_t status = _ColorConvertVideoFrame((uint8*)outBuffer);
 
 	fDecodedDataSizeInBytes = 0;
 
-	return B_OK;
+	return status;
 }
 
 
@@ -1714,7 +1795,7 @@ AVCodecDecoder::_CopyChunkToChunkBufferAndAddPadding(const void* chunk,
 /*! \brief Executes all steps needed for a freshly decoded video frame.
 
 	\see _UpdateMediaHeaderForVideoFrame() and
-	\see _DeinterlaceAndColorConvertVideoFrame() for when you are allowed to
+	\see _DeinterlaceVideoFrame() for when you are allowed to
 	call this method.
 
 	\returns B_OK when video frame was handled successfully
@@ -1728,7 +1809,7 @@ AVCodecDecoder::_HandleNewVideoFrameAndUpdateSystemState()
 		_ForgetRecordedPackets();
 
 	_UpdateMediaHeaderForVideoFrame();
-	status_t postProcessStatus = _DeinterlaceAndColorConvertVideoFrame();
+	status_t postProcessStatus = _DeinterlaceVideoFrame();
 	if (postProcessStatus != B_OK)
 		return postProcessStatus;
 
@@ -1788,9 +1869,7 @@ AVCodecDecoder::_FlushOneVideoFrameFromDecoderBuffer()
 		1. We actually got a new picture decoded by the video decoder.
 		2. fHeader wasn't updated for the new picture yet. You MUST call this
 		   method only once per decoded video frame.
-		3. This function MUST be called after
-		   _DeinterlaceAndColorConvertVideoFrame() as it relys on an updated
-		    fDecodedDataSizeInBytes.
+		3. This function MUST be called before _DeinterlaceVideoFrame().
 		4. There will be at maximumn only one decoded video frame in our cache
 		   at any single point in time. Otherwise you couldn't tell to which
 		   cached decoded video frame the properties in fHeader relate to.
@@ -1805,14 +1884,9 @@ AVCodecDecoder::_UpdateMediaHeaderForVideoFrame()
 	fHeader.file_pos = 0;
 	fHeader.orig_size = 0;
 	fHeader.start_time = fRawDecodedPicture->best_effort_timestamp;
-	fHeader.size_used = av_image_get_buffer_size(
-		colorspace_to_pixfmt(fOutputColorSpace), fRawDecodedPicture->width,
-		fRawDecodedPicture->height, 1);
 	fHeader.u.raw_video.display_line_width = fRawDecodedPicture->width;
 	fHeader.u.raw_video.display_line_count = fRawDecodedPicture->height;
-	fHeader.u.raw_video.bytes_per_row
-		= CalculateBytesPerRowWithColorSpaceAndVideoWidth(fOutputColorSpace,
-			fRawDecodedPicture->width);
+		// (size_used and bytes_per_row: from the output, in _DecodeVideo())
 	fHeader.u.raw_video.field_gamma = 1.0;
 	fHeader.u.raw_video.field_sequence = fFrame;
 	fHeader.u.raw_video.field_number = 0;
@@ -1833,133 +1907,102 @@ AVCodecDecoder::_UpdateMediaHeaderForVideoFrame()
 }
 
 
-/*! \brief This function applies deinterlacing (only if needed) and color
-	conversion to the video frame in fRawDecodedPicture.
+/*!	Deinterlaces the picture in fRawDecodedPicture (when it is interlaced)
+	into fDeinterlacedPicture, and marks it as waiting for Decode(), which
+	converts it into the caller's buffer (_ColorConvertVideoFrame()).
 
-	It is assumed that fRawDecodedPicture wasn't deinterlaced and color
-	converted yet (otherwise this function behaves in unknown manners).
+	Call it once per decoded picture, after _UpdateMediaHeaderForVideoFrame().
 
-	This function MUST be called after _UpdateMediaHeaderForVideoFrame() as it
-	relys on the fHeader.size_used and fHeader.u.raw_video.bytes_per_row fields
-	for correct operation
-
-	You should only call this function when you	got a new picture decoded by
-	the video decoder.
-
-	When this function finishes the postprocessed video frame will be available
-	in fPostProcessedDecodedPicture and fDecodedData (fDecodedDataSizeInBytes
-	will be set accordingly).
-
-	\returns B_OK video frame successfully deinterlaced and color converted.
+	\returns B_OK the picture waits for Decode().
 	\returns B_NO_MEMORY Not enough memory available for correct operation.
 */
 status_t
-AVCodecDecoder::_DeinterlaceAndColorConvertVideoFrame()
+AVCodecDecoder::_DeinterlaceVideoFrame()
 {
-	int displayWidth = fRawDecodedPicture->width;
-	int displayHeight = fRawDecodedPicture->height;
-	AVFrame deinterlacedPicture;
-	bool useDeinterlacedPicture = false;
+	const AVPixelFormat format = (AVPixelFormat)fRawDecodedPicture->format;
+	const int width = fRawDecodedPicture->width;
+	const int height = fRawDecodedPicture->height;
 
-	if (fRawDecodedPicture->flags & AV_FRAME_FLAG_INTERLACED) {
-		AVFrame rawPicture;
-		rawPicture.data[0] = fRawDecodedPicture->data[0];
-		rawPicture.data[1] = fRawDecodedPicture->data[1];
-		rawPicture.data[2] = fRawDecodedPicture->data[2];
-		rawPicture.data[3] = fRawDecodedPicture->data[3];
-		rawPicture.linesize[0] = fRawDecodedPicture->linesize[0];
-		rawPicture.linesize[1] = fRawDecodedPicture->linesize[1];
-		rawPicture.linesize[2] = fRawDecodedPicture->linesize[2];
-		rawPicture.linesize[3] = fRawDecodedPicture->linesize[3];
-
-		if (av_image_alloc(deinterlacedPicture.data,
-				deinterlacedPicture.linesize, displayWidth, displayHeight,
-				fCodecContext->pix_fmt, 1) < 0)
-			return B_NO_MEMORY;
-
+	fUseDeinterlacedPicture = false;
+	if ((fRawDecodedPicture->flags & AV_FRAME_FLAG_INTERLACED) != 0) {
 		// deinterlace implemented using avfilter
-		_ProcessFilterGraph(&deinterlacedPicture, &rawPicture,
-			fCodecContext->pix_fmt, displayWidth, displayHeight);
-		useDeinterlacedPicture = true;
-	}
-
-	// Some decoders do not set pix_fmt until they have decoded 1 frame
-#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-	if (fSwsContext == NULL) {
-		fSwsContext = sws_getContext(displayWidth, displayHeight,
-			fCodecContext->pix_fmt, displayWidth, displayHeight,
-			colorspace_to_pixfmt(fOutputColorSpace),
-			SWS_FAST_BILINEAR, NULL, NULL, NULL);
-	}
-#else
-	if (fFormatConversionFunc == NULL) {
-		fFormatConversionFunc = resolve_colorspace(fOutputColorSpace,
-			fCodecContext->pix_fmt, displayWidth, displayHeight);
-	}
-#endif
-
-	fDecodedDataSizeInBytes = fHeader.size_used;
-
-	if (fDecodedData == NULL) {
-		const size_t kOptimalAlignmentForColorConversion = 64;
-		posix_memalign(reinterpret_cast<void**>(&fDecodedData),
-			kOptimalAlignmentForColorConversion, fDecodedDataSizeInBytes + 63);
-	}
-	if (fDecodedData == NULL) {
-		if (useDeinterlacedPicture)
-			av_freep(&deinterlacedPicture.data[0]);
-		return B_NO_MEMORY;
-	}
-
-	fPostProcessedDecodedPicture->data[0] = fDecodedData;
-	fPostProcessedDecodedPicture->linesize[0]
-		= fHeader.u.raw_video.bytes_per_row;
-
-#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-	if (fSwsContext != NULL) {
-#else
-	if (fFormatConversionFunc != NULL) {
-#endif
-		if (useDeinterlacedPicture) {
-			AVFrame deinterlacedFrame;
-			deinterlacedFrame.data[0] = deinterlacedPicture.data[0];
-			deinterlacedFrame.data[1] = deinterlacedPicture.data[1];
-			deinterlacedFrame.data[2] = deinterlacedPicture.data[2];
-			deinterlacedFrame.data[3] = deinterlacedPicture.data[3];
-			deinterlacedFrame.linesize[0]
-				= deinterlacedPicture.linesize[0];
-			deinterlacedFrame.linesize[1]
-				= deinterlacedPicture.linesize[1];
-			deinterlacedFrame.linesize[2]
-				= deinterlacedPicture.linesize[2];
-			deinterlacedFrame.linesize[3]
-				= deinterlacedPicture.linesize[3];
-
-#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-			sws_scale(fSwsContext, deinterlacedFrame.data,
-				deinterlacedFrame.linesize, 0, displayHeight,
-				fPostProcessedDecodedPicture->data,
-				fPostProcessedDecodedPicture->linesize);
-#else
-			(*fFormatConversionFunc)(&deinterlacedFrame,
-				fPostProcessedDecodedPicture, displayWidth, displayHeight);
-#endif
-		} else {
-#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-			sws_scale(fSwsContext, fRawDecodedPicture->data,
-				fRawDecodedPicture->linesize, 0, displayHeight,
-				fPostProcessedDecodedPicture->data,
-				fPostProcessedDecodedPicture->linesize);
-#else
-			(*fFormatConversionFunc)(fRawDecodedPicture,
-				fPostProcessedDecodedPicture, displayWidth, displayHeight);
-#endif
+		av_frame_unref(fDeinterlacedPicture);
+		fDeinterlacedPicture->format = format;
+		fDeinterlacedPicture->width = width;
+		fDeinterlacedPicture->height = height;
+		if (av_frame_get_buffer(fDeinterlacedPicture, 0) < 0)
+			return B_NO_MEMORY;
+		if (_ProcessFilterGraph(fDeinterlacedPicture, fRawDecodedPicture,
+				format, width, height) == B_OK) {
+			fUseDeinterlacedPicture = true;
 		}
 	}
 
-	if (fRawDecodedPicture->flags & AV_FRAME_FLAG_INTERLACED)
-		av_freep(&deinterlacedPicture.data[0]);
+	// (not 0: a picture waits)
+	const int size = av_image_get_buffer_size(format, width, height, 1);
+	fDecodedDataSizeInBytes = size > 0 ? size : 1;
+	return B_OK;
+}
 
+
+/*!	Converts the waiting picture (see _DeinterlaceVideoFrame()) into
+	\a destination, in the negotiated output format: fOutputColorSpace,
+	fOutputBytesPerRow, fOutputWidth x fOutputHeight (a larger picture is
+	cropped). A planar 4:2:0 picture into B_YUV420 is a copy of its planes.
+*/
+status_t
+AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
+{
+	const AVFrame* picture = fUseDeinterlacedPicture
+		? fDeinterlacedPicture : fRawDecodedPicture;
+	const AVPixelFormat format = (AVPixelFormat)picture->format;
+	const int width = min_c(picture->width, (int)fOutputWidth);
+	const int height = min_c(picture->height, (int)fOutputHeight);
+
+	uint8* planes[4] = {};
+	int pitches[4] = {};
+	AVPixelFormat outputFormat;
+	if (fOutputColorSpace == B_YUV420) {
+		const int lumaPitch = fOutputBytesPerRow / 3 * 2;
+		planes[0] = destination;
+		pitches[0] = lumaPitch;
+		planes[1] = destination + (size_t)lumaPitch * fOutputHeight;
+		pitches[1] = lumaPitch / 2;
+		planes[2] = planes[1] + (size_t)pitches[1] * (fOutputHeight / 2);
+		pitches[2] = lumaPitch / 2;
+		outputFormat = AV_PIX_FMT_YUV420P;
+		if (format == AV_PIX_FMT_YUV420P) {
+			av_image_copy(planes, pitches, (const uint8**)picture->data,
+				picture->linesize, format, width, height);
+			return B_OK;
+		}
+	} else {
+		planes[0] = destination;
+		pitches[0] = fOutputBytesPerRow;
+		outputFormat = colorspace_to_pixfmt(fOutputColorSpace);
+	}
+
+#if USE_SWS_FOR_COLOR_SPACE_CONVERSION
+	fSwsContext = sws_getCachedContext(fSwsContext, width, height, format,
+		width, height, outputFormat, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+	if (fSwsContext == NULL)
+		return B_NOT_SUPPORTED;
+	sws_scale(fSwsContext, picture->data, picture->linesize, 0, height,
+		planes, pitches);
+#else
+	if (fFormatConversionFunc == NULL) {
+		fFormatConversionFunc = resolve_colorspace(fOutputColorSpace, format,
+			width, height);
+	}
+	if (fFormatConversionFunc == NULL)
+		return B_NOT_SUPPORTED;
+	for (int i = 0; i < 4; i++) {
+		fPostProcessedDecodedPicture->data[i] = planes[i];
+		fPostProcessedDecodedPicture->linesize[i] = pitches[i];
+	}
+	(*fFormatConversionFunc)(const_cast<AVFrame*>(picture),
+		fPostProcessedDecodedPicture, width, height);
+#endif
 	return B_OK;
 }
 
