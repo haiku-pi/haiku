@@ -23,6 +23,7 @@
 
 #include <arpa/inet.h>
 #include <net/if_dl.h>
+#include <net/if_media.h>
 #include <net/if_types.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -34,6 +35,7 @@
 #include <Entry.h>
 #include <NetworkDevice.h>
 #include <NetworkInterface.h>
+#include <NetworkNotifications.h>
 #include <NetworkRoster.h>
 #include <NetworkSettings.h>
 #include <Path.h>
@@ -61,6 +63,11 @@ using namespace BNetworkKit;
 
 
 typedef std::map<std::string, AutoconfigLooper*> LooperMap;
+typedef std::map<std::string, BMessage> NetworkMap;
+typedef std::map<std::string, bigtime_t> TimeMap;
+
+static const bigtime_t kAutoJoinHoldOff = 30000000LL;
+	// no auto-join for 30 seconds after a join on request
 
 
 class NetServer : public BServer {
@@ -101,6 +108,8 @@ private:
 			status_t			_JoinNetwork(const BMessage& message,
 									const BNetworkAddress* address = NULL,
 									const char* name = NULL);
+			void				_RememberNetwork(const BMessage& message);
+			void				_SaveJoinedNetworks();
 			status_t			_LeaveNetwork(const BMessage& message);
 
 			status_t			_ConvertNetworkToSettings(BMessage& message);
@@ -110,6 +119,8 @@ private:
 			BNetworkSettings	fSettings;
 			LooperMap			fDeviceMap;
 			BMessenger			fServices;
+			NetworkMap			fJoiningNetworks;
+			TimeMap				fJoinRequestTimes;
 };
 
 
@@ -217,6 +228,13 @@ NetServer::MessageReceived(BMessage* message)
 			break;
 		}
 
+		case B_NETWORK_MONITOR:
+			if (message->GetInt32("opcode", 0) == B_NETWORK_DEVICE_LINK_CHANGED
+				&& (message->GetInt32("media", 0) & IFM_ACTIVE) != 0) {
+				_SaveJoinedNetworks();
+			}
+			break;
+
 		case BNetworkSettings::kMsgInterfaceSettingsUpdated:
 		{
 			BStringList devicesSet;
@@ -256,6 +274,11 @@ NetServer::MessageReceived(BMessage* message)
 		case kMsgJoinNetwork:
 		{
 			status_t status = _JoinNetwork(*message);
+			if (status == B_OK) {
+				const char* device = message->GetString("device", "");
+				fJoinRequestTimes[device] = system_time();
+				_RememberNetwork(*message);
+			}
 
 			BMessage reply(B_REPLY);
 			reply.AddInt32("status", status);
@@ -296,8 +319,11 @@ NetServer::MessageReceived(BMessage* message)
 			if (result == B_OK) {
 				BMessage network;
 				result = fSettings.GetNextNetwork(index, network);
-				if (result == B_OK)
+				if (result == B_OK) {
+					// The passphrase stays here, it is only used to join.
+					network.RemoveName("password");
 					result = reply.AddMessage("network", &network);
+				}
 			}
 
 			reply.AddInt32("status", result);
@@ -1044,6 +1070,17 @@ NetServer::_AutoJoinNetwork(const BMessage& message)
 	if (message.FindString("device", &name) != B_OK)
 		return B_BAD_VALUE;
 
+	// A join on request is under way: it is not to be replaced by a saved
+	// network (or its saved passphrase) at once.
+	TimeMap::const_iterator request = fJoinRequestTimes.find(name);
+	if (request != fJoinRequestTimes.end()
+		&& system_time() - request->second < kAutoJoinHoldOff) {
+		return B_BUSY;
+	}
+
+	// Whatever a join on request left to remember is not what links now
+	fJoiningNetworks.erase(name);
+
 	BNetworkDevice device(name);
 
 	// Choose among configured networks
@@ -1066,8 +1103,8 @@ NetServer::_AutoJoinNetwork(const BMessage& message)
 		if (status == B_OK) {
 			status = _JoinNetwork(message, mac != NULL ? &link : NULL,
 				network.name);
-			printf("auto join network \"%s\": %s\n", network.name,
-				strerror(status));
+			syslog(LOG_INFO, "%s: %s: auto join network \"%s\": %s\n",
+				Name(), name, network.name, strerror(status));
 			if (status == B_OK)
 				return B_OK;
 		}
@@ -1240,6 +1277,100 @@ NetServer::_JoinNetwork(const BMessage& message, const BNetworkAddress* address,
 		return status;
 
 	return B_OK;
+}
+
+
+/*!	Remembers a network joined on request (from ifconfig, Network
+	preferences or the Deskbar menu), so that it is auto-joined later: once
+	the device has a link with that network, it is added to the network
+	settings (kept until then in fJoiningNetworks, by device), so a join
+	that never succeeds, with a wrong passphrase say, is not remembered.
+	When the join went through the wpa_supplicant, only the name is stored,
+	it keeps the passphrase in the keystore. Without it, net_server is the
+	one that joins, and the passphrase is stored in the network settings.
+*/
+void
+NetServer::_RememberNetwork(const BMessage& message)
+{
+	const char* device = message.GetString("device", NULL);
+	const char* name = message.GetString("name", NULL);
+	if (device == NULL)
+		return;
+
+	wireless_network network;
+	BNetworkAddress address;
+	if (name == NULL && message.FindFlat("address", &address) == B_OK
+		&& BNetworkDevice(device).GetNetwork(address, network) == B_OK) {
+		name = network.name;
+	}
+	if (name == NULL || name[0] == '\0')
+		return;
+
+	const char* password = NULL;
+	if (!BMessenger(kWPASupplicantSignature).IsValid())
+		password = message.GetString("password", NULL);
+
+	BMessage entry;
+	uint32 cookie = 0;
+	BMessage existing;
+	while (fSettings.GetNextNetwork(cookie, existing) == B_OK) {
+		if (strcmp(existing.GetString("name", ""), name) != 0)
+			continue;
+
+		const char* existingPassword = existing.GetString("password", NULL);
+		if (password == NULL || (existingPassword != NULL
+				&& strcmp(existingPassword, password) == 0)) {
+			// Nothing new to remember
+			fJoiningNetworks.erase(std::string(device));
+			return;
+		}
+		entry = existing;
+		break;
+	}
+
+	if (entry.IsEmpty())
+		entry.AddString("name", name);
+	if (password != NULL)
+		entry.SetString("password", password);
+
+	fJoiningNetworks[device] = entry;
+	start_watching_network(B_WATCH_NETWORK_LINK_CHANGES, this);
+}
+
+
+/*!	Adds the networks of fJoiningNetworks whose device now has a link with
+	them to the network settings.
+*/
+void
+NetServer::_SaveJoinedNetworks()
+{
+	NetworkMap::iterator iterator = fJoiningNetworks.begin();
+	while (iterator != fJoiningNetworks.end()) {
+		BNetworkDevice device(iterator->first.c_str());
+		const char* name = iterator->second.GetString("name", "");
+
+		wireless_network network;
+		uint32 cookie = 0;
+		if (!device.HasLink()
+			|| device.GetNextAssociatedNetwork(cookie, network) != B_OK
+			|| strcmp(network.name, name) != 0) {
+			iterator++;
+			continue;
+		}
+
+		status_t status = fSettings.AddNetwork(iterator->second);
+		if (status != B_OK) {
+			syslog(LOG_ERR, "%s: could not remember network \"%s\": %s\n",
+				Name(), name, strerror(status));
+		} else {
+			syslog(LOG_INFO, "%s: remembered network \"%s\"\n", Name(),
+				name);
+		}
+		fJoiningNetworks.erase(iterator++);
+	}
+
+	if (fJoiningNetworks.empty())
+		stop_watching_network(this);
 }
 
 

@@ -485,6 +485,7 @@ AddFilesToPackage add-ons kernel network protocols
 AddBootModuleSymlinksToPackage
 	remote_disk@arm64
 	genet@arm64
+	<net>notifications@arm64
 	stack@arm64
 	$(SYSTEM_NETWORK_DEVICES)@arm64
 	$(SYSTEM_NETWORK_DATALINK_PROTOCOLS)@arm64
