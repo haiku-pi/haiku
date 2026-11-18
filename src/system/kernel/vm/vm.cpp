@@ -2465,11 +2465,25 @@ vm_area_put_locked_cache(VMCache* cache)
 }
 
 
+/*!	Like vm_clone_area(), with \a flags: \c CREATE_AREA_UNMAP_ADDRESS_RANGE
+	(only with \c B_EXACT_ADDRESS) makes the clone replace whatever \a team
+	has mapped at the address, in one step - the range is never free for
+	anybody else to map into. What may be replaced is only what the team could
+	unmap itself (no \c B_KERNEL_AREA in a userland team, whatever
+	\a kernel says about the source), and no part of the range may be wired
+	(\c B_BUSY).
+*/
 area_id
-vm_clone_area(team_id team, const char* name, void** address,
+vm_clone_area_etc(team_id team, const char* name, void** address,
 	uint32 addressSpec, uint32 protection, uint32 mapping, area_id sourceID,
-	bool kernel)
+	uint32 flags, bool kernel)
 {
+	if ((flags & ~CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0
+		|| ((flags & CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0
+			&& addressSpec != B_EXACT_ADDRESS)) {
+		return B_BAD_VALUE;
+	}
+
 	status_t status = check_protection(team, &protection);
 	if (status != B_OK)
 		return status;
@@ -2514,6 +2528,25 @@ vm_clone_area(team_id team, const char* name, void** address,
 	if (!kernel && (sourceArea->protection & B_KERNEL_AREA) != 0)
 		return B_NOT_ALLOWED;
 
+	if ((flags & CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0) {
+		// The address spaces stay locked from here on: what is checked here
+		// is what vm_map_cache() replaces.
+		const addr_t base = (addr_t)*address;
+		const addr_t size = sourceArea->Size();
+		const bool userTeam = targetAddressSpace != VMAddressSpace::Kernel();
+		for (VMAddressSpace::AreaRangeIterator it
+				= targetAddressSpace->GetAreaRangeIterator(base, size);
+				VMArea* area = it.Next();) {
+			if (area == sourceArea)
+				return B_BAD_VALUE;
+			if (userTeam && (area->protection & B_KERNEL_AREA) != 0)
+				return B_NOT_ALLOWED;
+			AreaCacheLocker areaCacheLocker(area);
+			if (area->IsWired(base, size))
+				return B_BUSY;
+		}
+	}
+
 	AreaCacheLocker cacheLocker(sourceArea);
 	VMCache* cache = cacheLocker.Get();
 
@@ -2548,6 +2581,9 @@ vm_clone_area(team_id team, const char* name, void** address,
 	uint32 mappingFlags = 0;
 	if (mapping != REGION_PRIVATE_MAP)
 		mappingFlags |= CREATE_AREA_DONT_COMMIT_MEMORY;
+
+	if ((flags & CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0)
+		mappingFlags |= CREATE_AREA_UNMAP_ADDRESS_RANGE;
 
 	virtual_address_restrictions addressRestrictions = {};
 	VMArea* newArea;
@@ -2644,6 +2680,16 @@ vm_clone_area(team_id team, const char* name, void** address,
 
 	newArea->cache_type = sourceArea->cache_type;
 	return newArea->id;
+}
+
+
+area_id
+vm_clone_area(team_id team, const char* name, void** address,
+	uint32 addressSpec, uint32 protection, uint32 mapping, area_id sourceID,
+	bool kernel)
+{
+	return vm_clone_area_etc(team, name, address, addressSpec, protection,
+		mapping, sourceID, 0, kernel);
 }
 
 
