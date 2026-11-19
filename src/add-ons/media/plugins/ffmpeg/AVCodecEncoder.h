@@ -95,6 +95,7 @@ private:
 #endif
 
 			int64				fFramesWritten;
+			int64				fVideoPacketsWritten;
 
 			uint8*				fChunkBuffer;
 };

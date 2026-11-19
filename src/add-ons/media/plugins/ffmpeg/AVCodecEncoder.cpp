@@ -47,7 +47,8 @@ AVCodecEncoder::AVCodecEncoder(uint32 codecID, int bitRateScale)
 	fCodecInitStatus(CODEC_INIT_NEEDED),
 	fFrame(av_frame_alloc()),
 	fSwsContext(NULL),
-	fFramesWritten(0)
+	fFramesWritten(0),
+	fVideoPacketsWritten(0)
 {
 	TRACE("AVCodecEncoder::AVCodecEncoder()\n");
 	_Init();
@@ -141,6 +142,7 @@ AVCodecEncoder::SetUp(const media_format* inputFormat)
 
 	fInputFormat = *inputFormat;
 	fFramesWritten = 0;
+	fVideoPacketsWritten = 0;
 
 	return _Setup();
 }
@@ -732,15 +734,12 @@ AVCodecEncoder::_EncodeVideoFrame(AVFrame* frame, AVPacket* pkt, media_encode_in
 			}
 	
 			// Setup media_encode_info, most important is the time stamp:
-			// the packet's own (an encoder with a delay - h264_mmal - can
-			// give two packets for one frame sent, or none)
-			if (pkt->pts != AV_NOPTS_VALUE) {
-				info->start_time = av_rescale_q(pkt->pts,
-					fCodecContext->time_base, (AVRational){1, 1000000});
-			} else {
-				info->start_time = (bigtime_t)(fFramesWritten * 1000000LL
-					/ fInputFormat.u.raw_video.field_rate);
-			}
+			// one frame time per packet written (an encoder with a delay -
+			// h264_mmal - can give two packets for one frame sent, or none,
+			// so the count of frames sent would time two packets alike)
+			info->start_time = (bigtime_t)(fVideoPacketsWritten * 1000000LL
+				/ fInputFormat.u.raw_video.field_rate);
+			fVideoPacketsWritten++;
 	
 			info->flags = 0;
 			if (pkt->flags & AV_PKT_FLAG_KEY)
