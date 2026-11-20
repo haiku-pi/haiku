@@ -72,7 +72,8 @@ public:
 private:
 			void		_ResetTempPacket();
 			status_t	_CreateCodecContext();
-			void		_PreferHardwareDecoder();
+			void		_PreferHardwareDecoder(
+							const media_format& format);
 			bool		_HardwareDecoderFailed(int error);
 			status_t	_FallBackToSoftwareDecoder(const char* reason);
 			void		_RecordPacket();
@@ -141,6 +142,9 @@ private:
 			const AVCodec*		fSoftwareCodec;
 									// fCodec's fallback when fCodec is a
 									// hardware decoder
+			char				fDecoderChoice[96];
+									// why fCodec was taken, when there was
+									// a hardware decoder to choose
 			bool				fRecordPackets;
 			std::vector<AVPacket*> fRecordedPackets;
 									// what the hardware decoder was given

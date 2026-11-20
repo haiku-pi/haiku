@@ -142,6 +142,8 @@ AVCodecDecoder::AVCodecDecoder()
 {
 	TRACE("AVCodecDecoder::AVCodecDecoder()\n");
 
+	fDecoderChoice[0] = '\0';
+
 	const char* setting = getenv("FFMPEG_YUV420");
 	if (setting != NULL && strcmp(setting, "0") == 0)
 		fYUV420Allowed = false;
@@ -242,8 +244,9 @@ AVCodecDecoder::Setup(media_format* ioEncodedFormat, const void* infoBuffer,
 		}
 		TRACE("  found decoder %s\n", fCodec->name);
 		fSoftwareCodec = NULL;
+		fDecoderChoice[0] = '\0';
 		if (!fIsAudio)
-			_PreferHardwareDecoder();
+			_PreferHardwareDecoder(*ioEncodedFormat);
 		fRecordPackets = fSoftwareCodec != NULL;
 
 		const void* extraData = infoBuffer;
@@ -356,8 +359,10 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 		return _NegotiateAudioOutputFormat(inOutFormat);
 
 	status_t status = _NegotiateVideoOutputFormat(inOutFormat);
-	if (status == B_OK && fSoftwareCodec != NULL)
-		printf("AVCodecDecoder: video decoder %s\n", fCodec->name);
+	if (status == B_OK && fDecoderChoice[0] != '\0') {
+		printf("AVCodecDecoder: video decoder %s (%s)\n", fCodec->name,
+			fDecoderChoice);
+	}
 	if (status == B_OK && fOutputColorSpace == B_YUV420) {
 		printf("AVCodecDecoder: video output B_YUV420 (%s %s, %" B_PRIu32
 			"x%" B_PRIu32 ")\n", fCodec->name,
@@ -418,31 +423,79 @@ AVCodecDecoder::_CreateCodecContext()
 /*!	Takes the hardware decoder FFmpeg has for the stream's codec, if any (on
 	the Raspberry Pi 4: H.264 on the VideoCore through MMAL), and keeps the
 	software decoder as its fallback (see _HardwareDecoderFailed()).
-	FFMPEG_H264_MMAL=0 in the environment keeps the software decoder.
+
+	A stream with more pixels per second (width x height x frame rate, as
+	the container gives them) than the hardware decoder keeps up with stays
+	with the software decoder: the VideoCore decodes 1080p H.264 at about
+	69 frames per second, so it dropped most frames of a 1080p60 stream,
+	which the Pi 4's CPU decodes on about two of its cores without a drop.
+	The limit leaves headroom: 1080p up to 45 frames per second (720p up to
+	100) goes to the VideoCore, 1080p50 and 1080p60 do not.
+
+	FFMPEG_H264_MMAL=0 in the environment keeps the software decoder,
+	FFMPEG_H264_MMAL=1 takes the hardware one whatever the rate.
 */
 void
-AVCodecDecoder::_PreferHardwareDecoder()
+AVCodecDecoder::_PreferHardwareDecoder(const media_format& format)
 {
 	static const struct {
 		AVCodecID	id;
 		const char*	name;
 		const char*	setting;
+		double		maxPixelRate;
+			// pixels per second it keeps up with, with headroom
 	} kHardwareDecoders[] = {
-		{ AV_CODEC_ID_H264, "h264_mmal", "FFMPEG_H264_MMAL" },
+		{ AV_CODEC_ID_H264, "h264_mmal", "FFMPEG_H264_MMAL",
+			1920.0 * 1080 * 45 },
 	};
+	// AVFormatReader::FrameRate() falls back to the time base's rate (such
+	// as 90000) when FFmpeg cannot tell: no frame rate of a real stream
+	static const double kMaxCredibleFrameRate = 240;
 
 	for (size_t i = 0; i < B_COUNT_OF(kHardwareDecoders); i++) {
 		if (fCodec->id != kHardwareDecoders[i].id)
 			continue;
-		const char* setting = getenv(kHardwareDecoders[i].setting);
-		if (setting != NULL && strcmp(setting, "0") == 0)
-			return;
 		const AVCodec* hardware
 			= avcodec_find_decoder_by_name(kHardwareDecoders[i].name);
-		if (hardware != NULL) {
-			fSoftwareCodec = fCodec;
-			fCodec = hardware;
+		if (hardware == NULL)
+			return;
+
+		const char* setting = getenv(kHardwareDecoders[i].setting);
+		if (setting != NULL && strcmp(setting, "0") == 0) {
+			snprintf(fDecoderChoice, sizeof(fDecoderChoice), "%s=0",
+				kHardwareDecoders[i].setting);
+			return;
 		}
+
+		const media_raw_video_format& video = format.u.encoded_video.output;
+		const uint32 width = video.display.line_width;
+		const uint32 height = video.display.line_count;
+		const double frameRate = video.field_rate;
+		const double megapixels = (double)width * height * frameRate / 1e6;
+		const double maxMegapixels = kHardwareDecoders[i].maxPixelRate / 1e6;
+		if (setting != NULL && strcmp(setting, "1") == 0) {
+			snprintf(fDecoderChoice, sizeof(fDecoderChoice),
+				"%s=1; %" B_PRIu32 "x%" B_PRIu32 " at %.4g fps",
+				kHardwareDecoders[i].setting, width, height, frameRate);
+		} else if (frameRate <= 0 || frameRate > kMaxCredibleFrameRate
+			|| width == 0 || height == 0) {
+			snprintf(fDecoderChoice, sizeof(fDecoderChoice),
+				"%" B_PRIu32 "x%" B_PRIu32 ", frame rate unknown", width,
+				height);
+		} else if (megapixels > maxMegapixels) {
+			snprintf(fDecoderChoice, sizeof(fDecoderChoice),
+				"%" B_PRIu32 "x%" B_PRIu32 " at %.4g fps: %.0f Mpixel/s, "
+				"more than %s's %.0f", width, height, frameRate, megapixels,
+				hardware->name, maxMegapixels);
+			return;
+		} else {
+			snprintf(fDecoderChoice, sizeof(fDecoderChoice),
+				"%" B_PRIu32 "x%" B_PRIu32 " at %.4g fps: %.0f of its %.0f "
+				"Mpixel/s", width, height, frameRate, megapixels,
+				maxMegapixels);
+		}
+		fSoftwareCodec = fCodec;
+		fCodec = hardware;
 		return;
 	}
 }
@@ -476,6 +529,8 @@ AVCodecDecoder::_FallBackToSoftwareDecoder(const char* reason)
 	printf("AVCodecDecoder: %s failed (%s): %s continues%s\n", fCodec->name,
 		reason, fSoftwareCodec->name, fromTheStart ? " from the start"
 			: " at the next key frame");
+	snprintf(fDecoderChoice, sizeof(fDecoderChoice), "%s failed: %s",
+		fCodec->name, reason);
 
 	fCodec = fSoftwareCodec;
 	fSoftwareCodec = NULL;
