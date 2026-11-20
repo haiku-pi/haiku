@@ -26,7 +26,10 @@ enum {
 	B_GET_OVERLAY_CONSTRAINTS,
 	B_ALLOCATE_OVERLAY,
 	B_RELEASE_OVERLAY,
-	B_CONFIGURE_OVERLAY	
+	B_CONFIGURE_OVERLAY,
+	B_IMPORT_OVERLAY_BUFFER
+		/* optional: memory of a client (an area of the caller, app_server)
+		   as an overlay buffer, e.g. a video decoder's picture */
 };
 
 typedef struct {
@@ -123,6 +126,7 @@ typedef status_t (*get_overlay_constraints)(const display_mode *dm, const overla
 typedef overlay_token (*allocate_overlay)(void);
 typedef status_t (*release_overlay)(overlay_token ot);
 typedef status_t (*configure_overlay)(overlay_token ot, const overlay_buffer *ob, const overlay_window *ow, const overlay_view *ov);
+typedef const overlay_buffer *(*import_overlay_buffer)(color_space cs, uint16 width, uint16 height, uint32 bytes_per_row, area_id area, uint32 offset);
 
 #if defined(__cplusplus)
 }

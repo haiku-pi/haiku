@@ -106,6 +106,9 @@ ServerBitmap::ServerBitmap(const ServerBitmap* bitmap)
 
 ServerBitmap::~ServerBitmap()
 {
+	// the overlay may show the memory: it goes first
+	fOverlay.Unset();
+
 	if (fMemory != NULL) {
 		if (fMemory != &fClientMemory)
 			delete fMemory;

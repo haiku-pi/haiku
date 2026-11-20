@@ -22,7 +22,8 @@ struct overlay_client_data;
 class Overlay {
 	public:
 		Overlay(HWInterface& interface, ServerBitmap* bitmap,
-			overlay_token token);
+			overlay_token token, area_id importArea = -1,
+			size_t importOffset = 0);
 		~Overlay();
 
 		status_t InitCheck() const;
@@ -66,6 +67,10 @@ class Overlay {
 		overlay_window			fWindow;
 		sem_id					fSemaphore;
 		rgb_color				fColor;
+		area_id					fImportArea;
+		size_t					fImportOffset;
+			// the memory shown, if the bitmap's own (a client's): the buffer
+			// is imported, not allocated
 };
 
 #endif	// OVERLAY_H

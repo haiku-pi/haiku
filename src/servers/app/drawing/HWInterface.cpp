@@ -540,6 +540,14 @@ HWInterface::FreeOverlayBuffer(const overlay_buffer* buffer)
 }
 
 
+const overlay_buffer*
+HWInterface::ImportOverlayBuffer(int32 width, int32 height, color_space space,
+	int32 bytesPerRow, area_id area, size_t offset)
+{
+	return NULL;
+}
+
+
 status_t
 HWInterface::ConfigureOverlay(Overlay* overlay)
 {

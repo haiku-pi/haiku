@@ -387,11 +387,13 @@ ClonedAreaMemory::~ClonedAreaMemory()
 
 
 void*
-ClonedAreaMemory::Clone(area_id area, size_t offset)
+ClonedAreaMemory::Clone(area_id area, size_t offset, bool readOnly)
 {
 	BAutolock locker(sLocker);
-	if (sClonedAreaMemoryAllocator.AddArea(area, fClonedArea, fBase, 0, false) != B_OK)
+	if (sClonedAreaMemoryAllocator.AddArea(area, fClonedArea, fBase, 0,
+			readOnly) != B_OK) {
 		return NULL;
+	}
 
 	fArea = area;
 	fOffset = offset;

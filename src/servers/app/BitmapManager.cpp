@@ -188,30 +188,63 @@ BitmapManager::CreateBitmap(ClientMemoryAllocator* allocator,
 }
 
 
+/*!	A bitmap of the client's memory (\a clientArea, cloned). With
+	B_BITMAP_WILL_OVERLAY the graphics driver shows that memory on overlays
+	as it is (e.g. a video decoder's pictures): it must be able to scan it
+	out, else there is no bitmap. app_server only reads such memory.
+*/
 ServerBitmap*
-BitmapManager::CloneFromClient(area_id clientArea, size_t areaOffset,
-	BRect bounds, color_space space, uint32 flags, int32 bytesPerRow)
+BitmapManager::CloneFromClient(HWInterface& hwInterface, area_id clientArea,
+	size_t areaOffset, BRect bounds, color_space space, uint32 flags,
+	int32 bytesPerRow)
 {
 	BAutolock locker(fLock);
 	if (!locker.IsLocked())
 		return NULL;
+
+	const bool overlay = (flags & B_BITMAP_WILL_OVERLAY) != 0;
+	overlay_token overlayToken = NULL;
+	if (overlay) {
+		if (!hwInterface.CheckOverlayRestrictions(bounds.IntegerWidth() + 1,
+				bounds.IntegerHeight() + 1, space)) {
+			return NULL;
+		}
+		if ((flags & B_BITMAP_RESERVE_OVERLAY_CHANNEL) != 0) {
+			overlayToken = hwInterface.AcquireOverlayChannel();
+			if (overlayToken == NULL)
+				return NULL;
+		}
+	}
+
 	BReference<ServerBitmap> bitmap(new(std::nothrow) ServerBitmap(bounds, space, flags,
 		bytesPerRow), true);
-	if (bitmap == NULL)
-		return NULL;
-
-	ClonedAreaMemory* memory = new(std::nothrow) ClonedAreaMemory;
-	if (memory == NULL) {
-		return NULL;
-	}
-	int8* buffer = (int8*)memory->Clone(clientArea, areaOffset);
+	ClonedAreaMemory* memory = bitmap != NULL
+		? new(std::nothrow) ClonedAreaMemory : NULL;
+	int8* buffer = memory != NULL
+		? (int8*)memory->Clone(clientArea, areaOffset, overlay) : NULL;
 	if (buffer == NULL) {
 		delete memory;
+		if (overlayToken != NULL)
+			hwInterface.ReleaseOverlayChannel(overlayToken);
 		return NULL;
 	}
 
 	bitmap->fMemory = memory;
 	bitmap->fBuffer = memory->Address();
+
+	if (overlay) {
+		Overlay* overlay = new(std::nothrow) Overlay(hwInterface, bitmap,
+			overlayToken, memory->Area(), memory->AreaOffset());
+		if (overlay == NULL || overlay->InitCheck() != B_OK
+			|| !fOverlays.AddItem(bitmap)) {
+			if (overlay == NULL && overlayToken != NULL)
+				hwInterface.ReleaseOverlayChannel(overlayToken);
+			delete overlay;
+			return NULL;
+		}
+		bitmap->SetOverlay(overlay);
+	}
+
 	bitmap->fToken = gTokenSpace.NewToken(kBitmapToken, bitmap);
 	return bitmap.Detach();
 }
