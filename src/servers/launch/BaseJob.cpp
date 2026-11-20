@@ -215,8 +215,6 @@ BaseJob::_GetSourceFileEnvironment(const char* script, BStringList& environment)
 	int status = posix_spawn_file_actions_init(&fileActions);
 	if (status != 0) {
 		// TODO: log error
-		close(pipes[0]);
-		close(pipes[1]);
 		return;
 	}
 	CObjectDeleter<posix_spawn_file_actions_t, int, posix_spawn_file_actions_destroy>
@@ -242,8 +240,6 @@ BaseJob::_GetSourceFileEnvironment(const char* script, BStringList& environment)
 	if (status != 0) {
 		// TODO: log error
 		debug_printf("could not fork: %s\n", strerror(errno));
-		close(pipes[0]);
-		close(pipes[1]);
 		return;
 	}
 
