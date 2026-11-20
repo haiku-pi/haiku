@@ -58,6 +58,9 @@ status_t bcm2711_release_overlay(overlay_token overlayToken);
 status_t bcm2711_configure_overlay(overlay_token overlayToken,
 	const overlay_buffer* buffer, const overlay_window* window,
 	const overlay_view* view);
+const overlay_buffer* bcm2711_import_overlay_buffer(color_space colorSpace,
+	uint16 width, uint16 height, uint32 bytesPerRow, area_id area,
+	uint32 offset);
 
 #ifdef __cplusplus
 }

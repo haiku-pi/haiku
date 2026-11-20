@@ -18,6 +18,11 @@
 	luma rows are 2/3 of it, the chroma rows 1/3. The display's scaler has no
 	packed 4:2:2 format, so B_YCbCr422 is not offered.
 
+	B_YUV420_SAND128 and B_YUV420_SAND128_10 are a video decoder's pictures
+	as they are (the HEVC decoder's: luma and chroma in 128-byte columns;
+	bytes_per_row is the column height in rows), usually imported from the
+	decoder's memory (bcm2711_import_overlay_buffer()).
+
 	YCbCr encodings (overlay_window.flags): BT.601 and BT.709 in limited range,
 	BT.601 in full range (the firmware's JPEG encoding) and BT.2020 in limited
 	range. The firmware has no full range BT.709 or BT.2020: such a request
@@ -43,7 +48,10 @@ struct overlay {
 	uint32			physical;
 	uint32			image_type;
 	uint32			pitch;
-		// of the first plane: the firmware derives the chroma planes' pitch
+		// of the first plane: the firmware derives the chroma planes' pitch;
+		// SAND: the column height in rows
+	uint32			chroma_offset;
+		// SAND: of the chroma rows in each column
 };
 
 // A token is the address of its plane's slot. app_server may release a
@@ -57,8 +65,33 @@ static plane_slot sPlanes[BCM2711_DISPLAY_OVERLAY_PLANES];
 static pthread_mutex_t sLock = PTHREAD_MUTEX_INITIALIZER;
 
 static const uint32 kSupportedSpaces[] = {
-	B_RGB32, B_RGBA32, B_YUV420, 0
+	B_RGB32, B_RGBA32, B_YUV420, B_YUV420_SAND128, B_YUV420_SAND128_10, 0
 };
+
+
+static bool
+is_sand(uint32 colorSpace)
+{
+	return colorSpace == B_YUV420_SAND128
+		|| colorSpace == B_YUV420_SAND128_10;
+}
+
+
+/*!	The SAND layout of a \a width x \a height picture: the column height
+	(both planes, the chroma's rows after the luma's), the chroma rows'
+	offset in a column, the size.
+*/
+static void
+sand_layout(uint32 colorSpace, uint32 width, uint32 height,
+	uint32& columnHeight, uint32& chromaOffset, size_t& size)
+{
+	const uint32 height16 = (height + 15) & ~15;
+	const uint32 columns = colorSpace == B_YUV420_SAND128
+		? (width + 127) / 128 : (width + 95) / 96;
+	columnHeight = height16 * 3 / 2;
+	chromaOffset = height16 * 128;
+	size = (size_t)columns * 128 * columnHeight;
+}
 
 
 static uint32
@@ -146,6 +179,12 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 		case B_YUV420:
 			imageType = BCM2711_DISPLAY_IMAGE_YUV420;
 			break;
+		case B_YUV420_SAND128:
+			imageType = BCM2711_DISPLAY_IMAGE_YUV_UV;
+			break;
+		case B_YUV420_SAND128_10:
+			imageType = BCM2711_DISPLAY_IMAGE_YUV10COL;
+			break;
 		default:
 			return NULL;
 	}
@@ -155,7 +194,14 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 	// 64-byte rows (the chroma rows of 4:2:0 are still 32-byte aligned)
 	uint32 pitch;
 	uint32 bytesPerRow;
-	if (colorSpace == B_YUV420) {
+	uint32 chromaOffset = 0;
+	size_t size;
+	if (is_sand(colorSpace)) {
+		width = (width + 1) & ~1;
+		height = (height + 1) & ~1;
+		sand_layout(colorSpace, width, height, pitch, chromaOffset, size);
+		bytesPerRow = pitch;
+	} else if (colorSpace == B_YUV420) {
 		width = (width + 1) & ~1;
 		height = (height + 1) & ~1;
 		pitch = (width + 63) & ~63;
@@ -164,7 +210,8 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 		pitch = (width * 4 + 63) & ~63;
 		bytesPerRow = pitch;
 	}
-	const uint32 size = bytesPerRow * height;
+	if (!is_sand(colorSpace))
+		size = (size_t)bytesPerRow * height;
 
 	overlay* info = new(std::nothrow) overlay;
 	if (info == NULL)
@@ -188,6 +235,60 @@ bcm2711_allocate_overlay_buffer(color_space colorSpace, uint16 width,
 	info->physical = request.physical;
 	info->image_type = imageType;
 	info->pitch = pitch;
+	info->chroma_offset = chromaOffset;
+	return &info->buffer;
+}
+
+
+/*!	Memory of app_server's (\a area: a client's, cloned) as an overlay
+	buffer: a video decoder's picture shown as it is. The driver checks that
+	it is contiguous and where the display reaches. SAND pictures only.
+*/
+const overlay_buffer*
+bcm2711_import_overlay_buffer(color_space colorSpace, uint16 width,
+	uint16 height, uint32 bytesPerRow, area_id area, uint32 offset)
+{
+	if (!is_sand(colorSpace) || width < 2 || height < 2 || (width & 1) != 0
+		|| (height & 1) != 0 || gInfo->shared_info->overlay_planes == 0) {
+		return NULL;
+	}
+	uint32 columnHeight;
+	uint32 chromaOffset;
+	size_t size;
+	sand_layout(colorSpace, width, height, columnHeight, chromaOffset, size);
+	// a taller column (the decoder's picture may have more rows)
+	if (bytesPerRow < columnHeight || bytesPerRow > UINT16_MAX)
+		return NULL;
+	size = size / columnHeight * bytesPerRow;
+
+	overlay* info = new(std::nothrow) overlay;
+	if (info == NULL)
+		return NULL;
+
+	bcm2711_display_import_overlay_buffer request = {};
+	request.area = area;
+	request.offset = offset;
+	request.size = size;
+	if (ioctl(gInfo->device, BCM2711_DISPLAY_IMPORT_OVERLAY_BUFFER, &request,
+			sizeof(request)) != 0) {
+		delete info;
+		return NULL;
+	}
+
+	area_info areaInfo;
+	get_area_info(area, &areaInfo);
+	info->buffer.space = colorSpace;
+	info->buffer.width = width;
+	info->buffer.height = height;
+	info->buffer.bytes_per_row = bytesPerRow;
+	info->buffer.buffer = (uint8*)areaInfo.address + offset;
+	info->buffer.buffer_dma = (void*)(addr_t)request.physical;
+	info->area = request.buffer;
+	info->physical = request.physical;
+	info->image_type = colorSpace == B_YUV420_SAND128
+		? BCM2711_DISPLAY_IMAGE_YUV_UV : BCM2711_DISPLAY_IMAGE_YUV10COL;
+	info->pitch = bytesPerRow;
+	info->chroma_offset = chromaOffset;
 	return &info->buffer;
 }
 
@@ -217,7 +318,7 @@ bcm2711_get_overlay_constraints(const display_mode* mode,
 	memset(constraints, 0, sizeof(overlay_constraints));
 
 	// the source rectangle, in buffer pixels: 4:2:x chroma comes in pairs
-	const bool yuv = buffer->space == B_YUV420;
+	const bool yuv = buffer->space == B_YUV420 || is_sand(buffer->space);
 	constraints->view.h_alignment = yuv ? 1 : 0;
 	constraints->view.v_alignment = yuv ? 1 : 0;
 	constraints->view.width_alignment = yuv ? 1 : 0;
@@ -325,6 +426,7 @@ bcm2711_configure_overlay(overlay_token token, const overlay_buffer* buffer,
 	request.width = buffer->width;
 	request.height = buffer->height;
 	request.bytes_per_row = info->pitch;
+	request.chroma_offset = info->chroma_offset;
 	request.source_x = (uint32)view->h_start << 16;
 	request.source_y = (uint32)view->v_start << 16;
 	request.source_width = (uint32)view->width << 16;
