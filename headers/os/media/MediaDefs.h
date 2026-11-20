@@ -346,8 +346,16 @@ enum media_display_flags {
 								// be an F2 field.
 	B_TOP_SCANLINE_F1	= 0x4,	// The topmost scanline of the output buffer
 								// belongs to F1.
-	B_TOP_SCANLINE_F2	= 0x8	// The topmost scanline of the output buffer
+	B_TOP_SCANLINE_F2	= 0x8,	// The topmost scanline of the output buffer
 								// belongs to F2.
+
+	// The YCbCr encoding of the pixels (none: not known). Without
+	// B_YCbCr_FULL_RANGE the range is limited (luma 16-235).
+	B_YCbCr_BT601		= 0x10,
+	B_YCbCr_BT709		= 0x20,
+	B_YCbCr_BT2020		= 0x30,
+	B_YCbCr_MATRIX_MASK	= 0x30,
+	B_YCbCr_FULL_RANGE	= 0x40
 };
 
 

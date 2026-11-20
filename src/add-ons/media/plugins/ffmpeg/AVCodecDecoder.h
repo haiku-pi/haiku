@@ -112,6 +112,13 @@ private:
 			void		_UpdateMediaHeaderForVideoFrame();
 			status_t	_DeinterlaceVideoFrame();
 			status_t	_ColorConvertVideoFrame(uint8* destination);
+			void		_CopyToLimitedRange(const AVFrame* picture,
+							uint8** planes, const int* pitches, int width,
+							int height);
+			void		_PictureEncoding(const AVFrame* picture,
+							uint32& matrix, bool& fullRange) const;
+			uint32		_EffectiveMatrix(uint32 matrix) const;
+			int			_SwsCoefficients(uint32 matrix) const;
 
 			// video deinterlace filter graph
 			status_t	_InitFilterGraph(enum AVPixelFormat pixfmt,
@@ -159,6 +166,9 @@ private:
 			gfx_convert_func	fFormatConversionFunc;
 #if USE_SWS_FOR_COLOR_SPACE_CONVERSION
 			SwsContext*			fSwsContext;
+			uint32				fSwsKey[6];
+									// the conversion and YCbCr encoding
+									// fSwsContext was set up for
 #endif
 
 			char*				fExtraData;
@@ -172,6 +182,11 @@ private:
 			bool				fYUV420Allowed;
 									// B_YUV420 output when the caller asks
 									// for it (FFMPEG_YUV420=0: never)
+			uint32				fOutputColorFlags;
+									// B_YCbCr_* of the B_YUV420 output
+			bool				fOutputLimitedRange;
+									// B_YUV420: a full range picture is
+									// converted to limited range
 			int32				fOutputFrameCount;
 			float				fOutputFrameRate;
 									// only for audio streams

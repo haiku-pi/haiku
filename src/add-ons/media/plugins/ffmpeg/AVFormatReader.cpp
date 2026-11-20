@@ -1188,7 +1188,31 @@ AVFormatReader::Stream::Init(int32 virtualIndex)
 			format->u.encoded_video.output.display.bytes_per_row = 0;
 			format->u.encoded_video.output.display.pixel_offset = 0;
 			format->u.encoded_video.output.display.line_offset = 0;
-			format->u.encoded_video.output.display.flags = 0; // TODO
+			// the YCbCr encoding, as far as the container or the stream's
+			// headers tell it
+			format->u.encoded_video.output.display.flags = 0;
+			switch (codecParams->color_space) {
+				case AVCOL_SPC_BT709:
+					format->u.encoded_video.output.display.flags
+						|= B_YCbCr_BT709;
+					break;
+				case AVCOL_SPC_BT470BG:
+				case AVCOL_SPC_SMPTE170M:
+					format->u.encoded_video.output.display.flags
+						|= B_YCbCr_BT601;
+					break;
+				case AVCOL_SPC_BT2020_NCL:
+				case AVCOL_SPC_BT2020_CL:
+					format->u.encoded_video.output.display.flags
+						|= B_YCbCr_BT2020;
+					break;
+				default:
+					break;
+			}
+			if (codecParams->color_range == AVCOL_RANGE_JPEG) {
+				format->u.encoded_video.output.display.flags
+					|= B_YCbCr_FULL_RANGE;
+			}
 
 			break;
 

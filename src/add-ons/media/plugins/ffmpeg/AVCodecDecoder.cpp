@@ -106,6 +106,7 @@ AVCodecDecoder::AVCodecDecoder()
 
 #if USE_SWS_FOR_COLOR_SPACE_CONVERSION
 	fSwsContext(NULL),
+	fSwsKey(),
 #else
 	fFormatConversionFunc(NULL),
 #endif
@@ -119,6 +120,8 @@ AVCodecDecoder::AVCodecDecoder()
 	fOutputWidth(0),
 	fOutputHeight(0),
 	fYUV420Allowed(true),
+	fOutputColorFlags(0),
+	fOutputLimitedRange(false),
 	fOutputFrameCount(0),
 	fOutputFrameRate(1.0),
 	fOutputFrameSize(0),
@@ -488,6 +491,7 @@ AVCodecDecoder::_FallBackToSoftwareDecoder(const char* reason)
 	if (fSwsContext != NULL)
 		sws_freeContext(fSwsContext);
 	fSwsContext = NULL;
+	memset(fSwsKey, 0, sizeof(fSwsKey));
 #else
 	fFormatConversionFunc = NULL;
 #endif
@@ -721,6 +725,7 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 	if (fSwsContext != NULL)
 		sws_freeContext(fSwsContext);
 	fSwsContext = NULL;
+	memset(fSwsKey, 0, sizeof(fSwsKey));
 #else
 	fFormatConversionFunc = 0;
 #endif
@@ -795,6 +800,18 @@ AVCodecDecoder::_ChooseVideoOutput(const media_format& requested)
 		// and chroma rows of 1/3 of bytes_per_row, the Cb plane after the
 		// luma, the Cr plane after it (bytes_per_row * height in all)
 		fOutputColorSpace = B_YUV420;
+
+		// The picture's YCbCr encoding goes with it. Full range is passed on
+		// only with the BT.601 matrix (JPEG's, the one full range encoding
+		// displays commonly have); other full range pictures are converted
+		// to limited range.
+		uint32 matrix;
+		bool fullRange;
+		_PictureEncoding(fRawDecodedPicture, matrix, fullRange);
+		fOutputLimitedRange = fullRange
+			&& _EffectiveMatrix(matrix) != B_YCbCr_BT601;
+		fOutputColorFlags = matrix
+			| (fullRange && !fOutputLimitedRange ? B_YCbCr_FULL_RANGE : 0);
 		fOutputBytesPerRow = (fOutputWidth + 3) / 4 * 6;
 		if (requestedBytesPerRow > fOutputBytesPerRow
 			&& requestedBytesPerRow % 3 == 0) {
@@ -869,6 +886,10 @@ AVCodecDecoder::_FillVideoOutputFormat(media_format* outFormat)
 		outFormat->u.raw_video.field_rate = av_q2d(fCodecContext->framerate);
 	}
 	outFormat->u.raw_video.display.format = fOutputColorSpace;
+	outFormat->u.raw_video.display.flags &= ~(uint32)(B_YCbCr_MATRIX_MASK
+		| B_YCbCr_FULL_RANGE);
+	if (fOutputColorSpace == B_YUV420)
+		outFormat->u.raw_video.display.flags |= fOutputColorFlags;
 	outFormat->u.raw_video.display.line_width = fOutputWidth;
 	outFormat->u.raw_video.display.line_count = fOutputHeight;
 	outFormat->u.raw_video.display.bytes_per_row = fOutputBytesPerRow;
@@ -1982,9 +2003,13 @@ AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
 		planes[2] = planes[1] + (size_t)pitches[1] * (fOutputHeight / 2);
 		pitches[2] = lumaPitch / 2;
 		outputFormat = AV_PIX_FMT_YUV420P;
-		if (format == AV_PIX_FMT_YUV420P) {
-			av_image_copy(planes, pitches, (const uint8**)picture->data,
-				picture->linesize, format, width, height);
+		if (format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUVJ420P) {
+			if (!fOutputLimitedRange) {
+				av_image_copy(planes, pitches, (const uint8**)picture->data,
+					picture->linesize, AV_PIX_FMT_YUV420P, width, height);
+			} else {
+				_CopyToLimitedRange(picture, planes, pitches, width, height);
+			}
 			return B_OK;
 		}
 	} else {
@@ -1994,10 +2019,40 @@ AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
 	}
 
 #if USE_SWS_FOR_COLOR_SPACE_CONVERSION
-	fSwsContext = sws_getCachedContext(fSwsContext, width, height, format,
-		width, height, outputFormat, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+	// The picture's YCbCr encoding (swscale assumes BT.601), into limited
+	// range YCbCr with the same matrix (B_YUV420: fOutputColorFlags), or
+	// into full range RGB.
+	uint32 matrix;
+	bool fullRange;
+	_PictureEncoding(picture, matrix, fullRange);
+	matrix = _EffectiveMatrix(matrix);
+
+	// A full range yuv420p picture is passed as yuvj420p: swscale chooses
+	// its converter by the formats' ranges, and between two YCbCr formats of
+	// the same range only copies (sws_setColorspaceDetails() is too late).
+	AVPixelFormat sourceFormat = format;
+	if (fullRange && format == AV_PIX_FMT_YUV420P)
+		sourceFormat = AV_PIX_FMT_YUVJ420P;
+
+	fSwsContext = sws_getCachedContext(fSwsContext, width, height,
+		sourceFormat, width, height, outputFormat, SWS_FAST_BILINEAR, NULL,
+		NULL, NULL);
 	if (fSwsContext == NULL)
 		return B_NOT_SUPPORTED;
+
+	const uint32 key[6] = { (uint32)width, (uint32)height,
+		(uint32)sourceFormat, (uint32)outputFormat, matrix, fullRange };
+	if (memcmp(key, fSwsKey, sizeof(key)) != 0) {
+		// (a context sws_getCachedContext() made anew forgot it)
+		const int* coefficients = sws_getCoefficients(
+			_SwsCoefficients(matrix));
+		const bool toYUV = fOutputColorSpace == B_YUV420;
+		sws_setColorspaceDetails(fSwsContext, coefficients, fullRange,
+			toYUV ? coefficients : sws_getCoefficients(SWS_CS_DEFAULT),
+			toYUV ? (fOutputColorFlags & B_YCbCr_FULL_RANGE) != 0 : 1,
+			0, 1 << 16, 1 << 16);
+		memcpy(fSwsKey, key, sizeof(key));
+	}
 	sws_scale(fSwsContext, picture->data, picture->linesize, 0, height,
 		planes, pitches);
 #else
@@ -2015,6 +2070,99 @@ AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
 		fPostProcessedDecodedPicture, width, height);
 #endif
 	return B_OK;
+}
+
+
+/*!	Copies the planes of a full range 8-bit 4:2:0 \a picture into limited
+	range ones (luma 16-235, chroma 16-240), rounding exactly: swscale's
+	range conversion is a few steps off.
+*/
+void
+AVCodecDecoder::_CopyToLimitedRange(const AVFrame* picture, uint8** planes,
+	const int* pitches, int width, int height)
+{
+	uint8 luma[256];
+	uint8 chroma[256];
+	for (int i = 0; i < 256; i++) {
+		luma[i] = 16 + (i * 219 + 127) / 255;
+		chroma[i] = 128 + ((i - 128) * 224 + (i >= 128 ? 127 : -127)) / 255;
+	}
+	for (int plane = 0; plane < 3; plane++) {
+		const uint8* table = plane == 0 ? luma : chroma;
+		const int planeWidth = plane == 0 ? width : (width + 1) / 2;
+		const int planeHeight = plane == 0 ? height : (height + 1) / 2;
+		for (int y = 0; y < planeHeight; y++) {
+			const uint8* source = picture->data[plane]
+				+ (ptrdiff_t)y * picture->linesize[plane];
+			uint8* destination = planes[plane] + (ptrdiff_t)y * pitches[plane];
+			for (int x = 0; x < planeWidth; x++)
+				destination[x] = table[source[x]];
+		}
+	}
+}
+
+
+/*!	The YCbCr encoding of \a picture: \a matrix (B_YCbCr_BT601, _BT709,
+	_BT2020, or 0 if unknown) and its range, from the picture's own tags,
+	else from the container's (the reader's display flags).
+*/
+void
+AVCodecDecoder::_PictureEncoding(const AVFrame* picture, uint32& matrix,
+	bool& fullRange) const
+{
+	const uint32 container = fInputFormat.u.encoded_video.output.display.flags;
+	switch (picture->colorspace) {
+		case AVCOL_SPC_BT709:
+			matrix = B_YCbCr_BT709;
+			break;
+		case AVCOL_SPC_BT470BG:
+		case AVCOL_SPC_SMPTE170M:
+			matrix = B_YCbCr_BT601;
+			break;
+		case AVCOL_SPC_BT2020_NCL:
+		case AVCOL_SPC_BT2020_CL:
+			matrix = B_YCbCr_BT2020;
+			break;
+		default:
+			matrix = container & B_YCbCr_MATRIX_MASK;
+			break;
+	}
+
+	const AVPixelFormat format = (AVPixelFormat)picture->format;
+	if (format == AV_PIX_FMT_YUVJ420P || format == AV_PIX_FMT_YUVJ422P
+		|| format == AV_PIX_FMT_YUVJ444P || format == AV_PIX_FMT_YUVJ440P
+		|| format == AV_PIX_FMT_YUVJ411P) {
+		fullRange = true;
+	} else if (picture->color_range != AVCOL_RANGE_UNSPECIFIED)
+		fullRange = picture->color_range == AVCOL_RANGE_JPEG;
+	else
+		fullRange = (container & B_YCbCr_FULL_RANGE) != 0;
+}
+
+
+/*!	\a matrix, or for an unknown one the usual guess (the one of the display
+	drivers too): BT.709 from 720 lines on, BT.601 below.
+*/
+uint32
+AVCodecDecoder::_EffectiveMatrix(uint32 matrix) const
+{
+	if (matrix != 0)
+		return matrix;
+	return fOutputHeight >= 720 ? B_YCbCr_BT709 : B_YCbCr_BT601;
+}
+
+
+int
+AVCodecDecoder::_SwsCoefficients(uint32 matrix) const
+{
+	switch (matrix) {
+		case B_YCbCr_BT709:
+			return SWS_CS_ITU709;
+		case B_YCbCr_BT2020:
+			return SWS_CS_BT2020;
+		default:
+			return SWS_CS_ITU601;
+	}
 }
 
 
