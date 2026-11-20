@@ -189,6 +189,8 @@ struct display_info {
 		bool		visible;
 		phys_addr_t	physical;
 		size_t		size;		// of what it scans out from physical
+		uint8		image_type;
+		uint8		color_encoding;
 
 		// statistics of the plane's updates since the last report
 		uint32		updates;
@@ -888,10 +890,12 @@ report_overlay(display_info& info, uint32 index)
 	if (overlay.updates > 0) {
 		TRACE_ALWAYS("plane %" B_PRIu32 ": %" B_PRIu32 " updates in %" B_PRId64
 			" vblanks, %" B_PRIu32 " late, %" B_PRIu32 " gaps, %" B_PRIu32
-			" superseded (vblank %" B_PRId64 " us)\n",
+			" superseded (vblank %" B_PRId64 " us; image type %u, encoding"
+			" %u)\n",
 			index + BCM2711_DISPLAY_FIRST_OVERLAY_PLANE, overlay.updates,
 			overlay.last_vblank - overlay.first_vblank + 1, overlay.late,
-			overlay.gaps, overlay.superseded, info.vblank_period);
+			overlay.gaps, overlay.superseded, info.vblank_period,
+			overlay.image_type, overlay.color_encoding);
 	}
 	overlay.updates = 0;
 	overlay.late = 0;
@@ -1123,6 +1127,8 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 
 	overlay.physical = request.physical;
 	overlay.size = extent;
+	overlay.image_type = request.image_type;
+	overlay.color_encoding = request.color_encoding;
 	count_overlay_update(info, index);
 	return B_OK;
 }

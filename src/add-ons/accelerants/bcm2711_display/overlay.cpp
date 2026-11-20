@@ -17,6 +17,12 @@
 	(3 bytes per 2 pixels, so that bytes_per_row * height is its size): the
 	luma rows are 2/3 of it, the chroma rows 1/3. The display's scaler has no
 	packed 4:2:2 format, so B_YCbCr422 is not offered.
+
+	YCbCr encodings (overlay_window.flags): BT.601 and BT.709 in limited range,
+	BT.601 in full range (the firmware's JPEG encoding) and BT.2020 in limited
+	range. The firmware has no full range BT.709 or BT.2020: such a request
+	fails, so that the client can convert the picture itself. Without a
+	matrix: BT.709 from 720 lines on, BT.601 below, as video is encoded.
 */
 
 
@@ -69,6 +75,31 @@ static void
 hide(uint32 plane)
 {
 	ioctl(gInfo->device, BCM2711_DISPLAY_HIDE_OVERLAY, &plane, sizeof(plane));
+}
+
+
+/*!	The firmware's color encoding of a YCbCr buffer shown with \a flags
+	(overlay_window.flags), or 0 if it has none for them.
+*/
+static uint32
+color_encoding(const overlay_buffer* buffer, uint32 flags)
+{
+	uint32 matrix = flags & B_OVERLAY_COLOR_MATRIX_MASK;
+	if (matrix == 0) {
+		matrix = buffer->height >= 720
+			? B_OVERLAY_COLOR_BT709 : B_OVERLAY_COLOR_BT601;
+	}
+	const bool fullRange = (flags & B_OVERLAY_COLOR_FULL_RANGE) != 0;
+	switch (matrix) {
+		case B_OVERLAY_COLOR_BT601:
+			return fullRange ? BCM2711_DISPLAY_ENCODING_JPEG
+				: BCM2711_DISPLAY_ENCODING_BT601;
+		case B_OVERLAY_COLOR_BT709:
+			return fullRange ? 0 : BCM2711_DISPLAY_ENCODING_BT709;
+		case B_OVERLAY_COLOR_BT2020:
+			return fullRange ? 0 : BCM2711_DISPLAY_ENCODING_BT2020;
+	}
+	return 0;
 }
 
 
@@ -284,9 +315,11 @@ bcm2711_configure_overlay(overlay_token token, const overlay_buffer* buffer,
 	request.plane = plane;
 	request.image_type = info->image_type;
 	if (info->image_type != BCM2711_DISPLAY_IMAGE_XRGB8888) {
-		// as video is encoded: BT.709 for HD, BT.601 for SD
-		request.color_encoding = buffer->height >= 720
-			? BCM2711_DISPLAY_ENCODING_BT709 : BCM2711_DISPLAY_ENCODING_BT601;
+		request.color_encoding = color_encoding(buffer, window->flags);
+		if (request.color_encoding == 0) {
+			hide(plane);
+			return B_NOT_SUPPORTED;
+		}
 	}
 	request.physical = info->physical;
 	request.width = buffer->width;

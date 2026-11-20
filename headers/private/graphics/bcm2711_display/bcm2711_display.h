@@ -127,9 +127,13 @@ struct bcm2711_display_overlay_buffer {
 	// bytes, bytes_per_row is the column height in lines, the chroma at
 	// chroma_offset
 
-// the firmware's color encodings of YUV images
+// the firmware's color encodings of YUV images (VC_IMAGE_YUVINFO_CSC_*);
+// none (0) and the ones it does not know are BT.709 limited range
 #define BCM2711_DISPLAY_ENCODING_BT601		1
 #define BCM2711_DISPLAY_ENCODING_BT709		2
+#define BCM2711_DISPLAY_ENCODING_JPEG		3
+	// BT.601 full range
+#define BCM2711_DISPLAY_ENCODING_BT2020		9
 
 
 /*!	Shows a buffer on an overlay plane:  source (16.16 fixed point, in
