@@ -369,6 +369,13 @@ do_sync_handler(iframe * frame)
 			signalCode = BUS_ADRALN;
 			signalAddress = frame->elr;
 			break;
+		case EXCP_SP_ALIGN:
+			// a load or store with a misaligned SP (SCTLR_EL1.SA0)
+			exceptionType = B_ALIGNMENT_EXCEPTION;
+			signalNumber = SIGBUS;
+			signalCode = BUS_ADRALN;
+			signalAddress = frame->sp;
+			break;
 		case EXCP_INSN_ABORT_L:
 		case EXCP_INSN_ABORT:
 			isExec = true;
@@ -503,7 +510,10 @@ do_sync_handler(iframe * frame)
 		}
 
 		default:
-			panic("unhandled exception: %" B_PRIu64, ESR_ELx_EXCEPTION(frame->esr));
+			// Any other exception gives a user program the SIGILL set above
+			// (an illegal execution state, for example); in the kernel it is
+			// a bug and panics below
+			break;
 	}
 
 	if (isUser) {
