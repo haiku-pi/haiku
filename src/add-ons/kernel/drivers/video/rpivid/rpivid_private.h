@@ -264,6 +264,8 @@ struct rpivid_file {
 	uint32			job_count;
 	uint32			active_jobs;	// of these, not done
 	uint64			next_job;
+	char*			report;		// what read() returns, made at offset 0
+	size_t			report_length;
 };
 
 
@@ -291,6 +293,9 @@ rpivid_buffer* rpivid_buffer_lookup(rpivid_file* file, uint32 handle,
 				rpivid_buffer_type type);
 void		rpivid_buffer_release(rpivid_buffer* buffer);
 void		rpivid_power_off(rpivid_device* device);
+
+// lowmem.cpp
+size_t		rpivid_low_memory_report(char* data, size_t size);
 
 // decode.cpp
 int32		rpivid_interrupt(void* data);

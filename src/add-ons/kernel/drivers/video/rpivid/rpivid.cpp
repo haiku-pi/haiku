@@ -11,7 +11,8 @@
 	decode.cpp, which runs the block's two phases as a pipeline in a thread of
 	its own); this driver owns the memory the block reads and writes, its
 	clock and its interrupt. It publishes /dev/video/rpivid/0; reading the
-	device returns the block's identification.
+	device returns the block's identification and a report of the memory
+	below 1 GiB, where the pictures the display shows must be (lowmem.cpp).
 
 	Nothing touches the block while the system boots: an MMIO access to the
 	block without its clock does not complete. The first open() switches the
@@ -46,6 +47,8 @@ static const char* kCompatible = "brcm,bcm2711-hevc-dec";
 
 // A bitstream buffer beyond this is not a picture's slices
 static const size_t kMaxBitstreamSize = 64 * 1024 * 1024;
+// what read() returns: the block's line and the low memory report
+static const size_t kReportSize = 16 * 1024;
 
 
 static device_manager_info* sDeviceManager;
@@ -346,6 +349,10 @@ create_picture(rpivid_file* file, rpivid_create_picture* args)
 	status_t status = rpivid_dma_alloc(device, "rpivid picture",
 		picture->memory.size, memoryType, picture->memory,
 		scanOut ? (phys_addr_t)1 << 30 : 0);
+	if (status != B_OK && scanOut) {
+		TRACE_ALWAYS("no %" B_PRIuSIZE " KiB for a scan-out picture below"
+			" 1 GiB: %s\n", picture->memory.size / 1024, strerror(status));
+	}
 	void* address = NULL;
 	if (status == B_OK) {
 		status = map_into_client(picture,
@@ -627,6 +634,7 @@ rpivid_free(void* cookie)
 			rpivid_buffer_release(file->buffers[i]);
 	}
 	free(file->buffers);
+	free(file->report);
 	free(file);
 
 	if (--device->open_count == 0 && !device->broken) {
@@ -637,14 +645,21 @@ rpivid_free(void* cookie)
 }
 
 
+/*!	The block's line and the low memory report (lowmem.cpp), made when a
+	read starts at offset 0, so that a reader in pieces sees one report.
+*/
 static status_t
-rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
+make_report(rpivid_file* file)
 {
-	rpivid_device* device = ((rpivid_file*)cookie)->device;
+	rpivid_device* device = file->device;
+	free(file->report);
+	file->report_length = 0;
+	char* report = file->report = (char*)malloc(kReportSize);
+	if (report == NULL)
+		return B_NO_MEMORY;
 
-	char report[320];
 	MutexLocker locker(device->lock);
-	int length = snprintf(report, sizeof(report),
+	int length = snprintf(report, kReportSize,
 		"rpivid: version %#" B_PRIx32 ", clock %" B_PRIu32 " MHz (id %" B_PRIu32
 		"), registers %#" B_PRIxPHYSADDR "/%#" B_PRIxPHYSADDR ", interrupt %"
 		B_PRIu64 " (%" B_PRIu32 " taken), DMA below %#" B_PRIxPHYSADDR
@@ -656,14 +671,29 @@ rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
 		device->overlaps,
 		device->broken ? ", BROKEN (stopped responding)" : "");
 	locker.Unlock();
-	length = min_c(length, (int)sizeof(report) - 1);
+	length = min_c(length, (int)kReportSize - 1);
+	file->report_length = length + rpivid_low_memory_report(report + length,
+		kReportSize - length);
+	return B_OK;
+}
 
-	if (position >= length) {
+
+static status_t
+rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
+{
+	rpivid_file* file = (rpivid_file*)cookie;
+	if (position == 0 || file->report == NULL) {
+		status_t status = make_report(file);
+		if (status != B_OK)
+			return status;
+	}
+
+	if (position >= (off_t)file->report_length) {
 		*_length = 0;
 		return B_OK;
 	}
-	size_t count = min_c(*_length, (size_t)(length - position));
-	if (user_memcpy(buffer, report + position, count) != B_OK)
+	size_t count = min_c(*_length, (size_t)(file->report_length - position));
+	if (user_memcpy(buffer, file->report + position, count) != B_OK)
 		return B_BAD_ADDRESS;
 	*_length = count;
 	return B_OK;
