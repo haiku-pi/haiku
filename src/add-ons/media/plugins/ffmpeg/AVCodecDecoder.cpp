@@ -29,6 +29,48 @@
 #include "Utilities.h"
 
 
+/*!	The picture of a frame that hevc_rpivid (FFmpeg with the Raspberry Pi 4's
+	HEVC decoder, the ffmpeg6 port's patches) decoded with its option
+	rpivid_out=sand: the frame's opaque_ref (libavcodec/rpivid_hevc.h, the
+	same layout).
+*/
+struct RpividSandFrame {
+	uint32			magic;
+	uint32			size;
+	int32			area;
+	uint32			offset;
+	uint32			picture_size;
+	uint32			width;
+	uint32			height;
+	uint32			bit_depth;
+	uint32			column_height;
+	uint32			chroma_offset;
+	int32			planar;
+	uint32			_reserved;
+	const uint8*	address;
+};
+
+static const uint32 kRpividSandFrameMagic = 0x52534e44;
+
+
+static const char*
+color_space_name(color_space space)
+{
+	switch (space) {
+		case B_YUV420:
+			return "B_YUV420";
+		case B_YUV420_SAND128:
+			return "B_YUV420_SAND128";
+		case B_YUV420_SAND128_10:
+			return "B_YUV420_SAND128_10";
+		case B_RGB32:
+			return "B_RGB32";
+		default:
+			return "?";
+	}
+}
+
+
 #undef TRACE
 //#define TRACE_AV_CODEC
 #ifdef TRACE_AV_CODEC
@@ -121,6 +163,11 @@ AVCodecDecoder::AVCodecDecoder()
 	fOutputHeight(0),
 	fYUV420Allowed(true),
 	fOutputColorFlags(0),
+	fShownFrames(),
+	fShownNext(0),
+	fShownSerial(0),
+	fLastShownFrame(),
+	fSandPlanarPicture(NULL),
 	fOutputLimitedRange(false),
 	fOutputFrameCount(0),
 	fOutputFrameRate(1.0),
@@ -164,6 +211,9 @@ AVCodecDecoder::~AVCodecDecoder()
 	free(fChunkBuffer);
 	free(fDecodedData);
 
+	for (uint32 i = 0; i < B_OVERLAY_VIDEO_FRAME_HOLD; i++)
+		av_frame_free(&fShownFrames[i]);
+	av_frame_free(&fSandPlanarPicture);
 	av_frame_free(&fPostProcessedDecodedPicture);
 	av_frame_free(&fRawDecodedPicture);
 	av_frame_free(&fDeinterlacedPicture);
@@ -343,8 +393,7 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 		_ChooseVideoOutput(*inOutFormat);
 		_FillVideoOutputFormat(inOutFormat);
 		printf("AVCodecDecoder: video output now %s, %" B_PRIu32 " bytes per "
-			"row\n", fOutputColorSpace == B_YUV420 ? "B_YUV420" : "B_RGB32",
-			fOutputBytesPerRow);
+			"row\n", color_space_name(fOutputColorSpace), fOutputBytesPerRow);
 		return B_OK;
 	}
 
@@ -358,11 +407,11 @@ AVCodecDecoder::NegotiateOutputFormat(media_format* inOutFormat)
 	status_t status = _NegotiateVideoOutputFormat(inOutFormat);
 	if (status == B_OK && fSoftwareCodec != NULL)
 		printf("AVCodecDecoder: video decoder %s\n", fCodec->name);
-	if (status == B_OK && fOutputColorSpace == B_YUV420) {
-		printf("AVCodecDecoder: video output B_YUV420 (%s %s, %" B_PRIu32
-			"x%" B_PRIu32 ")\n", fCodec->name,
-			av_get_pix_fmt_name(fCodecContext->pix_fmt), fOutputWidth,
-			fOutputHeight);
+	if (status == B_OK && fOutputColorSpace != B_RGB32) {
+		printf("AVCodecDecoder: video output %s (%s %s, %" B_PRIu32
+			"x%" B_PRIu32 ")\n", color_space_name(fOutputColorSpace),
+			fCodec->name, av_get_pix_fmt_name(fCodecContext->pix_fmt),
+			fOutputWidth, fOutputHeight);
 	}
 	return status;
 }
@@ -710,6 +759,12 @@ AVCodecDecoder::_NegotiateVideoOutputFormat(media_format* inOutFormat)
 		// to _DecodeNextVideoFrame() will update the essential video format
 		// properties accordingly regardless of the settings here.
 
+	// a caller that shows decoded pictures as they are: a decoder that can
+	// keep them so (hevc_rpivid) is asked to
+	const color_space requested = inOutFormat->u.raw_video.display.format;
+	_SetRpividOutput(requested == B_YUV420_SAND128
+		|| requested == B_YUV420_SAND128_10);
+
 	if (avcodec_open2(fCodecContext, fCodec, NULL) < 0) {
 		TRACE("avcodec_open() failed to init codec!\n");
 		if (fSoftwareCodec == NULL
@@ -783,9 +838,37 @@ AVCodecDecoder::_ChooseVideoOutput(const media_format& requested)
 {
 	fOutputWidth = fHeader.u.raw_video.display_line_width;
 	fOutputHeight = fHeader.u.raw_video.display_line_count;
-	const color_space requestedSpace = requested.u.raw_video.display.format;
+	color_space requestedSpace = requested.u.raw_video.display.format;
 	const uint32 requestedBytesPerRow
 		= requested.u.raw_video.display.bytes_per_row;
+
+	// The decoder's picture as it is, for an overlay (the caller asked for an
+	// overlay-only space). Full range other than BT.601 has no plane encoding
+	// on the Raspberry Pi: such pictures are converted below.
+	const RpividSandFrame* sand = _SandPicture(fRawDecodedPicture);
+	if ((requestedSpace == B_YUV420_SAND128
+			|| requestedSpace == B_YUV420_SAND128_10) && sand != NULL) {
+		uint32 matrix;
+		bool fullRange;
+		_PictureEncoding(fRawDecodedPicture, matrix, fullRange);
+		if (!fullRange || _EffectiveMatrix(matrix) == B_YCbCr_BT601) {
+			fOutputColorSpace = sand->bit_depth == 8
+				? B_YUV420_SAND128 : B_YUV420_SAND128_10;
+			fOutputColorFlags = matrix | (fullRange ? B_YCbCr_FULL_RANGE : 0);
+			fOutputLimitedRange = false;
+			fOutputBytesPerRow = max_c(requestedBytesPerRow,
+				(uint32)sizeof(overlay_video_frame));
+			_SetRpividOutput(true);
+			return;
+		}
+	}
+	// the pictures are converted from now on, planar for a caller that
+	// wanted them as they are
+	_SetRpividOutput(false);
+	if (requestedSpace == B_YUV420_SAND128
+		|| requestedSpace == B_YUV420_SAND128_10) {
+		requestedSpace = B_YUV420;
+	}
 
 	const AVPixFmtDescriptor* pictureFormat
 		= av_pix_fmt_desc_get(fCodecContext->pix_fmt);
@@ -888,8 +971,11 @@ AVCodecDecoder::_FillVideoOutputFormat(media_format* outFormat)
 	outFormat->u.raw_video.display.format = fOutputColorSpace;
 	outFormat->u.raw_video.display.flags &= ~(uint32)(B_YCbCr_MATRIX_MASK
 		| B_YCbCr_FULL_RANGE);
-	if (fOutputColorSpace == B_YUV420)
+	if (fOutputColorSpace == B_YUV420
+		|| fOutputColorSpace == B_YUV420_SAND128
+		|| fOutputColorSpace == B_YUV420_SAND128_10) {
 		outFormat->u.raw_video.display.flags |= fOutputColorFlags;
+	}
 	outFormat->u.raw_video.display.line_width = fOutputWidth;
 	outFormat->u.raw_video.display.line_count = fOutputHeight;
 	outFormat->u.raw_video.display.bytes_per_row = fOutputBytesPerRow;
@@ -1987,6 +2073,19 @@ AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
 {
 	const AVFrame* picture = fUseDeinterlacedPicture
 		? fDeinterlacedPicture : fRawDecodedPicture;
+	if (fOutputColorSpace == B_YUV420_SAND128
+		|| fOutputColorSpace == B_YUV420_SAND128_10) {
+		return _PutOverlayVideoFrame(picture, destination);
+	}
+	const RpividSandFrame* sand = _SandPicture(picture);
+	if (sand != NULL && !sand->planar) {
+		// the decoder kept the picture as it is (asked to until now): its
+		// planes are empty
+		status_t status = _SandToPlanar(picture, sand);
+		if (status != B_OK)
+			return status;
+		picture = fSandPlanarPicture;
+	}
 	const AVPixelFormat format = (AVPixelFormat)picture->format;
 	const int width = min_c(picture->width, (int)fOutputWidth);
 	const int height = min_c(picture->height, (int)fOutputHeight);
@@ -2069,6 +2168,180 @@ AVCodecDecoder::_ColorConvertVideoFrame(uint8* destination)
 	(*fFormatConversionFunc)(const_cast<AVFrame*>(picture),
 		fPostProcessedDecodedPicture, width, height);
 #endif
+	return B_OK;
+}
+
+
+/*!	The decoder's picture of \a picture as it is (see RpividSandFrame), or
+	NULL.
+*/
+const RpividSandFrame*
+AVCodecDecoder::_SandPicture(const AVFrame* picture) const
+{
+	if (picture->opaque_ref == NULL
+		|| picture->opaque_ref->size < (int)sizeof(RpividSandFrame)) {
+		return NULL;
+	}
+	const RpividSandFrame* sand
+		= (const RpividSandFrame*)picture->opaque_ref->data;
+	if (sand->magic != kRpividSandFrameMagic
+		|| sand->size < sizeof(RpividSandFrame) || sand->area < 0
+		|| (sand->bit_depth != 8 && sand->bit_depth != 10)) {
+		return NULL;
+	}
+	return sand;
+}
+
+
+/*!	Asks hevc_rpivid to hand out its pictures as they are, or to convert them
+	(the decoder option rpivid_out; other decoders do not have it).
+*/
+void
+AVCodecDecoder::_SetRpividOutput(bool sand)
+{
+	if (fCodecContext != NULL) {
+		av_opt_set(fCodecContext, "rpivid_out", sand ? "1" : "0",
+			AV_OPT_SEARCH_CHILDREN);
+	}
+}
+
+
+/*!	A decoded picture that stays in the decoder's memory, for the caller to
+	show on an overlay (overlay_video_frame): the frame is held until
+	B_OVERLAY_VIDEO_FRAME_HOLD more are handed out. A frame without such a
+	picture (the decoder fell back to the CPU for it) shows the last one
+	again.
+*/
+status_t
+AVCodecDecoder::_PutOverlayVideoFrame(const AVFrame* picture,
+	uint8* destination)
+{
+	const RpividSandFrame* sand = _SandPicture(picture);
+	if (sand == NULL) {
+		if (fLastShownFrame.magic != B_OVERLAY_VIDEO_FRAME_MAGIC)
+			return B_ERROR;
+		memcpy(destination, &fLastShownFrame, sizeof(fLastShownFrame));
+		return B_OK;
+	}
+
+	AVFrame*& held = fShownFrames[fShownNext];
+	if (held == NULL)
+		held = av_frame_alloc();
+	if (held == NULL)
+		return B_NO_MEMORY;
+	av_frame_unref(held);
+	if (av_frame_ref(held, picture) < 0)
+		return B_NO_MEMORY;
+	fShownNext = (fShownNext + 1) % B_OVERLAY_VIDEO_FRAME_HOLD;
+
+	// The bitmap is the picture as it is shown; the chroma's place in the
+	// columns follows from the height rounded to 16 rows, which the coded
+	// height shares with the shown one (unless a stream crops much more)
+	uint32 width = picture->width;
+	uint32 height = picture->height;
+	if (picture->crop_left != 0 || picture->crop_top != 0
+		|| (height + 15) / 16 != (sand->height + 15) / 16) {
+		width = sand->width;
+		height = sand->height;
+	}
+
+	overlay_video_frame& frame = fLastShownFrame;
+	memset(&frame, 0, sizeof(frame));
+	frame.magic = B_OVERLAY_VIDEO_FRAME_MAGIC;
+	frame.size = sizeof(frame);
+	frame.area = sand->area;
+	frame.offset = sand->offset;
+	frame.width = (width + 1) & ~1;
+	frame.height = (height + 1) & ~1;
+	frame.bytes_per_row = sand->column_height;
+	frame.space = sand->bit_depth == 8
+		? B_YUV420_SAND128 : B_YUV420_SAND128_10;
+	frame.serial = ++fShownSerial;
+	memcpy(destination, &frame, sizeof(frame));
+	return B_OK;
+}
+
+
+/*!	The decoder's picture of \a picture (in 128-byte columns, luma and
+	chroma in the same ones) as a planar frame, fSandPlanarPicture:
+	yuv420p, or yuv420p10le for 10 bit (three samples in each 32-bit word).
+	For the frames a decoder kept as they are when the output changes to
+	another color space.
+*/
+status_t
+AVCodecDecoder::_SandToPlanar(const AVFrame* picture,
+	const RpividSandFrame* sand)
+{
+	const int width = picture->width;
+	const int height = picture->height;
+	const AVPixelFormat format = sand->bit_depth == 8
+		? AV_PIX_FMT_YUV420P : AV_PIX_FMT_YUV420P10LE;
+	if (fSandPlanarPicture == NULL)
+		fSandPlanarPicture = av_frame_alloc();
+	if (fSandPlanarPicture == NULL)
+		return B_NO_MEMORY;
+	if (fSandPlanarPicture->format != format
+		|| fSandPlanarPicture->width != width
+		|| fSandPlanarPicture->height != height) {
+		av_frame_unref(fSandPlanarPicture);
+		fSandPlanarPicture->format = format;
+		fSandPlanarPicture->width = width;
+		fSandPlanarPicture->height = height;
+		if (av_frame_get_buffer(fSandPlanarPicture, 0) < 0)
+			return B_NO_MEMORY;
+	}
+	fSandPlanarPicture->colorspace = picture->colorspace;
+	fSandPlanarPicture->color_range = picture->color_range;
+
+	const uint8* base = sand->address;
+	const size_t columnStride = (size_t)sand->column_height * 128;
+	AVFrame* out = fSandPlanarPicture;
+	if (sand->bit_depth == 8) {
+		for (int y = 0; y < height; y++) {
+			uint8* luma = out->data[0] + (ptrdiff_t)y * out->linesize[0];
+			for (int x = 0; x < width; x += 128) {
+				memcpy(luma + x, base + x / 128 * columnStride + y * 128,
+					min_c(128, width - x));
+			}
+		}
+		for (int y = 0; y < height / 2; y++) {
+			uint8* cb = out->data[1] + (ptrdiff_t)y * out->linesize[1];
+			uint8* cr = out->data[2] + (ptrdiff_t)y * out->linesize[2];
+			for (int x = 0; x < width / 2; x++) {
+				const uint8* pair = base + sand->chroma_offset
+					+ (2 * x) / 128 * columnStride + y * 128 + (2 * x) % 128;
+				cb[x] = pair[0];
+				cr[x] = pair[1];
+			}
+		}
+		return B_OK;
+	}
+
+	// 10 bit: 96 samples per column, three in each word
+	for (int y = 0; y < height; y++) {
+		uint16* luma = (uint16*)(out->data[0] + (ptrdiff_t)y * out->linesize[0]);
+		for (int x = 0; x < width; x++) {
+			const uint32* words = (const uint32*)(base + x / 96 * columnStride
+				+ y * 128);
+			const int k = x % 96;
+			luma[x] = (words[k / 3] >> (k % 3 * 10)) & 0x3ff;
+		}
+	}
+	for (int y = 0; y < height / 2; y++) {
+		uint16* cb = (uint16*)(out->data[1] + (ptrdiff_t)y * out->linesize[1]);
+		uint16* cr = (uint16*)(out->data[2] + (ptrdiff_t)y * out->linesize[2]);
+		for (int x = 0; x < width; x++) {
+			// the x-th chroma sample of the row: Cb and Cr alternate
+			const uint32* words = (const uint32*)(base + sand->chroma_offset
+				+ x / 96 * columnStride + y * 128);
+			const int k = x % 96;
+			const uint16 value = (words[k / 3] >> (k % 3 * 10)) & 0x3ff;
+			if ((x & 1) == 0)
+				cb[x / 2] = value;
+			else
+				cr[x / 2] = value;
+		}
+	}
 	return B_OK;
 }
 
