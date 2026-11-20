@@ -8,6 +8,7 @@
 #include "VideoConsumer.h"
 
 #include <fcntl.h>
+#include <new>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -20,6 +21,7 @@
 #include <scheduler.h>
 #include <TimeSource.h>
 #include <MediaRoster.h>
+#include <OverlayVideoFrame.h>
 
 #include "ColorSpaceToString.h"
 #include "NodeManager.h"
@@ -62,7 +64,12 @@ VideoConsumer::VideoConsumer(const char* name, BMediaAddOn* addon,
 	  fTargetLock(),
 	  fTarget(target),
 	  fLastBufferIndex(-1),
-	  fTryOverlay(true)
+	  fTryOverlay(true),
+	  fImportedFrames(false),
+	  fImported(),
+	  fImportedUses(0),
+	  fShownImported(NULL),
+	  fPreviousImported(NULL)
 {
 	FUNCTION("VideoConsumer::VideoConsumer\n");
 
@@ -182,6 +189,27 @@ VideoConsumer::CreateBuffers(const media_format& format)
 	uint32 width = format.u.raw_video.display.line_width;
 	uint32 height = format.u.raw_video.display.line_count;	
 	color_space colorSpace = format.u.raw_video.display.format;
+
+	if (colorSpace == B_YUV420_SAND128 || colorSpace == B_YUV420_SAND128_10) {
+		// The frames stay in the decoder's memory and go on overlays as
+		// they are: only if an overlay of the space can be had now
+		// (otherwise the node manager falls back to another space)
+		if (!fTryOverlay)
+			return B_NOT_SUPPORTED;
+		BBitmap probe(BRect(0, 0, width - 1, height - 1),
+			B_BITMAP_WILL_OVERLAY | B_BITMAP_RESERVE_OVERLAY_CHANNEL,
+			colorSpace);
+		status = probe.InitCheck();
+		if (status != B_OK) {
+			ERROR("VideoConsumer::CreateBuffers - no %s overlay: %s\n",
+				color_space_to_string(colorSpace), strerror(status));
+			return status;
+		}
+		fImportedFrames = true;
+		fBuffers = new BBufferGroup();
+		return fBuffers->InitCheck();
+	}
+	fImportedFrames = false;
 	PROGRESS("VideoConsumer::CreateBuffers - Width = %" B_PRIu32 " - "
 		"Height = %" B_PRIu32 " - Colorspace = %d\n",
 		width, height, colorSpace);
@@ -274,14 +302,26 @@ VideoConsumer::DeleteBuffers()
 		}
 		fTargetLock.Unlock();
 
+		fTargetLock.Lock();
+		if (fShownImported != NULL) {
+			if (fTarget)
+				fTarget->SetBitmap(NULL);
+			fShownImported = NULL;
+			fPreviousImported = NULL;
+		}
+		fTargetLock.Unlock();
+
 		delete fBuffers;
 		fBuffers = NULL;
 
 		for (uint32 i = 0; i < kBufferCount; i++) {
+			if (fBitmap[i] == NULL)
+				continue;
 			snooze(20000);
 			delete fBitmap[i];
 			fBitmap[i] = NULL;
 		}
+		_DeleteImportedBitmaps();
 	}
 	FUNCTION("VideoConsumer::DeleteBuffers - EXIT\n");
 }
@@ -294,7 +334,9 @@ VideoConsumer::SetTarget(VideoTarget* target)
 	if (fTarget)
 		fTarget->SetBitmap(NULL);
 	fTarget = target;
-	if (fTarget && fLastBufferIndex >= 0)
+	if (fTarget && fShownImported != NULL)
+		fTarget->SetBitmap(fShownImported);
+	else if (fTarget && fLastBufferIndex >= 0)
 		fTarget->SetBitmap(fBitmap[fLastBufferIndex]);
 	fTargetLock.Unlock();
 }
@@ -333,8 +375,8 @@ VideoConsumer::Connected(const media_source& producer,
 			if (ret != B_OK)
 				ERROR("SetOutputBuffersFor() failed: %s\n", strerror(ret));
 		}
-		fIn.format.u.raw_video.display.bytes_per_row
-			= fBitmap[0]->BytesPerRow();
+		fIn.format.u.raw_video.display.bytes_per_row = fImportedFrames
+			? sizeof(overlay_video_frame) : fBitmap[0]->BytesPerRow();
 	} else {
 		ERROR("VideoConsumer::Connected - COULDN'T CREATE BUFFERS\n");
 		return ret;
@@ -556,6 +598,38 @@ VideoConsumer::_HandleBuffer(BBuffer* buffer)
 		return;
 	}
 
+	if (fImportedFrames) {
+		// a frame in the decoder's memory: its overlay bitmap goes up
+		bigtime_t now = TimeSource()->Now();
+		if (RunMode() == B_OFFLINE
+			|| now < buffer->Header()->start_time + kMaxBufferLateness) {
+			overlay_video_frame frame;
+			memcpy(&frame, buffer->Data(), sizeof(frame));
+			const bigtime_t startTime = buffer->Header()->start_time;
+			buffer->Recycle();
+			BBitmap* bitmap = _ImportedBitmap(frame);
+			bigtime_t tooEarly = startTime - now;
+			if (tooEarly > 3000)
+				snooze(tooEarly);
+			fTargetLock.Lock();
+			if (bitmap != NULL && fTarget) {
+				fTarget->SetBitmap(bitmap);
+				if (bitmap != fShownImported) {
+					fPreviousImported = fShownImported;
+					fShownImported = bitmap;
+				}
+			}
+			fTargetLock.Unlock();
+		} else {
+			buffer->Recycle();
+			if (fManager->LockWithTimeout(10000) == B_OK) {
+				fManager->FrameDropped();
+				fManager->Unlock();
+			}
+		}
+		return;
+	}
+
 	// See if this is one of our BBitmap buffers
 	uint32 index = 0;
 	fOurBuffers = true;
@@ -622,6 +696,78 @@ VideoConsumer::_HandleBuffer(BBuffer* buffer)
 }
 
 
+/*!	The overlay bitmap of a decoder's picture (\a frame): made once per
+	picture, the least recently shown one replaced when there are
+	kImportedBitmapCount (never the one on the screen, nor the one it just
+	replaced). NULL if the picture cannot be shown (no such frame, or the
+	graphics driver does not take its memory).
+*/
+BBitmap*
+VideoConsumer::_ImportedBitmap(const overlay_video_frame& frame)
+{
+	if (frame.magic != B_OVERLAY_VIDEO_FRAME_MAGIC
+		|| frame.size < sizeof(overlay_video_frame)) {
+		return NULL;
+	}
+
+	const BRect bounds(0, 0, frame.width - 1, frame.height - 1);
+	ImportedBitmap* slot = NULL;
+	for (uint32 i = 0; i < kImportedBitmapCount; i++) {
+		ImportedBitmap& imported = fImported[i];
+		if (imported.bitmap != NULL && imported.area == frame.area
+			&& imported.offset == frame.offset
+			&& imported.bitmap->Bounds() == bounds
+			&& imported.bitmap->ColorSpace() == frame.space
+			&& (uint32)imported.bitmap->BytesPerRow() == frame.bytes_per_row) {
+			imported.last_use = ++fImportedUses;
+			return imported.bitmap;
+		}
+		if (imported.bitmap != NULL && (imported.bitmap == fShownImported
+				|| imported.bitmap == fPreviousImported)) {
+			// on the screen, or maybe still until the next vertical blank
+			continue;
+		}
+		// a free slot, else the one shown longest ago
+		if (slot == NULL || (slot->bitmap != NULL
+				&& (imported.bitmap == NULL
+					|| imported.last_use < slot->last_use))) {
+			slot = &imported;
+		}
+	}
+	if (slot == NULL)
+		return NULL;
+
+	BBitmap* bitmap = new(std::nothrow) BBitmap(frame.area, frame.offset,
+		bounds, B_BITMAP_WILL_OVERLAY, frame.space, frame.bytes_per_row);
+	if (bitmap == NULL || bitmap->InitCheck() != B_OK) {
+		ERROR("VideoConsumer: no overlay bitmap of the picture in area %"
+			B_PRId32 ": %s\n", frame.area,
+			strerror(bitmap != NULL ? bitmap->InitCheck() : B_NO_MEMORY));
+		delete bitmap;
+		return NULL;
+	}
+
+	delete slot->bitmap;
+	slot->bitmap = bitmap;
+	slot->area = frame.area;
+	slot->offset = frame.offset;
+	slot->last_use = ++fImportedUses;
+	return bitmap;
+}
+
+
+void
+VideoConsumer::_DeleteImportedBitmaps()
+{
+	for (uint32 i = 0; i < kImportedBitmapCount; i++) {
+		delete fImported[i].bitmap;
+		fImported[i].bitmap = NULL;
+	}
+	fShownImported = NULL;
+	fPreviousImported = NULL;
+}
+
+
 void
 VideoConsumer::_UnsetTargetBuffer()
 {
@@ -633,5 +779,8 @@ VideoConsumer::_UnsetTargetBuffer()
 			fBufferMap[fLastBufferIndex]->Recycle();
 		fLastBufferIndex = -1;
 	}
+	// (the imported bitmap stays where the overlay may still show it)
+	if (fShownImported != NULL && fTarget)
+		fTarget->SetBitmap(NULL);
 	fTargetLock.Unlock();
 }

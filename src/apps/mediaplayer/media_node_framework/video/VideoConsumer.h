@@ -22,6 +22,11 @@ class VideoTarget;
 // TODO: The buffer count should depend on the latency!
 static const unsigned int kBufferCount = 4;
 
+// overlay bitmaps of a decoder's pictures (overlay_video_frame), one each
+static const unsigned int kImportedBitmapCount = 24;
+
+struct overlay_video_frame;
+
 
 class VideoConsumer : public BMediaEventLooper, public BBufferConsumer {
 public:
@@ -98,6 +103,9 @@ private:
 									bigtime_t performanceTime);
 			void				_HandleBuffer(BBuffer* buffer);
 			void				_UnsetTargetBuffer();
+			BBitmap*			_ImportedBitmap(
+									const overlay_video_frame& frame);
+			void				_DeleteImportedBitmaps();
 
 private:
 			int32				fInternalID;
@@ -119,6 +127,19 @@ private:
 			int32				fLastBufferIndex;
 
 			bool				fTryOverlay;
+
+			// the decoder's pictures shown as they are (an overlay-only color
+			// space): no copy, an overlay bitmap of each picture's memory
+			bool				fImportedFrames;
+			struct ImportedBitmap {
+				BBitmap*		bitmap;
+				area_id			area;
+				uint32			offset;
+				uint32			last_use;
+			}					fImported[kImportedBitmapCount];
+			uint32				fImportedUses;
+			BBitmap*			fShownImported;
+			BBitmap*			fPreviousImported;
 };
 
 #endif // VIDEO_CONSUMER_H

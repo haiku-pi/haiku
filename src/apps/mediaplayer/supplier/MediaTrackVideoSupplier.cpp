@@ -4,8 +4,11 @@
  */
 #include "MediaTrackVideoSupplier.h"
 
+#include <OverlayVideoFrame.h>
+
 #include <new>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <GraphicsDefs.h>
@@ -34,9 +37,29 @@ min_bytes_per_row(color_space format, uint32 width)
 			return ((width * 2 + 3) / 4) * 4;
 		case B_YUV420:
 			return (width + 3) / 4 * 6;
+		case B_YUV420_SAND128:
+		case B_YUV420_SAND128_10:
+			// the frame stays in the decoder's memory
+			return sizeof(overlay_video_frame);
 		default:
 			return width * 4;
 	}
+}
+
+
+/*!	Whether the screen shows decoded pictures in their decoder's layout on
+	overlays (B_YUV420_SAND128: the Raspberry Pi 4); MEDIAPLAYER_SAND=0 in the
+	environment: never asked for.
+*/
+static bool
+sand_overlays()
+{
+	const char* setting = getenv("MEDIAPLAYER_SAND");
+	if (setting != NULL && strcmp(setting, "0") == 0)
+		return false;
+	uint32 flags = 0;
+	return bitmaps_support_space(B_YUV420_SAND128, &flags)
+		&& (flags & B_BITMAPS_SUPPORT_OVERLAY) != 0;
 }
 
 
@@ -319,6 +342,7 @@ MediaTrackVideoSupplier::_SwitchFormat(color_space format, uint32 bytesPerRow)
 	// get ouput video frame size
 	uint32 width = fFormat.u.encoded_video.output.display.line_width;
 	uint32 height = fFormat.u.encoded_video.output.display.line_count;
+	const bool preferred = format == B_NO_COLOR_SPACE;
 	if (format == B_NO_COLOR_SPACE) {
 		format = fFormat.u.encoded_video.output.display.format;
 		if (format == B_NO_COLOR_SPACE) {
@@ -341,6 +365,10 @@ MediaTrackVideoSupplier::_SwitchFormat(color_space format, uint32 bytesPerRow)
 		if (!bitmaps_support_space(B_YUV420, &flags)
 			|| (flags & B_BITMAPS_SUPPORT_OVERLAY) == 0) {
 			format = B_RGB32;
+		} else if (preferred && sand_overlays()) {
+			// better still: the decoder's pictures as they are, if it can
+			// (the display's own video layout); it gives B_YUV420 if not
+			format = B_YUV420_SAND128;
 		}
 	}
 

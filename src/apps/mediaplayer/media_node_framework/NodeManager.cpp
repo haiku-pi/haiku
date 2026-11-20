@@ -398,6 +398,17 @@ NodeManager::_SetUpVideoNodes(color_space preferredVideoFormat,
 	fStatus = fMediaRoster->Connect(videoOutput.source, videoInput.destination,
 		&format, &videoOutput, &videoInput);
 
+	if (fStatus != B_OK && (format.u.raw_video.display.format
+			== B_YUV420_SAND128 || format.u.raw_video.display.format
+			== B_YUV420_SAND128_10)) {
+		// no overlay of the decoder's own pictures: the decoder converts
+		// them for a planar one
+		print_error("Can't show the decoder's pictures on an overlay... "
+			"trying B_YUV420", fStatus);
+		format.u.raw_video.display.format = B_YUV420;
+		fStatus = fMediaRoster->Connect(videoOutput.source,
+			videoInput.destination, &format, &videoOutput, &videoInput);
+	}
 	if (fStatus != B_OK) {
 		print_error("Can't connect the video source to the video window... "
 			"trying without overlays", fStatus);
