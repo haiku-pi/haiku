@@ -73,7 +73,7 @@ public:
 									int32 height, color_space space);
 	virtual void				FreeOverlayBuffer(const overlay_buffer* buffer);
 
-	virtual void				ConfigureOverlay(Overlay* overlay);
+	virtual status_t			ConfigureOverlay(Overlay* overlay);
 	virtual void				HideOverlay(Overlay* overlay);
 
 	// cursor handling
@@ -98,7 +98,8 @@ private:
 			status_t			_OpenAccelerant(int device);
 			status_t			_SetupDefaultHooks();
 			void				_UpdateHooksAfterModeChange();
-			bool				_ConfigureOverlay(Overlay* overlay, bool exclusive);
+			bool				_ConfigureOverlay(Overlay* overlay, bool exclusive,
+									status_t& status);
 			status_t			_UpdateModeList();
 			status_t			_UpdateFrameBufferConfig();
 			void				_RegionToRectParams(/*const*/ BRegion* region,

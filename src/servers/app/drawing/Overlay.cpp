@@ -180,6 +180,23 @@ Overlay::SetFlags(uint32 flags)
 		fWindow.flags |= B_OVERLAY_VERTICAL_FILTERING;
 	if (flags & B_OVERLAY_MIRROR)
 		fWindow.flags |= B_OVERLAY_HORIZONTAL_MIRRORING;
+
+	// the YCbCr encoding is the one of the last SetViewOverlay()
+	fWindow.flags &= ~(uint32)(B_OVERLAY_COLOR_MATRIX_MASK
+		| B_OVERLAY_COLOR_FULL_RANGE);
+	switch (flags & B_OVERLAY_YCbCr_MATRIX_MASK) {
+		case B_OVERLAY_YCbCr_BT601:
+			fWindow.flags |= B_OVERLAY_COLOR_BT601;
+			break;
+		case B_OVERLAY_YCbCr_BT709:
+			fWindow.flags |= B_OVERLAY_COLOR_BT709;
+			break;
+		case B_OVERLAY_YCbCr_BT2020:
+			fWindow.flags |= B_OVERLAY_COLOR_BT2020;
+			break;
+	}
+	if ((flags & B_OVERLAY_YCbCr_FULL_RANGE) != 0)
+		fWindow.flags |= B_OVERLAY_COLOR_FULL_RANGE;
 }
 
 
@@ -264,13 +281,13 @@ Overlay::SetColorSpace(uint32 colorSpace)
 }
 
 
-void
+status_t
 Overlay::Configure(const BRect& source, const BRect& destination)
 {
 	if (fOverlayToken == NULL) {
 		fOverlayToken = fHWInterface.AcquireOverlayChannel();
 		if (fOverlayToken == NULL)
-			return;
+			return B_BUSY;
 	}
 
 	TRACE("overlay: configure %p\n", this);
@@ -285,6 +302,6 @@ Overlay::Configure(const BRect& source, const BRect& destination)
 	fWindow.width = (uint16)destination.IntegerWidth() + 1;
 	fWindow.height = (uint16)destination.IntegerHeight() + 1;
 
-	fHWInterface.ConfigureOverlay(this);
+	return fHWInterface.ConfigureOverlay(this);
 }
 

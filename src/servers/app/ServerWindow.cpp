@@ -2044,8 +2044,12 @@ fDesktop->LockSingleWindow();
 					bool wasOverlay = fCurrentView->ViewBitmap() != NULL
 						&& fCurrentView->ViewBitmap()->Overlay() != NULL;
 
-					fCurrentView->SetViewBitmap(bitmap, srcRect, dstRect,
-						resizingMode, options);
+					// (the options apply to the configuration that follows)
+					if (bitmap != NULL && bitmap->Overlay() != NULL)
+						bitmap->Overlay()->SetFlags(options);
+
+					status = fCurrentView->SetViewBitmap(bitmap, srcRect,
+						dstRect, resizingMode, options);
 
 					// TODO: if we revert the view color overlay handling
 					//	in View::Draw() to the BeOS version, we never
@@ -2059,10 +2063,8 @@ fDesktop->LockSingleWindow();
 						fWindow->InvalidateView(fCurrentView, dirty);
 					}
 
-					if (bitmap != NULL && bitmap->Overlay() != NULL) {
-						bitmap->Overlay()->SetFlags(options);
+					if (bitmap != NULL && bitmap->Overlay() != NULL)
 						colorKey = bitmap->Overlay()->Color();
-					}
 				} else
 					status = B_BAD_VALUE;
 			}

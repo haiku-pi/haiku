@@ -314,7 +314,17 @@ enum overlay_options {
 	B_OVERLAY_FILTER_HORIZONTAL	= 0x00010000,
 	B_OVERLAY_FILTER_VERTICAL	= 0x00020000,
 	B_OVERLAY_MIRROR			= 0x00040000,
-	B_OVERLAY_TRANSFER_CHANNEL	= 0x00080000
+	B_OVERLAY_TRANSFER_CHANNEL	= 0x00080000,
+
+	// The YCbCr encoding of the overlay bitmap's pixels. Without a matrix the
+	// graphics driver chooses one (usually BT.601 below 720 lines, BT.709
+	// from there); without B_OVERLAY_YCbCr_FULL_RANGE the range is limited
+	// (luma 16-235).
+	B_OVERLAY_YCbCr_BT601		= 0x00100000,
+	B_OVERLAY_YCbCr_BT709		= 0x00200000,
+	B_OVERLAY_YCbCr_BT2020		= 0x00300000,
+	B_OVERLAY_YCbCr_MATRIX_MASK	= 0x00300000,
+	B_OVERLAY_YCbCr_FULL_RANGE	= 0x00400000
 };
 
 enum bitmap_drawing_options {

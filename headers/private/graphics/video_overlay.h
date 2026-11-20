@@ -51,7 +51,16 @@ enum {
 	B_OVERLAY_HORIZONTAL_FILTERING = 1 << 2,
 	B_OVERLAY_VERTICAL_FILTERING = 1 << 3,
 	B_OVERLAY_HORIZONTAL_MIRRORING = 1 << 4,
-	B_OVERLAY_KEYING_USES_ALPHA = 1 << 5
+	B_OVERLAY_KEYING_USES_ALPHA = 1 << 5,
+
+	/* overlay_window.flags only: the YCbCr encoding of the buffer (no matrix:
+	   the driver's choice; no full range: limited). A driver that cannot show
+	   the requested encoding fails configure_overlay() with B_NOT_SUPPORTED. */
+	B_OVERLAY_COLOR_BT601 = 1 << 8,
+	B_OVERLAY_COLOR_BT709 = 2 << 8,
+	B_OVERLAY_COLOR_BT2020 = 3 << 8,
+	B_OVERLAY_COLOR_MATRIX_MASK = 3 << 8,
+	B_OVERLAY_COLOR_FULL_RANGE = 1 << 10
 };
 
 typedef struct {

@@ -1201,11 +1201,11 @@ AccelerantHWInterface::FreeOverlayBuffer(const overlay_buffer* buffer)
 }
 
 
-void
+status_t
 AccelerantHWInterface::ConfigureOverlay(Overlay* overlay)
 {
 	if (fAccConfigureOverlay == NULL)
-		return;
+		return B_NOT_SUPPORTED;
 
 	// TODO: this only needs to be done on mode changes!
 	overlay->SetColorSpace(fDisplayMode.space);
@@ -1213,15 +1213,23 @@ AccelerantHWInterface::ConfigureOverlay(Overlay* overlay)
 	// The key pixels app_server writes next are keyed in the new place. The
 	// first overlay switches keying on, with the exclusive lock held: the
 	// front buffer is made opaque before the display shows the overlay.
-	if (_ConfigureOverlay(overlay, false) || !LockExclusiveAccess())
-		return;
-	_ConfigureOverlay(overlay, true);
+	status_t status = B_OK;
+	if (_ConfigureOverlay(overlay, false, status) || !LockExclusiveAccess())
+		return status;
+	_ConfigureOverlay(overlay, true, status);
 	UnlockExclusiveAccess();
+	return status;
 }
 
 
+/*!	Returns false if keying must be switched on first (\a exclusive with
+	the exclusive lock held), else true and the accelerant's \a status. An
+	overlay the accelerant refuses (e.g. a YCbCr encoding it cannot show) is
+	not keyed: the view keeps its key color.
+*/
 bool
-AccelerantHWInterface::_ConfigureOverlay(Overlay* overlay, bool exclusive)
+AccelerantHWInterface::_ConfigureOverlay(Overlay* overlay, bool exclusive,
+	status_t& status)
 {
 	BAutolock _(fOverlayChangeLock);
 	if (!_ShowOverlayKey(overlay->OverlayToken(), *overlay->OverlayWindow(),
@@ -1229,8 +1237,11 @@ AccelerantHWInterface::_ConfigureOverlay(Overlay* overlay, bool exclusive)
 		return false;
 	}
 
-	fAccConfigureOverlay(overlay->OverlayToken(), overlay->OverlayBuffer(),
-		overlay->OverlayWindow(), overlay->OverlayView());
+	status = fAccConfigureOverlay(overlay->OverlayToken(),
+		overlay->OverlayBuffer(), overlay->OverlayWindow(),
+		overlay->OverlayView());
+	if (status != B_OK)
+		_HideOverlayKey(overlay->OverlayToken());
 	return true;
 }
 

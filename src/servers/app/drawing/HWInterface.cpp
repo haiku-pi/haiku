@@ -540,9 +540,10 @@ HWInterface::FreeOverlayBuffer(const overlay_buffer* buffer)
 }
 
 
-void
+status_t
 HWInterface::ConfigureOverlay(Overlay* overlay)
 {
+	return B_NOT_SUPPORTED;
 }
 
 

@@ -51,7 +51,7 @@ class Overlay {
 		const rgb_color& Color() const
 			{ return fColor; }
 
-		void Configure(const BRect& source, const BRect& destination);
+		status_t Configure(const BRect& source, const BRect& destination);
 		void Hide();
 
 	private:

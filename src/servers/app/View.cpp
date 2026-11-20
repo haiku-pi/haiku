@@ -489,7 +489,10 @@ View::SetFlags(uint32 flags)
 }
 
 
-void
+/*!	Returns the overlay's configuration result when the bitmap is an overlay
+	bitmap, else B_OK.
+*/
+status_t
 View::SetViewBitmap(ServerBitmap* bitmap, IntRect sourceRect,
 	IntRect destRect, int32 resizingMode, int32 options)
 {
@@ -512,7 +515,7 @@ View::SetViewBitmap(ServerBitmap* bitmap, IntRect sourceRect,
 	fBitmapResizingMode = resizingMode;
 	fBitmapOptions = options;
 
-	_UpdateOverlayView();
+	return _UpdateOverlayView();
 }
 
 
@@ -526,17 +529,17 @@ View::_Overlay() const
 }
 
 
-void
+status_t
 View::_UpdateOverlayView() const
 {
 	Overlay* overlay = _Overlay();
 	if (overlay == NULL)
-		return;
+		return B_OK;
 
 	IntRect destination = fBitmapDestination;
 	LocalToScreenTransform().Apply(&destination);
 
-	overlay->Configure(fBitmapSource, destination);
+	return overlay->Configure(fBitmapSource, destination);
 }
 
 

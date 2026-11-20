@@ -133,7 +133,7 @@ public:
 									int32 height, color_space space);
 	virtual void				FreeOverlayBuffer(const overlay_buffer* buffer);
 
-	virtual void				ConfigureOverlay(Overlay* overlay);
+	virtual status_t			ConfigureOverlay(Overlay* overlay);
 	virtual void				HideOverlay(Overlay* overlay);
 
 	// frame buffer access (you need to ReadLock!)

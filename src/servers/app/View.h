@@ -146,7 +146,7 @@ public:
 
 			ServerBitmap*	ViewBitmap() const
 								{ return fViewBitmap; }
-			void			SetViewBitmap(ServerBitmap* bitmap,
+			status_t		SetViewBitmap(ServerBitmap* bitmap,
 								IntRect sourceRect, IntRect destRect,
 								int32 resizingMode, int32 options);
 
@@ -233,7 +233,7 @@ protected:
 			void			_MoveScreenClipping(int32 x, int32 y,
 								bool deep);
 			Overlay*		_Overlay() const;
-			void			_UpdateOverlayView() const;
+			status_t		_UpdateOverlayView() const;
 
 			BString			fName;
 			int32			fToken;
