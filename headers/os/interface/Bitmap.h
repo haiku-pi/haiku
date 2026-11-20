@@ -160,7 +160,7 @@ private:
 			uint32				fFlags;
 			BWindow*			fWindow;
 			status_t			fInitError;
-			uint32				_reserved[1];
+			uint32				fPrivateFlags;
 };
 
 #endif	// _BITMAP_H

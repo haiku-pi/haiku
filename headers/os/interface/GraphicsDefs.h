@@ -241,6 +241,17 @@ typedef enum {
 	B_YUV9				= 0x402C,
 	B_YUV12				= 0x402D,
 
+	// Decoded video in the layout of a hardware decoder, for overlays only
+	// (the Raspberry Pi 4's HEVC decoder): 4:2:0 with the Y plane and the
+	// interleaved CbCr plane in columns 128 bytes wide. bytes_per_row is the
+	// column height in rows: byte b of row y in column c is at
+	// c * bytes_per_row * 128 + y * 128 + b; the CbCr rows follow the
+	// ((height + 15) & ~15) rows of Y in each column.
+	B_YUV420_SAND128	= 0x4028,	// 8 bit (NV12)
+	B_YUV420_SAND128_10	= 0x4029,	// 10 bit: three samples in each
+									// little-endian 32-bit word, lowest
+									// first, 96 per column
+
 	B_UVL24				= 0x4030,	// UVL
 	B_UVL32				= 0x4031,	// UVL-
 	B_UVLA32			= 0x6031,	// UVLA

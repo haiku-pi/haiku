@@ -180,6 +180,7 @@ bitmaps_support_space(color_space space, uint32 *supportFlags)
 		// unsupported
 		case B_NO_COLOR_SPACE:
 		case B_YUV9: case B_YUV12:
+		case B_YUV420_SAND128: case B_YUV420_SAND128_10:
 			break;
 	}
 	return result;

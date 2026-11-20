@@ -47,6 +47,11 @@ using namespace BPrivate;
 static BObjectList<BBitmap> sBitmapList;
 static mutex sBitmapListLock = MUTEX_INITIALIZER("BBitmap list");
 
+// fPrivateFlags
+static const uint32 kClientMemoryOverlay = 0x01;
+	// an overlay bitmap of the memory of an area of the client (not of the
+	// graphics driver): Bits() is that memory, no overlay_client_data
+
 
 void
 reconnect_bitmaps_to_app_server()
@@ -137,6 +142,9 @@ get_raw_bytes_per_row(color_space colorSpace, int32 width)
 		// unsupported
 		case B_NO_COLOR_SPACE:
 		case B_YUV12:
+			break;
+		// overlays only: bytes_per_row is the column height
+		case B_YUV420_SAND128: case B_YUV420_SAND128_10:
 			break;
 	}
 	return bpr;
@@ -309,6 +317,13 @@ BBitmap::BBitmap(const BBitmap& source)
 }
 
 
+/*!	Creates a bitmap of the memory of \a area (an area of this team, from
+	\a areaOffset on), which app_server clones. With B_BITMAP_WILL_OVERLAY it
+	is shown on an overlay as it is, if the graphics driver can scan the
+	memory out (e.g. a video decoder's picture: contiguous memory the display
+	reaches); the bitmap is not created otherwise. Bits() is always the
+	area's memory then.
+*/
 BBitmap::BBitmap(area_id area, ptrdiff_t areaOffset, BRect bounds,
 	uint32 flags, color_space colorSpace, int32 bytesPerRow,
 	screen_id screenID)
@@ -506,7 +521,8 @@ BBitmap::LockBits(uint32* state)
 	// TODO: how do we fill the "state"?
 	//	It would be more or less useful to report what kind of bitmap
 	//	we got (ie. overlay, placeholder, or non-overlay)
-	if ((fFlags & B_BITMAP_WILL_OVERLAY) != 0) {
+	if ((fFlags & B_BITMAP_WILL_OVERLAY) != 0
+		&& (fPrivateFlags & kClientMemoryOverlay) == 0) {
 		overlay_client_data* data = (overlay_client_data*)fBasePointer;
 
 		status_t status;
@@ -537,8 +553,10 @@ BBitmap::LockBits(uint32* state)
 void
 BBitmap::UnlockBits()
 {
-	if ((fFlags & B_BITMAP_WILL_OVERLAY) == 0)
+	if ((fFlags & B_BITMAP_WILL_OVERLAY) == 0
+		|| (fPrivateFlags & kClientMemoryOverlay) != 0) {
 		return;
+	}
 
 	overlay_client_data* data = (overlay_client_data*)fBasePointer;
 	release_sem_etc(data->lock, 1, B_DO_NOT_RESCHEDULE);
@@ -564,7 +582,8 @@ BBitmap::Bits() const
 {
 	const_cast<BBitmap*>(this)->_AssertPointer();
 
-	if ((fFlags & B_BITMAP_WILL_OVERLAY) != 0) {
+	if ((fFlags & B_BITMAP_WILL_OVERLAY) != 0
+		&& (fPrivateFlags & kClientMemoryOverlay) == 0) {
 		overlay_client_data* data = (overlay_client_data*)fBasePointer;
 		return data->buffer;
 	}
@@ -1058,6 +1077,7 @@ BBitmap::_InitObject(BRect bounds, color_space colorSpace, uint32 flags,
 #endif	// RUN_WITHOUT_APP_SERVER
 
 	_CleanUp();
+	fPrivateFlags = 0;
 
 	// check params
 	if (!bounds.IsValid() || !bitmaps_support_space(colorSpace, NULL)) {
@@ -1130,6 +1150,8 @@ BBitmap::_InitObject(BRect bounds, color_space colorSpace, uint32 flags,
 							fFlags = flags;
 							fArea = area;
 							fAreaOffset = areaOffset;
+							if ((flags & B_BITMAP_WILL_OVERLAY) != 0)
+								fPrivateFlags |= kClientMemoryOverlay;
 
 							fBasePointer = (uint8*)info.address + areaOffset;
 						} else

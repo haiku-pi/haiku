@@ -105,6 +105,7 @@ get_raw_bytes_per_row(color_space colorSpace, int32 width)
 		// unsupported
 		case B_NO_COLOR_SPACE:
 		case B_YUV12:
+		case B_YUV420_SAND128: case B_YUV420_SAND128_10:
 			break;
 	}
 	return bpr;
