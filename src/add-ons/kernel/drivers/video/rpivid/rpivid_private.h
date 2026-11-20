@@ -96,11 +96,38 @@ enum {
 
 
 // Contiguous memory the block reaches
+struct rpivid_pool;
+
 struct dma_memory {
 	area_id			area;
 	void*			address;
 	phys_addr_t		physical;
 	size_t			size;
+	rpivid_pool*	pool;
+		// the scan-out pool it is a part of, or NULL (an area of its own)
+};
+
+
+// the scan-out pool (pool.cpp)
+static const uint32 kMaxPoolExtents = 64;
+
+struct rpivid_pool {
+	mutex			lock;
+		// the extents (taken inside the device lock, never around it)
+	area_id			area;
+	uint8*			address;
+	phys_addr_t		physical;
+	size_t			size;
+	struct extent {
+		size_t		offset;
+		size_t		size;
+	}				extents[kMaxPoolExtents];
+		// in use, by offset
+	uint32			count;
+	size_t			used;
+	size_t			peak;
+	uint32			misses;
+		// pictures that did not fit
 };
 
 
@@ -253,6 +280,8 @@ struct rpivid_device {
 	uint64			decoded;
 	uint64			failed;
 	uint64			overlaps;
+
+	rpivid_pool		pool;
 };
 
 
@@ -293,6 +322,13 @@ rpivid_buffer* rpivid_buffer_lookup(rpivid_file* file, uint32 handle,
 				rpivid_buffer_type type);
 void		rpivid_buffer_release(rpivid_buffer* buffer);
 void		rpivid_power_off(rpivid_device* device);
+
+// pool.cpp
+status_t	rpivid_pool_init(rpivid_device* device);
+void		rpivid_pool_uninit(rpivid_device* device);
+status_t	rpivid_pool_alloc(rpivid_device* device, const char* name,
+				size_t size, uint32 memoryType, dma_memory& memory);
+void		rpivid_pool_free(rpivid_pool& pool, phys_addr_t physical);
 
 // lowmem.cpp
 size_t		rpivid_low_memory_report(char* data, size_t size);
