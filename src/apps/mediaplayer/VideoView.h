@@ -51,6 +51,7 @@ public:
 			void				SetFullscreen(bool fullScreen);
 			void				SetFullscreenControlsVisible(bool visible);
 			void				SetVideoFrame(const BRect& frame);
+			void				SetVideoColorEncoding(uint32 displayFlags);
 
 			void				SetSubTitle(const char* text);
 			void				SetSubTitleMaxBottom(float bottom);
@@ -67,6 +68,8 @@ private:
 			bool				fOverlayMode;
 			overlay_restrictions fOverlayRestrictions;
 			rgb_color			fOverlayKeyColor;
+			int32				fOverlayColorOptions;
+									// B_OVERLAY_YCbCr_*
 			bool				fIsPlaying;
 			bool				fIsFullscreen;
 			bool				fFullscreenControlsVisible;

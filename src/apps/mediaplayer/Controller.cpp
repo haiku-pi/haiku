@@ -330,6 +330,10 @@ Controller::SetTo(const PlaylistItemRef& item)
 	if (fVideoTrackSupplier != NULL) {
 		const media_format& format = fVideoTrackSupplier->Format();
 		preferredVideoFormat = format.u.raw_video.display.format;
+		if (fVideoView != NULL) {
+			fVideoView->SetVideoColorEncoding(
+				format.u.raw_video.display.flags);
+		}
 	}
 
 	uint32 enabledNodes;

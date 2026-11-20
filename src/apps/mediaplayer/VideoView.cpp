@@ -10,6 +10,7 @@
 
 #include <Application.h>
 #include <Bitmap.h>
+#include <MediaDefs.h>
 #include <Region.h>
 #include <Screen.h>
 #include <WindowScreen.h>
@@ -29,6 +30,7 @@ VideoView::VideoView(BRect frame, const char* name, uint32 resizeMask)
 		| B_PULSE_NEEDED),
 	fVideoFrame(Bounds()),
 	fOverlayMode(false),
+	fOverlayColorOptions(0),
 	fIsPlaying(false),
 	fIsFullscreen(false),
 	fFullscreenControlsVisible(false),
@@ -185,7 +187,8 @@ VideoView::SetBitmap(const BBitmap* bitmap)
 				rgb_color key;
 				status_t ret = SetViewOverlay(bitmap, bitmap->Bounds(),
 					fVideoFrame, &key, B_FOLLOW_ALL,
-					B_OVERLAY_FILTER_HORIZONTAL | B_OVERLAY_FILTER_VERTICAL);
+					B_OVERLAY_FILTER_HORIZONTAL | B_OVERLAY_FILTER_VERTICAL
+						| atomic_get(&fOverlayColorOptions));
 				if (ret == B_OK) {
 					fOverlayKeyColor = key;
 					SetLowColor(key);
@@ -211,7 +214,8 @@ VideoView::SetBitmap(const BBitmap* bitmap)
 				SetViewOverlay(bitmap, bitmap->Bounds(), fVideoFrame,
 					&key, B_FOLLOW_ALL, B_OVERLAY_FILTER_HORIZONTAL
 						| B_OVERLAY_FILTER_VERTICAL
-						| B_OVERLAY_TRANSFER_CHANNEL);
+						| B_OVERLAY_TRANSFER_CHANNEL
+						| atomic_get(&fOverlayColorOptions));
 			}
 		} else if (fOverlayMode
 			&& (bitmap->Flags() & B_BITMAP_WILL_OVERLAY) == 0) {
@@ -260,6 +264,30 @@ VideoView::OverlayScreenshotCleanup()
 {
 	// TODO: Do nothing if the current bitmap is in RGB color space
 	// and no overlay. Otherwise clean view area with overlay color.
+}
+
+
+/*!	The YCbCr encoding of the video's pixels (media_video_display_info's
+	B_YCbCr_* flags), for the overlay.
+*/
+void
+VideoView::SetVideoColorEncoding(uint32 displayFlags)
+{
+	int32 options = 0;
+	switch (displayFlags & B_YCbCr_MATRIX_MASK) {
+		case B_YCbCr_BT601:
+			options = B_OVERLAY_YCbCr_BT601;
+			break;
+		case B_YCbCr_BT709:
+			options = B_OVERLAY_YCbCr_BT709;
+			break;
+		case B_YCbCr_BT2020:
+			options = B_OVERLAY_YCbCr_BT2020;
+			break;
+	}
+	if ((displayFlags & B_YCbCr_FULL_RANGE) != 0)
+		options |= B_OVERLAY_YCbCr_FULL_RANGE;
+	atomic_set(&fOverlayColorOptions, options);
 }
 
 
