@@ -121,6 +121,12 @@ struct rpivid_pool {
 	struct extent {
 		size_t		offset;
 		size_t		size;
+		area_id		area;
+			// the picture's area (the driver's mapping)
+		bool		released;
+			// the picture is gone, but its area still has clones (a
+			// client's, app_server's, the display's): the memory may still
+			// be read or scanned out, so it is not handed out again yet
 	}				extents[kMaxPoolExtents];
 		// in use, by offset
 	uint32			count;
@@ -328,7 +334,8 @@ status_t	rpivid_pool_init(rpivid_device* device);
 void		rpivid_pool_uninit(rpivid_device* device);
 status_t	rpivid_pool_alloc(rpivid_device* device, const char* name,
 				size_t size, uint32 memoryType, dma_memory& memory);
-void		rpivid_pool_free(rpivid_pool& pool, phys_addr_t physical);
+void		rpivid_pool_release(rpivid_pool& pool, dma_memory& memory);
+uint32		rpivid_pool_released(rpivid_pool& pool);
 
 // lowmem.cpp
 size_t		rpivid_low_memory_report(char* data, size_t size);

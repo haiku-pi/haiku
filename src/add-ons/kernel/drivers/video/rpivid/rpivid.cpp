@@ -138,11 +138,10 @@ rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
 void
 rpivid_dma_free(dma_memory& memory)
 {
-	if (memory.area >= 0) {
+	if (memory.pool != NULL)
+		rpivid_pool_release(*memory.pool, memory);
+	else if (memory.area >= 0)
 		delete_area(memory.area);
-		if (memory.pool != NULL)
-			rpivid_pool_free(*memory.pool, memory.physical);
-	}
 	memory.area = -1;
 	memory.pool = NULL;
 	memory.address = NULL;
@@ -703,13 +702,15 @@ make_report(rpivid_file* file)
 	length = min_c(length, (int)kReportSize - 1);
 	{
 		rpivid_pool& pool = device->pool;
+		const uint32 released = rpivid_pool_released(pool);
 		MutexLocker poolLocker(pool.lock);
 		length += snprintf(report + length, kReportSize - length,
 			"scan-out pool: %" B_PRIuSIZE " KiB at %#" B_PRIxPHYSADDR ", %"
 			B_PRIuSIZE " KiB in %" B_PRIu32 " pictures, peak %" B_PRIuSIZE
-			" KiB, %" B_PRIu32 " did not fit\n", pool.size / 1024,
+			" KiB, %" B_PRIu32 " did not fit, %" B_PRIu32 " gone but still"
+			" cloned\n", pool.size / 1024,
 			pool.area >= 0 ? pool.physical : 0, pool.used / 1024, pool.count,
-			pool.peak / 1024, pool.misses);
+			pool.peak / 1024, pool.misses, released);
 		length = min_c(length, (int)kReportSize - 1);
 	}
 	file->report_length = length + rpivid_low_memory_report(report + length,
