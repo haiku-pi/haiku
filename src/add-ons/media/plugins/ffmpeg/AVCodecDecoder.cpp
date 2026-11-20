@@ -529,6 +529,8 @@ AVCodecDecoder::_FallBackToSoftwareDecoder(const char* reason)
 	printf("AVCodecDecoder: %s failed (%s): %s continues%s\n", fCodec->name,
 		reason, fSoftwareCodec->name, fromTheStart ? " from the start"
 			: " at the next key frame");
+	snprintf(fDecoderChoice, sizeof(fDecoderChoice), "%s failed: %s",
+		fCodec->name, reason);
 
 	fCodec = fSoftwareCodec;
 	fSoftwareCodec = NULL;
