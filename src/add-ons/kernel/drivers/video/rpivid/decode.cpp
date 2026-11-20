@@ -265,7 +265,8 @@ static bool
 same_geometry(const rpivid_buffer* a, const rpivid_buffer* b)
 {
 	return a->width == b->width && a->height == b->height
-		&& a->bit_depth == b->bit_depth;
+		&& a->bit_depth == b->bit_depth
+		&& ((a->flags ^ b->flags) & RPIVID_PICTURE_SCAN_OUT) == 0;
 }
 
 
