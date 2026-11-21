@@ -974,8 +974,8 @@ ServerWindow::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 
 			int32 size;
 			if (fWindow.IsSet() && link.Read<int32>(&size) == B_OK) {
-				char buffer[size];
-				if (link.Read(buffer, size) == B_OK) {
+				BStackOrHeapArray<char, 512> buffer(size);
+				if (buffer.IsValid() && link.Read(buffer, size) == B_OK) {
 					BMessage settings;
 					if (settings.Unflatten(buffer, size) == B_OK)
 						fDesktop->SetWindowDecoratorSettings(
@@ -2311,9 +2311,9 @@ fDesktop->LockSingleWindow();
 			link.Read<int32>(&bufferSize);
 
 			if (bufferSize > 0) {
-				char* buffer = new (nothrow) char[bufferSize];
+				BStackOrHeapArray<char, 512> buffer(bufferSize);
 				BMessage dragMessage;
-				if (link.Read(buffer, bufferSize) == B_OK
+				if (buffer.IsValid() && link.Read(buffer, bufferSize) == B_OK
 					&& dragMessage.Unflatten(buffer, bufferSize) == B_OK) {
 						BReference<ServerBitmap> bitmap(
 							fServerApp->GetBitmap(bitmapToken), true);
@@ -2323,7 +2323,6 @@ fDesktop->UnlockSingleWindow();
 							bitmap, offset);
 fDesktop->LockSingleWindow();
 				}
-				delete[] buffer;
 			}
 			// sync the client (it can now delete the bitmap)
 			fLink.StartMessage(B_OK);
@@ -2345,9 +2344,9 @@ fDesktop->LockSingleWindow();
 			link.Read<int32>(&bufferSize);
 
 			if (bufferSize > 0) {
-				char* buffer = new (nothrow) char[bufferSize];
+				BStackOrHeapArray<char, 512> buffer(bufferSize);
 				BMessage dragMessage;
-				if (link.Read(buffer, bufferSize) == B_OK
+				if (buffer.IsValid() && link.Read(buffer, bufferSize) == B_OK
 					&& dragMessage.Unflatten(buffer, bufferSize) == B_OK) {
 						// TODO: possible deadlock
 fDesktop->UnlockSingleWindow();
@@ -2355,7 +2354,6 @@ fDesktop->UnlockSingleWindow();
 							NULL /* should be dragRect */, offset);
 fDesktop->LockSingleWindow();
 				}
-				delete[] buffer;
 			}
 			break;
 		}

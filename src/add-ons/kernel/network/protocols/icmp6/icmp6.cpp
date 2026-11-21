@@ -53,6 +53,7 @@ icmp6_to_net_error(uint8 type, uint8 code)
 				case ICMP6_DST_UNREACH_ADMIN:
 					return B_NET_ERROR_UNREACH_HOST_PROHIBITED;
 				case ICMP6_DST_UNREACH_BEYONDSCOPE:
+					return B_NET_ERROR_UNREACH_BEYONDSCOPE;
 				case ICMP6_DST_UNREACH_ADDR:
 					return B_NET_ERROR_UNREACH_HOST;
 				case ICMP6_DST_UNREACH_NOPORT:
@@ -102,6 +103,10 @@ net_error_to_icmp6(net_error error, uint8& type, uint8& code)
 		case B_NET_ERROR_UNREACH_FILTER_PROHIBITED:
 			type = ICMP6_DST_UNREACH;
 			code = ICMP6_DST_UNREACH_ADMIN;
+			return true;
+		case B_NET_ERROR_UNREACH_BEYONDSCOPE:
+			type = ICMP6_DST_UNREACH;
+			code = ICMP6_DST_UNREACH_BEYONDSCOPE;
 			return true;
 		case B_NET_ERROR_MESSAGE_SIZE:
 			type = ICMP6_PACKET_TOO_BIG;

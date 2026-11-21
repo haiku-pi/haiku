@@ -177,7 +177,7 @@ compat_send(void *cookie, net_buffer *buffer)
 		if (mb == NULL)
 			return ENOBUFS;
 	} else {
-		mb = m_get2(length, 0, MT_DATA, M_PKTHDR);
+		mb = m_get3(length, 0, MT_DATA, M_PKTHDR);
 		if (mb == NULL)
 			return E2BIG;
 
@@ -186,13 +186,13 @@ compat_send(void *cookie, net_buffer *buffer)
 
 	status_t status = gBufferModule->read(buffer, 0, mtod(mb, void *), length);
 	if (status != B_OK) {
-		m_freem(mb);
+		m_free(mb);
 		return status;
 	}
 	mb->m_pkthdr.len = mb->m_len = length;
 
 	if ((ifp->flags & DEVICE_CLOSED) != 0) {
-		m_freem(mb);
+		m_free(mb);
 		return B_INTERRUPTED;
 	}
 
