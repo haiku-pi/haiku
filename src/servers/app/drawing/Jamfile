@@ -28,6 +28,7 @@ StaticLibrary libasdrawing.a :
 	PatternHandler.cpp
 	Overlay.cpp
 	OverlayKeying.cpp
+	OverlayReadBack.cpp
 
 	BitmapHWInterface.cpp
 	BBitmapBuffer.cpp

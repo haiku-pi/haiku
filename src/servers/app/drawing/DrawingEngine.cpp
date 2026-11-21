@@ -10,10 +10,13 @@
 
 #include "DrawingEngine.h"
 
+#include <AutoDeleter.h>
 #include <Bitmap.h>
 #include <StackOrHeapArray.h>
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <algorithm>
 #include <stack>
@@ -1476,10 +1479,38 @@ DrawingEngine::ReadBitmap(ServerBitmap* bitmap, bool drawCursor, BRect bounds)
 	bounds = bounds & clip;
 	AutoFloatingOverlaysHider _(fGraphicsCard, bounds);
 
-	status_t result = bitmap->ImportBits(buffer->Bits(), buffer->BitsLength(),
-		buffer->BytesPerRow(), buffer->ColorSpace(),
-		bounds.LeftTop(), BPoint(0, 0),
-		bounds.IntegerWidth() + 1, bounds.IntegerHeight() + 1);
+	const void* bits = buffer->Bits();
+	size_t bitsLength = buffer->BitsLength();
+	int32 bytesPerRow = buffer->BytesPerRow();
+	BPoint origin = bounds.LeftTop();
+	const int32 width = bounds.IntegerWidth() + 1;
+	const int32 height = bounds.IntegerHeight() + 1;
+
+	// The display composes what overlays show into the picture on its way
+	// out; the frame buffer holds only their key. Read back what is shown.
+	MemoryDeleter composed;
+	if ((buffer->ColorSpace() == B_RGB32 || buffer->ColorSpace() == B_RGBA32)
+		&& width > 0 && height > 0 && fGraphicsCard->ShowsOverlays()) {
+		composed.SetTo(malloc((size_t)width * height * 4));
+		if (composed.IsSet()) {
+			const int32 left = (int32)bounds.left;
+			const int32 top = (int32)bounds.top;
+			for (int32 y = 0; y < height; y++) {
+				memcpy((uint8*)composed.Get() + (size_t)y * width * 4,
+					(const uint8*)bits + (size_t)(top + y) * bytesPerRow
+						+ left * 4, (size_t)width * 4);
+			}
+			fGraphicsCard->ReadBackOverlays((uint32*)composed.Get(),
+				width * 4, left, top, width, height);
+			bits = composed.Get();
+			bitsLength = (size_t)width * height * 4;
+			bytesPerRow = width * 4;
+			origin = BPoint(0, 0);
+		}
+	}
+
+	status_t result = bitmap->ImportBits(bits, bitsLength, bytesPerRow,
+		buffer->ColorSpace(), origin, BPoint(0, 0), width, height);
 
 	if (drawCursor) {
 		ServerCursorReference cursorRef = fGraphicsCard->Cursor();

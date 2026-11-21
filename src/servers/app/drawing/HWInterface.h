@@ -24,6 +24,7 @@
 #include "IntRect.h"
 #include "MultiLocker.h"
 #include "OverlayKeying.h"
+#include "OverlayReadBack.h"
 #include "ServerCursor.h"
 
 
@@ -140,6 +141,12 @@ public:
 	virtual status_t			ConfigureOverlay(Overlay* overlay);
 	virtual void				HideOverlay(Overlay* overlay);
 
+	// reading back what overlays show (screenshots)
+			bool				ShowsOverlays();
+			void				ReadBackOverlays(uint32* pixels,
+									int32 bytesPerRow, int32 left, int32 top,
+									int32 width, int32 height);
+
 	// frame buffer access (you need to ReadLock!)
 			RenderingBuffer*	DrawingBuffer() const;
 	virtual	RenderingBuffer*	FrontBuffer() const = 0;
@@ -216,6 +223,13 @@ protected:
 									int32 width, const overlay_key_rect* keys,
 									int32 keyCount) const;
 
+	// the overlays shown, for ReadBackOverlays(); the caller holds
+	// fOverlayChangeLock
+			void				_OverlayShown(const Overlay* overlay);
+			void				_OverlayHidden(overlay_token token);
+			void				_OverlayBufferFreed(
+									const overlay_buffer* buffer);
+
 	static	bool				_IsValidMode(const display_mode& mode);
 
 			// If we draw the cursor somewhere in the drawing buffer,
@@ -269,6 +283,12 @@ protected:
 			int32				fOverlayKeyCount;
 			bigtime_t			fOverlayKeyingEnd;
 				// with no overlay left, keying stays on until then
+			struct shown_overlay {
+				overlay_token		token;
+				overlay_read_back	read_back;
+			}					fShownOverlays[kMaxOverlayKeys];
+				// in the order they were first shown
+			int32				fShownOverlayCount;
 
 			ServerCursorReference
 								fCursor;

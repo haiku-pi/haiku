@@ -1122,6 +1122,7 @@ AccelerantHWInterface::ReleaseOverlayChannel(overlay_token token)
 	fAccReleaseOverlay(token);
 		// hides the overlay
 	_HideOverlayKey(token);
+	_OverlayHidden(token);
 }
 
 
@@ -1212,6 +1213,8 @@ AccelerantHWInterface::FreeOverlayBuffer(const overlay_buffer* buffer)
 	if (buffer == NULL || fAccReleaseOverlayBuffer == NULL)
 		return;
 
+	BAutolock _(fOverlayChangeLock);
+	_OverlayBufferFreed(buffer);
 	fAccReleaseOverlayBuffer(buffer);
 }
 
@@ -1255,8 +1258,11 @@ AccelerantHWInterface::_ConfigureOverlay(Overlay* overlay, bool exclusive,
 	status = fAccConfigureOverlay(overlay->OverlayToken(),
 		overlay->OverlayBuffer(), overlay->OverlayWindow(),
 		overlay->OverlayView());
-	if (status != B_OK)
+	if (status != B_OK) {
 		_HideOverlayKey(overlay->OverlayToken());
+		_OverlayHidden(overlay->OverlayToken());
+	} else
+		_OverlayShown(overlay);
 	return true;
 }
 
@@ -1271,6 +1277,7 @@ AccelerantHWInterface::HideOverlay(Overlay* overlay)
 			NULL, NULL);
 	}
 	_HideOverlayKey(overlay->OverlayToken());
+	_OverlayHidden(overlay->OverlayToken());
 }
 
 

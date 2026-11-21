@@ -21,6 +21,7 @@
 #include "drawing_support.h"
 
 #include "DrawingEngine.h"
+#include "Overlay.h"
 #include "RenderingBuffer.h"
 #include "SystemPalette.h"
 
@@ -50,6 +51,7 @@ HWInterface::HWInterface()
 	fOverlayKeysLock("overlay keys lock"),
 	fOverlayKeyCount(0),
 	fOverlayKeyingEnd(0),
+	fShownOverlayCount(0),
 	fCursor(NULL),
 	fDragBitmap(NULL),
 	fDragBitmapOffset(0, 0),
@@ -700,6 +702,96 @@ HWInterface::_WriteFrontRow(uint8* destination, const uint8* source, int32 x,
 	else {
 		write_keyed_row((uint32*)destination, (const uint32*)source, x, y,
 			width, keys, keyCount);
+	}
+}
+
+
+/*!	Whether an overlay is shown: a read-back of the front buffer has its
+	key where it shows (ReadBackOverlays()).
+*/
+bool
+HWInterface::ShowsOverlays()
+{
+	BAutolock _(fOverlayChangeLock);
+	return fShownOverlayCount > 0;
+}
+
+
+/*!	Draws what the overlays show into \a pixels, a read-back of the 32-bit
+	front buffer's rectangle \a left, \a top, \a width x \a height: the
+	display composes them into the picture on its way out, where the key
+	lets them show. Overlays shown later are drawn above earlier ones.
+	The caller holds the exclusive lock.
+*/
+void
+HWInterface::ReadBackOverlays(uint32* pixels, int32 bytesPerRow, int32 left,
+	int32 top, int32 width, int32 height)
+{
+	bool keyedByAlpha;
+	{
+		BAutolock _(fOverlayKeysLock);
+		keyedByAlpha = fOverlayKeyingSupported;
+	}
+
+	BAutolock _(fOverlayChangeLock);
+	for (int32 i = 0; i < fShownOverlayCount; i++) {
+		overlay_read_back readBack = fShownOverlays[i].read_back;
+		readBack.keyed_by_alpha = keyedByAlpha;
+		read_back_overlay(readBack, pixels, bytesPerRow, left, top, width,
+			height);
+	}
+}
+
+
+/*!	\a overlay is shown now: its token, buffer, window and view. */
+void
+HWInterface::_OverlayShown(const Overlay* overlay)
+{
+	overlay_token token = overlay->OverlayToken();
+	int32 index = 0;
+	while (index < fShownOverlayCount && fShownOverlays[index].token != token)
+		index++;
+	if (index == fShownOverlayCount) {
+		if (fShownOverlayCount == kMaxOverlayKeys)
+			return;
+		fShownOverlayCount++;
+	}
+
+	shown_overlay& entry = fShownOverlays[index];
+	entry.token = token;
+	entry.read_back.buffer = overlay->OverlayBuffer();
+	entry.read_back.view = *overlay->OverlayView();
+	entry.read_back.window = *overlay->OverlayWindow();
+	entry.read_back.keyed_by_alpha = false;
+}
+
+
+/*!	The overlay channel \a token is hidden or released. */
+void
+HWInterface::_OverlayHidden(overlay_token token)
+{
+	for (int32 i = 0; i < fShownOverlayCount; i++) {
+		if (fShownOverlays[i].token == token) {
+			memmove(&fShownOverlays[i], &fShownOverlays[i + 1],
+				(fShownOverlayCount - i - 1) * sizeof(shown_overlay));
+			fShownOverlayCount--;
+			return;
+		}
+	}
+}
+
+
+/*!	\a buffer goes (a mode change suspends overlays by freeing their buffers,
+	the channel stays): an overlay showing it is no longer read back.
+*/
+void
+HWInterface::_OverlayBufferFreed(const overlay_buffer* buffer)
+{
+	for (int32 i = 0; i < fShownOverlayCount;) {
+		if (fShownOverlays[i].read_back.buffer == buffer)
+			_OverlayHidden(fShownOverlays[i].token);
+		else
+			i++;
 	}
 }
 
