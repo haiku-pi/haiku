@@ -607,6 +607,7 @@ MainWin::MessageReceived(BMessage* msg)
 
 				case 9:
 					PostMessage(M_TOGGLE_FULLSCREEN);
+					result = B_OK;
 					break;
 
 				case 10:
