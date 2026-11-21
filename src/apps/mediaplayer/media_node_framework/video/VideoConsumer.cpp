@@ -193,10 +193,12 @@ VideoConsumer::CreateBuffers(const media_format& format)
 	if (colorSpace == B_YUV420_SAND128 || colorSpace == B_YUV420_SAND128_10) {
 		// The frames stay in the decoder's memory and go on overlays as
 		// they are: only if an overlay of the space can be had now
-		// (otherwise the node manager falls back to another space)
+		// (otherwise the node manager falls back to another space). The
+		// probe is small: a buffer of the video's size would take memory
+		// below 1 GiB that the frames do not need (12 MB at 2160p).
 		if (!fTryOverlay)
 			return B_NOT_SUPPORTED;
-		BBitmap probe(BRect(0, 0, width - 1, height - 1),
+		BBitmap probe(BRect(0, 0, 127, 63),
 			B_BITMAP_WILL_OVERLAY | B_BITMAP_RESERVE_OVERLAY_CHANNEL,
 			colorSpace);
 		status = probe.InitCheck();

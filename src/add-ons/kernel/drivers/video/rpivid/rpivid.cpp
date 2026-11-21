@@ -11,7 +11,8 @@
 	decode.cpp, which runs the block's two phases as a pipeline in a thread of
 	its own); this driver owns the memory the block reads and writes, its
 	clock and its interrupt. It publishes /dev/video/rpivid/0; reading the
-	device returns the block's identification.
+	device returns the block's identification and a report of the memory
+	below 1 GiB, where the pictures the display shows must be (lowmem.cpp).
 
 	Nothing touches the block while the system boots: an MMIO access to the
 	block without its clock does not complete. The first open() switches the
@@ -46,6 +47,10 @@ static const char* kCompatible = "brcm,bcm2711-hevc-dec";
 
 // A bitstream buffer beyond this is not a picture's slices
 static const size_t kMaxBitstreamSize = 64 * 1024 * 1024;
+// what read() returns: the block's line and the low memory report
+static const size_t kReportSize = 16 * 1024;
+// the display keeps 30 address bits
+static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
 
 
 static device_manager_info* sDeviceManager;
@@ -66,13 +71,18 @@ rpivid_bus_address(rpivid_device* device, phys_addr_t physical)
 /*!	Contiguous memory the block reaches, cleared. \a memoryType is
 	B_WRITE_COMBINING_MEMORY or 0 (cached); \a highAddress, if not 0, a lower
 	limit than the block's.
+	Without one, the memory is taken above 1 GiB if it can be: a contiguous
+	allocation takes the lowest run that fits, and below 1 GiB is where the
+	display's buffers must be.
 */
 status_t
 rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
 	uint32 memoryType, dma_memory& memory, phys_addr_t highAddress)
 {
 	memory.area = -1;
+	memory.pool = NULL;
 	size = ROUNDUP(size, B_PAGE_SIZE);
+	const bool anywhere = highAddress == 0;
 	if (highAddress == 0 || highAddress > device->dma_end)
 		highAddress = device->dma_end;
 
@@ -80,11 +90,19 @@ rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
 	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
 	physical_address_restrictions physicalRestrictions = {};
 	physicalRestrictions.high_address = highAddress;
+	if (anywhere && highAddress > kScanOutLimit + size)
+		physicalRestrictions.low_address = kScanOutLimit;
 
 	void* address;
 	area_id area = create_area_etc(B_SYSTEM_TEAM, name, size, B_CONTIGUOUS,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0, &virtualRestrictions,
 		&physicalRestrictions, &address);
+	if (area < 0 && physicalRestrictions.low_address != 0) {
+		physicalRestrictions.low_address = 0;
+		area = create_area_etc(B_SYSTEM_TEAM, name, size, B_CONTIGUOUS,
+			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, 0, 0,
+			&virtualRestrictions, &physicalRestrictions, &address);
+	}
 	if (area < 0)
 		return area;
 
@@ -120,9 +138,12 @@ rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
 void
 rpivid_dma_free(dma_memory& memory)
 {
-	if (memory.area >= 0)
+	if (memory.pool != NULL)
+		rpivid_pool_release(*memory.pool, memory);
+	else if (memory.area >= 0)
 		delete_area(memory.area);
 	memory.area = -1;
+	memory.pool = NULL;
 	memory.address = NULL;
 	memory.size = 0;
 }
@@ -343,9 +364,23 @@ create_picture(rpivid_file* file, rpivid_create_picture* args)
 	const bool scanOut = (args->flags & RPIVID_PICTURE_SCAN_OUT) != 0;
 	const uint32 memoryType = (args->flags & RPIVID_PICTURE_UNCACHED) != 0
 		? B_WRITE_COMBINING_MEMORY : 0;
-	status_t status = rpivid_dma_alloc(device, "rpivid picture",
-		picture->memory.size, memoryType, picture->memory,
-		scanOut ? (phys_addr_t)1 << 30 : 0);
+	status_t status;
+	if (scanOut) {
+		status = rpivid_pool_alloc(device, "rpivid picture",
+			picture->memory.size, memoryType, picture->memory);
+		if (status != B_OK) {
+			status = rpivid_dma_alloc(device, "rpivid picture",
+				picture->memory.size, memoryType, picture->memory,
+				kScanOutLimit);
+		}
+	} else {
+		status = rpivid_dma_alloc(device, "rpivid picture",
+			picture->memory.size, memoryType, picture->memory);
+	}
+	if (status != B_OK && scanOut) {
+		TRACE_ALWAYS("no %" B_PRIuSIZE " KiB for a scan-out picture below"
+			" 1 GiB: %s\n", picture->memory.size / 1024, strerror(status));
+	}
 	void* address = NULL;
 	if (status == B_OK) {
 		status = map_into_client(picture,
@@ -627,6 +662,7 @@ rpivid_free(void* cookie)
 			rpivid_buffer_release(file->buffers[i]);
 	}
 	free(file->buffers);
+	free(file->report);
 	free(file);
 
 	if (--device->open_count == 0 && !device->broken) {
@@ -637,14 +673,21 @@ rpivid_free(void* cookie)
 }
 
 
+/*!	The block's line and the low memory report (lowmem.cpp), made when a
+	read starts at offset 0, so that a reader in pieces sees one report.
+*/
 static status_t
-rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
+make_report(rpivid_file* file)
 {
-	rpivid_device* device = ((rpivid_file*)cookie)->device;
+	rpivid_device* device = file->device;
+	free(file->report);
+	file->report_length = 0;
+	char* report = file->report = (char*)malloc(kReportSize);
+	if (report == NULL)
+		return B_NO_MEMORY;
 
-	char report[320];
 	MutexLocker locker(device->lock);
-	int length = snprintf(report, sizeof(report),
+	int length = snprintf(report, kReportSize,
 		"rpivid: version %#" B_PRIx32 ", clock %" B_PRIu32 " MHz (id %" B_PRIu32
 		"), registers %#" B_PRIxPHYSADDR "/%#" B_PRIxPHYSADDR ", interrupt %"
 		B_PRIu64 " (%" B_PRIu32 " taken), DMA below %#" B_PRIxPHYSADDR
@@ -656,14 +699,42 @@ rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
 		device->overlaps,
 		device->broken ? ", BROKEN (stopped responding)" : "");
 	locker.Unlock();
-	length = min_c(length, (int)sizeof(report) - 1);
+	length = min_c(length, (int)kReportSize - 1);
+	{
+		rpivid_pool& pool = device->pool;
+		const uint32 released = rpivid_pool_released(pool);
+		MutexLocker poolLocker(pool.lock);
+		length += snprintf(report + length, kReportSize - length,
+			"scan-out pool: %" B_PRIuSIZE " KiB at %#" B_PRIxPHYSADDR ", %"
+			B_PRIuSIZE " KiB in %" B_PRIu32 " pictures, peak %" B_PRIuSIZE
+			" KiB, %" B_PRIu32 " did not fit, %" B_PRIu32 " gone but still"
+			" cloned\n", pool.size / 1024,
+			pool.area >= 0 ? pool.physical : 0, pool.used / 1024, pool.count,
+			pool.peak / 1024, pool.misses, released);
+		length = min_c(length, (int)kReportSize - 1);
+	}
+	file->report_length = length + rpivid_low_memory_report(report + length,
+		kReportSize - length);
+	return B_OK;
+}
 
-	if (position >= length) {
+
+static status_t
+rpivid_read(void* cookie, off_t position, void* buffer, size_t* _length)
+{
+	rpivid_file* file = (rpivid_file*)cookie;
+	if (position == 0 || file->report == NULL) {
+		status_t status = make_report(file);
+		if (status != B_OK)
+			return status;
+	}
+
+	if (position >= (off_t)file->report_length) {
 		*_length = 0;
 		return B_OK;
 	}
-	size_t count = min_c(*_length, (size_t)(length - position));
-	if (user_memcpy(buffer, report + position, count) != B_OK)
+	size_t count = min_c(*_length, (size_t)(file->report_length - position));
+	if (user_memcpy(buffer, file->report + position, count) != B_OK)
 		return B_BAD_ADDRESS;
 	*_length = count;
 	return B_OK;
@@ -883,6 +954,9 @@ rpivid_init_driver(device_node* node, void** _driverCookie)
 	}
 	resume_thread(device->thread);
 
+	// while the memory below 1 GiB is still in one piece
+	rpivid_pool_init(device);
+
 	TRACE_ALWAYS("block %#" B_PRIxPHYSADDR ", interrupts %#" B_PRIxPHYSADDR
 		", interrupt %" B_PRIu64 ", clock %" B_PRIu32 ", DMA offset %" B_PRId64
 		" below %#" B_PRIxPHYSADDR "\n", device->block_physical,
@@ -914,6 +988,7 @@ rpivid_uninit_driver(void* driverCookie)
 	}
 	mutex_destroy(&device->lock);
 	delete_sem(device->irq_sem);
+	rpivid_pool_uninit(device);
 	free(device);
 }
 

@@ -5,5 +5,7 @@ UsePrivateHeaders drivers ;
 
 KernelAddon rpivid :
 	decode.cpp
+	lowmem.cpp
+	pool.cpp
 	rpivid.cpp
 	;
