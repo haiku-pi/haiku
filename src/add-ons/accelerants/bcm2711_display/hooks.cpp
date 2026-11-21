@@ -81,6 +81,8 @@ get_accelerant_hook(uint32 feature, void* data)
 			return (void*)bcm2711_release_overlay;
 		case B_CONFIGURE_OVERLAY:
 			return (void*)bcm2711_configure_overlay;
+		case B_IMPORT_OVERLAY_BUFFER:
+			return (void*)bcm2711_import_overlay_buffer;
 	}
 
 	return NULL;

@@ -283,7 +283,8 @@ block_write(rpivid_device* device, uint32 offset, uint32 value)
 
 // rpivid.cpp
 status_t	rpivid_dma_alloc(rpivid_device* device, const char* name,
-				size_t size, uint32 memoryType, dma_memory& memory);
+				size_t size, uint32 memoryType, dma_memory& memory,
+				phys_addr_t highAddress = 0);
 void		rpivid_dma_free(dma_memory& memory);
 uint32		rpivid_bus_address(rpivid_device* device, phys_addr_t physical);
 rpivid_buffer* rpivid_buffer_lookup(rpivid_file* file, uint32 handle,

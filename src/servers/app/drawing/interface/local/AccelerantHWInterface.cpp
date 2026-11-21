@@ -128,6 +128,7 @@ AccelerantHWInterface::AccelerantHWInterface()
 	fAccAllocateOverlay(NULL),
 	fAccReleaseOverlay(NULL),
 	fAccConfigureOverlay(NULL),
+	fAccImportOverlayBuffer(NULL),
 
 	fModeCount(0),
 	fModeList(NULL),
@@ -422,6 +423,8 @@ AccelerantHWInterface::_UpdateHooksAfterModeChange()
 		= (release_overlay)fAccelerantHook(B_RELEASE_OVERLAY, NULL);
 	fAccConfigureOverlay
 		= (configure_overlay)fAccelerantHook(B_CONFIGURE_OVERLAY, NULL);
+	fAccImportOverlayBuffer = (import_overlay_buffer)fAccelerantHook(
+		B_IMPORT_OVERLAY_BUFFER, NULL);
 
 	// an accelerant whose overlays are keyed by the alpha of the frame
 	// buffer's pixels needs every front buffer write opaque while one is
@@ -1188,6 +1191,18 @@ AccelerantHWInterface::AllocateOverlayBuffer(int32 width, int32 height,
 		return NULL;
 
 	return fAccAllocateOverlayBuffer(space, width, height);
+}
+
+
+const overlay_buffer*
+AccelerantHWInterface::ImportOverlayBuffer(int32 width, int32 height,
+	color_space space, int32 bytesPerRow, area_id area, size_t offset)
+{
+	if (fAccImportOverlayBuffer == NULL || bytesPerRow < 0)
+		return NULL;
+
+	return fAccImportOverlayBuffer(space, width, height, bytesPerRow, area,
+		offset);
 }
 
 

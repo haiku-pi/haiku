@@ -857,8 +857,9 @@ ServerApp::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
 			if (link.Read<size_t>(&areaOffset) == B_OK) {
 				// TODO: choose the right HWInterface with regards to the
 				// screenID
-				bitmap.SetTo(gBitmapManager->CloneFromClient(clientArea, areaOffset,
-					frame, colorSpace, flags, bytesPerRow), true);
+				bitmap.SetTo(gBitmapManager->CloneFromClient(
+					*fDesktop->HWInterface(), clientArea, areaOffset, frame,
+					colorSpace, flags, bytesPerRow), true);
 			}
 
 			if (bitmap != NULL && _AddBitmap(bitmap)) {

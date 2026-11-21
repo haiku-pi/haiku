@@ -64,19 +64,22 @@ rpivid_bus_address(rpivid_device* device, phys_addr_t physical)
 
 
 /*!	Contiguous memory the block reaches, cleared. \a memoryType is
-	B_WRITE_COMBINING_MEMORY or 0 (cached).
+	B_WRITE_COMBINING_MEMORY or 0 (cached); \a highAddress, if not 0, a lower
+	limit than the block's.
 */
 status_t
 rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
-	uint32 memoryType, dma_memory& memory)
+	uint32 memoryType, dma_memory& memory, phys_addr_t highAddress)
 {
 	memory.area = -1;
 	size = ROUNDUP(size, B_PAGE_SIZE);
+	if (highAddress == 0 || highAddress > device->dma_end)
+		highAddress = device->dma_end;
 
 	virtual_address_restrictions virtualRestrictions = {};
 	virtualRestrictions.address_specification = B_ANY_KERNEL_ADDRESS;
 	physical_address_restrictions physicalRestrictions = {};
-	physicalRestrictions.high_address = device->dma_end;
+	physicalRestrictions.high_address = highAddress;
 
 	void* address;
 	area_id area = create_area_etc(B_SYSTEM_TEAM, name, size, B_CONTIGUOUS,
@@ -99,7 +102,7 @@ rpivid_dma_alloc(rpivid_device* device, const char* name, size_t size,
 		if (memoryType != 0)
 			status = vm_set_area_memory_type(area, entry.address, memoryType);
 	}
-	if (status == B_OK && entry.address + size > device->dma_end)
+	if (status == B_OK && entry.address + size > highAddress)
 		status = B_NO_MEMORY;
 	if (status != B_OK) {
 		delete_area(area);
@@ -231,6 +234,8 @@ handle_alloc(rpivid_file* file, rpivid_buffer* buffer, uint32* _handle)
 	half of it of interleaved chroma. 8 bit: 128 samples per column; 10 bit:
 	96 (three in each 32-bit word). Then the collocated motion vectors, as
 	Linux sizes them.
+	RPIVID_PICTURE_SCAN_OUT: the chroma rows follow the luma rows in each
+	column (one column stride for both: the display has one).
 */
 static void
 picture_geometry(rpivid_buffer* picture)
@@ -243,14 +248,23 @@ picture_geometry(rpivid_buffer* picture)
 		columnBytes = ROUNDUP((picture->width + 2) / 3, 32) * 4;
 
 	picture->columns = columnBytes / 128;
-	picture->luma_stride = height16 * 128;
-	picture->chroma_stride = picture->luma_stride / 2;
+	if ((picture->flags & RPIVID_PICTURE_SCAN_OUT) != 0) {
+		picture->luma_stride = height16 * 3 / 2 * 128;
+		picture->chroma_stride = picture->luma_stride;
+		picture->chroma_offset = height16 * 128;
+		picture->planes_size = (size_t)picture->luma_stride
+			* picture->columns;
+	} else {
+		picture->luma_stride = height16 * 128;
+		picture->chroma_stride = picture->luma_stride / 2;
 
-	const size_t lumaSize = (size_t)picture->luma_stride * picture->columns;
-	const size_t chromaSize = (size_t)picture->chroma_stride
-		* picture->columns;
-	picture->chroma_offset = ROUNDUP(lumaSize, B_PAGE_SIZE);
-	picture->planes_size = picture->chroma_offset + chromaSize;
+		const size_t lumaSize = (size_t)picture->luma_stride
+			* picture->columns;
+		const size_t chromaSize = (size_t)picture->chroma_stride
+			* picture->columns;
+		picture->chroma_offset = ROUNDUP(lumaSize, B_PAGE_SIZE);
+		picture->planes_size = picture->chroma_offset + chromaSize;
+	}
 
 	picture->mv_stride = ROUNDUP(picture->width, 64);
 	const size_t mvSize = (size_t)picture->mv_stride
@@ -306,7 +320,7 @@ create_picture(rpivid_file* file, rpivid_create_picture* args)
 	if (args->width < 32 || args->width > 4096 || args->height < 32
 		|| args->height > 4096 || (args->bit_depth != 8 && args->bit_depth != 10)
 		|| (args->flags & ~(uint32)(RPIVID_PICTURE_MOTION_VECTORS
-			| RPIVID_PICTURE_UNCACHED)) != 0) {
+			| RPIVID_PICTURE_UNCACHED | RPIVID_PICTURE_SCAN_OUT)) != 0) {
 		return B_BAD_VALUE;
 	}
 
@@ -323,13 +337,21 @@ create_picture(rpivid_file* file, rpivid_create_picture* args)
 
 	// The CPU only reads pictures: cached unless asked otherwise, and the
 	// driver drops the CPU's lines after each decode into one.
+	// A picture to scan out lies where the display reaches (it keeps 30
+	// address bits), and others may clone its mapping (app_server, to show
+	// it): the client still only reads it.
+	const bool scanOut = (args->flags & RPIVID_PICTURE_SCAN_OUT) != 0;
 	const uint32 memoryType = (args->flags & RPIVID_PICTURE_UNCACHED) != 0
 		? B_WRITE_COMBINING_MEMORY : 0;
 	status_t status = rpivid_dma_alloc(device, "rpivid picture",
-		picture->memory.size, memoryType, picture->memory);
+		picture->memory.size, memoryType, picture->memory,
+		scanOut ? (phys_addr_t)1 << 30 : 0);
 	void* address = NULL;
-	if (status == B_OK)
-		status = map_into_client(picture, B_READ_AREA, memoryType, &address);
+	if (status == B_OK) {
+		status = map_into_client(picture,
+			B_READ_AREA | (scanOut ? B_CLONEABLE_AREA : 0), memoryType,
+			&address);
+	}
 	MutexLocker locker(device->lock);
 	uint32 handle = 0;
 	if (status == B_OK)

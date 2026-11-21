@@ -94,7 +94,8 @@ public:
 								ClonedAreaMemory();
 	virtual						~ClonedAreaMemory();
 
-			void*				Clone(area_id area, size_t offset);
+			void*				Clone(area_id area, size_t offset,
+									bool readOnly = false);
 
 	virtual area_id				Area();
 	virtual uint8*				Address();

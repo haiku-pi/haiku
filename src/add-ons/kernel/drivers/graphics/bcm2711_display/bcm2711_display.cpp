@@ -36,6 +36,7 @@
 #include <kernel.h>
 #include <team.h>
 #include <vm/vm.h>
+#include <vm/VMAddressSpace.h>
 
 extern "C" {
 #include <libfdt.h>
@@ -92,6 +93,7 @@ static const phys_addr_t kScanOutLimit = (phys_addr_t)1 << 30;
 // device is opened (the "overlay_reserve" setting), and at most in all
 static const uint32 kDefaultOverlayReserve = 4;
 static const uint32 kMaxOverlayBuffers = 32;
+static const uint32 kMaxImportedBuffers = 64;
 static const size_t kMaxOverlayBufferSize = 64 * 1024 * 1024;
 
 // a plane update within this time before the predicted vertical blank may
@@ -184,6 +186,14 @@ struct display_info {
 			// allocated when the device was opened
 		bool		in_use;
 	} overlay_buffers[kMaxOverlayBuffers];
+
+	// memory of app_server's clients shown as it is (a decoder's pictures):
+	// a kernel clone of the caller's area keeps it
+	struct imported_memory {
+		area_id		area;		// the clone; < 0: unused slot
+		phys_addr_t	physical;	// of the buffer
+		size_t		size;
+	} imported_buffers[kMaxImportedBuffers];
 
 	struct overlay_plane {
 		bool		visible;
@@ -868,18 +878,93 @@ allocate_overlay_buffer(display_info& info,
 }
 
 
-static display_info::overlay_memory*
-find_overlay_buffer(display_info& info, phys_addr_t physical, size_t size)
+/*!	Whether \a size bytes at \a physical lie in a buffer handed out or
+	imported.
+*/
+static bool
+is_overlay_buffer(display_info& info, phys_addr_t physical, size_t size)
 {
 	for (uint32 i = 0; i < kMaxOverlayBuffers; i++) {
 		display_info::overlay_memory& buffer = info.overlay_buffers[i];
 		if (buffer.area >= 0 && buffer.in_use && physical >= buffer.physical
 			&& physical - buffer.physical <= buffer.size
 			&& size <= buffer.size - (physical - buffer.physical)) {
-			return &buffer;
+			return true;
 		}
 	}
-	return NULL;
+	for (uint32 i = 0; i < kMaxImportedBuffers; i++) {
+		display_info::imported_memory& buffer = info.imported_buffers[i];
+		if (buffer.area >= 0 && physical >= buffer.physical
+			&& physical - buffer.physical <= buffer.size
+			&& size <= buffer.size - (physical - buffer.physical)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+
+/*!	Accepts memory of the calling team as an overlay buffer: its pages must be
+	contiguous (and stay: the area is locked) and below kScanOutLimit. A
+	kernel clone of the area keeps them while the buffer is imported.
+*/
+static status_t
+import_overlay_buffer(display_info& info,
+	bcm2711_display_import_overlay_buffer& request)
+{
+	if (info.shared_info->overlay_planes == 0)
+		return B_NOT_SUPPORTED;
+
+	area_info areaInfo;
+	status_t status = get_area_info(request.area, &areaInfo);
+	if (status != B_OK)
+		return status;
+	if (areaInfo.team != team_get_current_team_id()
+		|| (areaInfo.lock != B_FULL_LOCK && areaInfo.lock != B_CONTIGUOUS)
+		|| request.size == 0 || request.size > kMaxOverlayBufferSize
+		|| request.offset > areaInfo.size
+		|| request.size > areaInfo.size - request.offset) {
+		return B_BAD_VALUE;
+	}
+
+	display_info::imported_memory* slot = NULL;
+	for (uint32 i = 0; i < kMaxImportedBuffers; i++) {
+		if (info.imported_buffers[i].area < 0) {
+			slot = &info.imported_buffers[i];
+			break;
+		}
+	}
+	if (slot == NULL)
+		return B_NO_MEMORY;
+
+	void* address;
+	area_id clone = vm_clone_area(VMAddressSpace::KernelID(),
+		"bcm2711 display imported overlay buffer", &address,
+		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA, REGION_NO_PRIVATE_MAP,
+		request.area, true);
+	if (clone < 0)
+		return clone;
+
+	// one physical run, where the display reaches
+	physical_entry entries[2];
+	uint32 count = 2;
+	status = get_memory_map_etc(B_SYSTEM_TEAM,
+		(uint8*)address + request.offset, request.size, entries, &count);
+	if (status == B_OK && (count != 1 || entries[0].size < request.size
+			|| entries[0].address + request.size > kScanOutLimit)) {
+		status = B_BAD_VALUE;
+	}
+	if (status != B_OK) {
+		delete_area(clone);
+		return status;
+	}
+
+	slot->area = clone;
+	slot->physical = entries[0].address;
+	slot->size = request.size;
+	request.buffer = clone;
+	request.physical = entries[0].address;
+	return B_OK;
 }
 
 
@@ -977,10 +1062,13 @@ overlay_extent(const bcm2711_display_overlay& request)
 	const uint64 size = (uint64)request.bytes_per_row * request.height;
 	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV420)
 		return size + size / 2;
-	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV) {
+	if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV
+		|| request.image_type == BCM2711_DISPLAY_IMAGE_YUV10COL) {
 		// columns of the column height (bytes_per_row lines) of luma, the
 		// chroma (half of it) at chroma_offset: in the same columns or not
-		const uint64 columns = (request.width + 127) / 128;
+		const uint64 columns
+			= request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV
+				? (request.width + 127) / 128 : (request.width + 95) / 96;
 		const uint64 luma = columns * 128 * request.bytes_per_row;
 		return max_c(luma, request.chroma_offset + luma / 2);
 	}
@@ -1006,6 +1094,7 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 		case BCM2711_DISPLAY_IMAGE_XRGB8888:
 		case BCM2711_DISPLAY_IMAGE_YUV420:
 		case BCM2711_DISPLAY_IMAGE_YUV_UV:
+		case BCM2711_DISPLAY_IMAGE_YUV10COL:
 			break;
 		default:
 			return B_BAD_VALUE;
@@ -1025,7 +1114,7 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 	const uint64 extent = overlay_extent(request);
 	if (extent > kMaxOverlayBufferSize)
 		return B_BAD_VALUE;
-	if (find_overlay_buffer(info, request.physical, extent) == NULL)
+	if (!is_overlay_buffer(info, request.physical, extent))
 		return B_BAD_ADDRESS;
 
 	const uint32 index = request.plane - BCM2711_DISPLAY_FIRST_OVERLAY_PLANE;
@@ -1108,7 +1197,8 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 		plane.num_planes = 3;
 		plane.planes[1] = request.physical + lumaSize;
 		plane.planes[2] = plane.planes[1] + lumaSize / 4;
-	} else if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV) {
+	} else if (request.image_type == BCM2711_DISPLAY_IMAGE_YUV_UV
+		|| request.image_type == BCM2711_DISPLAY_IMAGE_YUV10COL) {
 		plane.num_planes = 2;
 		plane.planes[1] = request.physical + request.chroma_offset;
 	} else
@@ -1134,6 +1224,19 @@ set_overlay(display_info& info, const bcm2711_display_overlay& request)
 }
 
 
+static void
+hide_overlays_of(display_info& info, phys_addr_t physical, size_t size)
+{
+	for (uint32 j = 0; j < BCM2711_DISPLAY_OVERLAY_PLANES; j++) {
+		const display_info::overlay_plane& overlay = info.overlays[j];
+		if (overlay.visible && overlay.physical >= physical
+			&& overlay.physical < physical + size) {
+			hide_overlay(info, j + BCM2711_DISPLAY_FIRST_OVERLAY_PLANE);
+		}
+	}
+}
+
+
 static status_t
 free_overlay_buffer(display_info& info, area_id area)
 {
@@ -1143,18 +1246,22 @@ free_overlay_buffer(display_info& info, area_id area)
 			continue;
 
 		// never scan out what is freed
-		for (uint32 j = 0; j < BCM2711_DISPLAY_OVERLAY_PLANES; j++) {
-			const display_info::overlay_plane& overlay = info.overlays[j];
-			if (overlay.visible && overlay.physical >= buffer.physical
-				&& overlay.physical < buffer.physical + buffer.size) {
-				hide_overlay(info, j + BCM2711_DISPLAY_FIRST_OVERLAY_PLANE);
-			}
-		}
+		hide_overlays_of(info, buffer.physical, buffer.size);
 
 		// The memory stays (for the next request) while the device is open:
 		// the GPU may have imported it, and the GPU driver's import keeps
 		// no pages of a physical mapping alive.
 		buffer.in_use = false;
+		return B_OK;
+	}
+	for (uint32 i = 0; i < kMaxImportedBuffers; i++) {
+		display_info::imported_memory& buffer = info.imported_buffers[i];
+		if (buffer.area != area || area < 0)
+			continue;
+
+		hide_overlays_of(info, buffer.physical, buffer.size);
+		delete_area(buffer.area);
+		buffer.area = -1;
 		return B_OK;
 	}
 	return B_BAD_VALUE;
@@ -1173,6 +1280,8 @@ overlays_init(display_info& info, void* settings)
 		info.overlay_buffers[i].area = -1;
 		info.overlay_buffers[i].backing = -1;
 	}
+	for (uint32 i = 0; i < kMaxImportedBuffers; i++)
+		info.imported_buffers[i].area = -1;
 	info.vblank_period = 16667;
 
 	const bool above = get_driver_boolean_parameter(settings,
@@ -1222,6 +1331,12 @@ overlays_uninit(display_info& info)
 		display_info::overlay_memory& buffer = info.overlay_buffers[i];
 		if (buffer.area >= 0)
 			delete_overlay_memory(buffer);
+	}
+	for (uint32 i = 0; i < kMaxImportedBuffers; i++) {
+		if (info.imported_buffers[i].area >= 0) {
+			delete_area(info.imported_buffers[i].area);
+			info.imported_buffers[i].area = -1;
+		}
 	}
 }
 
@@ -1560,6 +1675,22 @@ device_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 				return B_BAD_ADDRESS;
 			MutexLocker locker(sLock);
 			return free_overlay_buffer(info, area);
+		}
+
+		case BCM2711_DISPLAY_IMPORT_OVERLAY_BUFFER:
+		{
+			bcm2711_display_import_overlay_buffer request;
+			if (user_memcpy(&request, buffer, sizeof(request)) != B_OK)
+				return B_BAD_ADDRESS;
+			MutexLocker locker(sLock);
+			status_t status = import_overlay_buffer(info, request);
+			if (status != B_OK)
+				return status;
+			if (user_memcpy(buffer, &request, sizeof(request)) != B_OK) {
+				free_overlay_buffer(info, request.buffer);
+				return B_BAD_ADDRESS;
+			}
+			return B_OK;
 		}
 
 		case BCM2711_DISPLAY_SET_OVERLAY:

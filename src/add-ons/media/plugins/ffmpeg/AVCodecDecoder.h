@@ -15,6 +15,7 @@
 
 
 #include <MediaFormats.h>
+#include <OverlayVideoFrame.h>
 
 #include <vector>
 
@@ -25,6 +26,7 @@ extern "C" {
 	#include "buffersink.h"
 	#include "buffersrc.h"
 	#include "imgutils.h"
+	#include "opt.h"
 	#include "pixdesc.h"
 	#include "swresample.h"
 	#include "swscale.h"
@@ -113,6 +115,13 @@ private:
 			void		_UpdateMediaHeaderForVideoFrame();
 			status_t	_DeinterlaceVideoFrame();
 			status_t	_ColorConvertVideoFrame(uint8* destination);
+			const struct RpividSandFrame* _SandPicture(
+							const AVFrame* picture) const;
+			void		_SetRpividOutput(bool sand);
+			status_t	_SandToPlanar(const AVFrame* picture,
+							const struct RpividSandFrame* sand);
+			status_t	_PutOverlayVideoFrame(const AVFrame* picture,
+							uint8* destination);
 			void		_CopyToLimitedRange(const AVFrame* picture,
 							uint8** planes, const int* pitches, int width,
 							int height);
@@ -187,7 +196,17 @@ private:
 									// B_YUV420 output when the caller asks
 									// for it (FFMPEG_YUV420=0: never)
 			uint32				fOutputColorFlags;
-									// B_YCbCr_* of the B_YUV420 output
+									// B_YCbCr_* of the YCbCr output
+			AVFrame*			fShownFrames[B_OVERLAY_VIDEO_FRAME_HOLD];
+			uint32				fShownNext;
+			uint32				fShownSerial;
+			overlay_video_frame	fLastShownFrame;
+									// B_YUV420_SAND128(_10) output: the
+									// frames handed out as they are, held
+									// until B_OVERLAY_VIDEO_FRAME_HOLD more
+									// were
+			AVFrame*			fSandPlanarPicture;
+									// such a frame for another output
 			bool				fOutputLimitedRange;
 									// B_YUV420: a full range picture is
 									// converted to limited range

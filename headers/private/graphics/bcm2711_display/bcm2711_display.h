@@ -71,6 +71,9 @@ enum {
 		// struct bcm2711_display_overlay
 	BCM2711_DISPLAY_HIDE_OVERLAY,
 		// a uint32: the plane
+	BCM2711_DISPLAY_IMPORT_OVERLAY_BUFFER,
+		// struct bcm2711_display_import_overlay_buffer; freed with
+		// BCM2711_DISPLAY_FREE_OVERLAY_BUFFER of the area it returns
 };
 
 
@@ -113,6 +116,20 @@ struct bcm2711_display_overlay_buffer {
 };
 
 
+/*!	Memory of the caller's to scan out (e.g. a video decoder's picture that
+	app_server shows): an area of the calling team, physically contiguous
+	where the buffer lies, and below 1 GiB. The driver keeps the memory until
+	the buffer is freed (a clone of the area).
+*/
+struct bcm2711_display_import_overlay_buffer {
+	area_id			area;		// in: in the calling team
+	uint32			offset;		// in: of the buffer in the area
+	uint32			size;		// in
+	area_id			buffer;		// out: for FREE_OVERLAY_BUFFER
+	uint32			physical;	// out
+};
+
+
 #define BCM2711_DISPLAY_FIRST_OVERLAY_PLANE	1
 #define BCM2711_DISPLAY_OVERLAY_PLANES		6
 
@@ -123,9 +140,12 @@ struct bcm2711_display_overlay_buffer {
 	// (the display's scaler has no packed 4:2:2 format: the firmware's
 	// YUV422YUYV, 45, shows nothing)
 #define BCM2711_DISPLAY_IMAGE_YUV_UV		19
-	// SAND128 NV12 (the HEVC decoder's output; experimental): columns of 128
-	// bytes, bytes_per_row is the column height in lines, the chroma at
-	// chroma_offset
+	// SAND128 NV12 (the HEVC decoder's output): columns of 128 bytes,
+	// bytes_per_row is the column height in lines, the chroma at
+	// chroma_offset (in the same columns: one column height for both)
+#define BCM2711_DISPLAY_IMAGE_YUV10COL		59
+	// the same with 10-bit samples, three in each 32-bit word (96 per
+	// column)
 
 // the firmware's color encodings of YUV images (VC_IMAGE_YUVINFO_CSC_*);
 // none (0) and the ones it does not know are BT.709 limited range

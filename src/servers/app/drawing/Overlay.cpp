@@ -59,12 +59,14 @@ private:
 
 
 Overlay::Overlay(HWInterface& interface, ServerBitmap* bitmap,
-		overlay_token token)
+		overlay_token token, area_id importArea, size_t importOffset)
 	:
 	fHWInterface(interface),
 	fOverlayBuffer(NULL),
 	fClientData(NULL),
-	fOverlayToken(token)
+	fOverlayToken(token),
+	fImportArea(importArea),
+	fImportOffset(importOffset)
 {
 	fSemaphore = create_sem(1, "overlay lock");
 	fColor = (rgb_color){ 0, 80, 0, 0 };
@@ -120,7 +122,8 @@ Overlay::Resume(ServerBitmap* bitmap)
 	if (status < B_OK)
 		return status;
 
-	fClientData->buffer = (uint8*)fOverlayBuffer->buffer;
+	if (fClientData != NULL)
+		fClientData->buffer = (uint8*)fOverlayBuffer->buffer;
 	return B_OK;
 }
 
@@ -136,7 +139,8 @@ Overlay::Suspend(ServerBitmap* bitmap, bool needTemporary)
 	TRACE("overlay: suspend %p (lock status %ld)\n", this, locker.LockStatus());
 
 	_FreeBuffer();
-	fClientData->buffer = NULL;
+	if (fClientData != NULL)
+		fClientData->buffer = NULL;
 
 	return B_OK;
 }
@@ -153,8 +157,14 @@ Overlay::_FreeBuffer()
 status_t
 Overlay::_AllocateBuffer(ServerBitmap* bitmap)
 {
-	fOverlayBuffer = fHWInterface.AllocateOverlayBuffer(bitmap->Width(),
-		bitmap->Height(), bitmap->ColorSpace());
+	if (fImportArea >= 0) {
+		fOverlayBuffer = fHWInterface.ImportOverlayBuffer(bitmap->Width(),
+			bitmap->Height(), bitmap->ColorSpace(), bitmap->BytesPerRow(),
+			fImportArea, fImportOffset);
+	} else {
+		fOverlayBuffer = fHWInterface.AllocateOverlayBuffer(bitmap->Width(),
+			bitmap->Height(), bitmap->ColorSpace());
+	}
 	if (fOverlayBuffer == NULL)
 		return B_NO_MEMORY;
 

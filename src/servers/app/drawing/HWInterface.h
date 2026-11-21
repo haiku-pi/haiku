@@ -132,6 +132,10 @@ public:
 	virtual const overlay_buffer* AllocateOverlayBuffer(int32 width,
 									int32 height, color_space space);
 	virtual void				FreeOverlayBuffer(const overlay_buffer* buffer);
+	virtual const overlay_buffer* ImportOverlayBuffer(int32 width,
+									int32 height, color_space space,
+									int32 bytesPerRow, area_id area,
+									size_t offset);
 
 	virtual status_t			ConfigureOverlay(Overlay* overlay);
 	virtual void				HideOverlay(Overlay* overlay);
