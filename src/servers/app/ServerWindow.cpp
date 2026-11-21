@@ -2043,6 +2043,11 @@ fDesktop->LockSingleWindow();
 				if (bitmapToken == -1 || bitmap != NULL) {
 					bool wasOverlay = fCurrentView->ViewBitmap() != NULL
 						&& fCurrentView->ViewBitmap()->Overlay() != NULL;
+					overlay_window previousWindow = {};
+					if (wasOverlay) {
+						previousWindow = *fCurrentView->ViewBitmap()->Overlay()
+							->OverlayWindow();
+					}
 
 					// (the options apply to the configuration that follows)
 					if (bitmap != NULL && bitmap->Overlay() != NULL)
@@ -2051,14 +2056,28 @@ fDesktop->LockSingleWindow();
 					status = fCurrentView->SetViewBitmap(bitmap, srcRect,
 						dstRect, resizingMode, options);
 
+					// An overlay that moved shows only where its key color
+					// is written from now on (HWInterface::_ShowOverlayKey()):
+					// the view draws it again.
+					bool moved = false;
+					if (wasOverlay && bitmap != NULL
+						&& bitmap->Overlay() != NULL) {
+						const overlay_window* window
+							= bitmap->Overlay()->OverlayWindow();
+						moved = window->h_start != previousWindow.h_start
+							|| window->v_start != previousWindow.v_start
+							|| window->width != previousWindow.width
+							|| window->height != previousWindow.height;
+					}
+
 					// TODO: if we revert the view color overlay handling
 					//	in View::Draw() to the BeOS version, we never
 					//	need to invalidate the view for overlays.
 
 					// Invalidate view - but only if this is a non-overlay
-					// switch
+					// switch, or the overlay moved
 					if (bitmap == NULL || bitmap->Overlay() == NULL
-						|| !wasOverlay) {
+						|| !wasOverlay || moved) {
 						BRegion dirty((BRect)fCurrentView->Bounds());
 						fWindow->InvalidateView(fCurrentView, dirty);
 					}
