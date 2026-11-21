@@ -364,6 +364,8 @@ VideoView::SetVideoFrame(const BRect& frame)
 
 	fSubtitleBitmap->SetVideoBounds(fVideoFrame.OffsetToCopy(B_ORIGIN));
 	_LayoutSubtitle();
+
+	_MoveOverlay();
 }
 
 
@@ -474,6 +476,34 @@ VideoView::_SetOverlayMode(bool overlayMode)
 {
 	fOverlayMode = overlayMode;
 	fSubtitleBitmap->SetOverlayMode(overlayMode);
+}
+
+
+/*!	Puts the overlay into the new fVideoFrame. A playing video does it with
+	its next frame (SetBitmap()), but no frame comes while the video is
+	paused or has ended: the overlay would stay where it was, while Draw()
+	fills the new frame with the key color.
+*/
+void
+VideoView::_MoveOverlay()
+{
+	if (!LockBitmap())
+		return;
+
+	const BBitmap* bitmap = GetBitmap();
+	if (fOverlayMode && bitmap != NULL
+		&& (bitmap->Flags() & B_BITMAP_WILL_OVERLAY) != 0) {
+		rgb_color key;
+		SetViewOverlay(bitmap, bitmap->Bounds(), fVideoFrame, &key,
+			B_FOLLOW_ALL, B_OVERLAY_FILTER_HORIZONTAL
+				| B_OVERLAY_FILTER_VERTICAL | B_OVERLAY_TRANSFER_CHANNEL
+				| atomic_get(&fOverlayColorOptions));
+		// the key color in the whole new frame, also when the view
+		// itself was not resized
+		Invalidate(fVideoFrame);
+	}
+
+	UnlockBitmap();
 }
 
 

@@ -61,6 +61,7 @@ private:
 			void				_DrawSubtitle();
 			void				_AdoptGlobalSettings();
 			void				_SetOverlayMode(bool overlayMode);
+			void				_MoveOverlay();
 			void				_LayoutSubtitle();
 
 private:
