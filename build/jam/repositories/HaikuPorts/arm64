@@ -141,8 +141,8 @@ RemotePackageRepository HaikuPorts
 	brotli_devel-1.2.0-1
 	dav1d-1.5.4-1
 	dav1d_devel-1.5.4-1
-	haikuwebkit-1.10.0-1
-	haikuwebkit_devel-1.10.0-1
+	haikuwebkit-1.10.0-2
+	haikuwebkit_devel-1.10.0-2
 	lcms-2.19.1-1
 	lcms_devel-2.19.1-1
 	libavif1.0-1.4.2-1
