@@ -647,7 +647,9 @@ Controller::Play()
 
 	BAutolock _(this);
 
-	StartPlaying();
+	// Without a file that ever opened, the playback manager has no state yet
+	if (InitCheck() == B_OK)
+		StartPlaying();
 	fAutoplay = true;
 }
 
@@ -848,6 +850,9 @@ int64
 Controller::SetFramePosition(int64 value)
 {
 	BAutolock _(this);
+
+	if (InitCheck() != B_OK)
+		return 0;
 
 	fPendingSeekRequests++;
 	fRequestedSeekFrame = max_c(0, min_c(_FrameDuration(), value));
