@@ -300,25 +300,32 @@ vchiq_haiku_buffer_lock(void* address, size_t size, bool deviceWrites,
 		return B_OK;
 	}
 
-	if (IS_USER_ADDRESS(address)) {
-		// one area, so that it can be cloned (a malloc()ed buffer is)
+	if (IS_USER_ADDRESS(address))
 		buffer->team = team_get_current_team_id();
-		buffer->area = area_for(address);
-		area_info info;
-		if (buffer->area < 0 || get_area_info(buffer->area, &info) != B_OK
-			|| (addr_t)address + size > (addr_t)info.address + info.size) {
-			ERROR("bulk buffer %p (%zu bytes) is not in one area\n", address,
-				size);
-			free(buffer);
-			return B_BAD_VALUE;
-		}
-	}
 
 	status_t status = lock_memory_etc(buffer->team, address, size,
 		lock_flags(buffer));
 	if (status != B_OK) {
 		free(buffer);
 		return status;
+	}
+
+	if (buffer->team != B_SYSTEM_TEAM) {
+		// One area, so that it can be cloned (a malloc()ed buffer is). Only
+		// now that the buffer is locked: until then another thread's munmap()
+		// (a free()) could split the area between area_for() and the check,
+		// while a locked buffer stays in the area found here.
+		buffer->area = area_for(address);
+		area_info info;
+		if (buffer->area < 0 || get_area_info(buffer->area, &info) != B_OK
+			|| (addr_t)address < (addr_t)info.address
+			|| (addr_t)address + size > (addr_t)info.address + info.size) {
+			ERROR("bulk buffer %p (%zu bytes) is not in one area\n", address,
+				size);
+			unlock_memory_etc(buffer->team, address, size, lock_flags(buffer));
+			free(buffer);
+			return B_BAD_VALUE;
+		}
 	}
 
 	uint32 count = maxRuns;
