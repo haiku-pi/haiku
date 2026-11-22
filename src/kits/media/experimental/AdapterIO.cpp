@@ -465,6 +465,13 @@ BAdapterIO::_EvaluateWait(off_t pos, off_t size)
 	if (err != B_OK && err != B_WOULD_BLOCK)
 		return err;
 
+	// A read across the end of a stream of known size gets what is left:
+	// waiting for all of it waited for data that never comes until the
+	// timeout, and then failed the read. The end of a file was lost that way,
+	// and an MP4 file with its index at the end did not open.
+	if (totalSize > 0 && !fBuffer->IsMutable() && pos + size > totalSize)
+		size = totalSize - pos;
+
 	TRACE("BAdapterIO::_EvaluateWait: waiting for data\n");
 
 	return fBuffer->WaitForData(pos, size);
