@@ -107,6 +107,7 @@ private:
 									uint32 flags);
 			BString				_MergePath(const BString& relative) const;
 			void				_SetPathUnsafe(const BString& path);
+			void				_UpdateStrings();
 
 	static	BString				_DoUrlEncodeChunk(const BString& chunk,
 									bool strict, bool directory = false);
@@ -131,9 +132,9 @@ private:
 			BString				_UrlMimeType() const;
 
 private:
-	mutable	BString				fUrlString;
-	mutable	BString				fAuthority;
-	mutable	BString				fUserInfo;
+			BString				fUrlString;
+			BString				fAuthority;
+			BString				fUserInfo;
 
 			BString				fProtocol;
 			BString				fUser;
@@ -143,10 +144,6 @@ private:
 			BString				fPath;
 			BString				fRequest;
 			BString				fFragment;
-
-	mutable	bool				fUrlStringValid : 1;
-	mutable	bool				fAuthorityValid : 1;
-	mutable bool				fUserInfoValid : 1;
 
 			bool				fHasProtocol : 1;
 			bool				fHasUserName : 1;

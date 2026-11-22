@@ -87,9 +87,6 @@ BUrl::BUrl(const BUrl& other)
 	fPath(other.fPath),
 	fRequest(other.fRequest),
 	fFragment(other.fFragment),
-	fUrlStringValid(other.fUrlStringValid),
-	fAuthorityValid(other.fAuthorityValid),
-	fUserInfoValid(other.fUserInfoValid),
 	fHasProtocol(other.fHasProtocol),
 	fHasUserName(other.fHasUserName),
 	fHasPassword(other.fHasPassword),
@@ -99,15 +96,9 @@ BUrl::BUrl(const BUrl& other)
 	fHasRequest(other.fHasRequest),
 	fHasFragment(other.fHasFragment)
 {
-	if (fUrlStringValid)
-		fUrlString = other.fUrlString;
-
-	if (fAuthorityValid)
-		fAuthority = other.fAuthority;
-
-	if (fUserInfoValid)
-		fUserInfo = other.fUserInfo;
-
+	fUrlString = other.fUrlString;
+	fAuthority = other.fAuthority;
+	fUserInfo = other.fUserInfo;
 }
 
 
@@ -121,12 +112,13 @@ BUrl::BUrl(const BUrl& base, const BString& location)
 	fPort(0),
 	fPath(),
 	fRequest(),
-	fAuthorityValid(false),
-	fUserInfoValid(false),
+	fHasProtocol(false),
 	fHasUserName(false),
 	fHasPassword(false),
 	fHasHost(false),
 	fHasPort(false),
+	fHasPath(false),
+	fHasRequest(false),
 	fHasFragment(false)
 {
 	// This implements the algorithm in RFC3986, Section 5.2.
@@ -235,7 +227,7 @@ BUrl::SetProtocol(const BString& protocol)
 {
 	fProtocol = protocol;
 	fHasProtocol = !fProtocol.IsEmpty();
-	fUrlStringValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -245,9 +237,7 @@ BUrl::SetUserName(const BString& user)
 {
 	fUser = user;
 	fHasUserName = !fUser.IsEmpty();
-	fUrlStringValid = false;
-	fAuthorityValid = false;
-	fUserInfoValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -257,9 +247,7 @@ BUrl::SetPassword(const BString& password)
 {
 	fPassword = password;
 	fHasPassword = !fPassword.IsEmpty();
-	fUrlStringValid = false;
-	fAuthorityValid = false;
-	fUserInfoValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -269,8 +257,7 @@ BUrl::SetHost(const BString& host)
 {
 	fHost = host;
 	fHasHost = !fHost.IsEmpty();
-	fUrlStringValid = false;
-	fAuthorityValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -280,8 +267,7 @@ BUrl::SetPort(int port)
 {
 	fPort = port;
 	fHasPort = (port != 0);
-	fUrlStringValid = false;
-	fAuthorityValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -375,7 +361,7 @@ BUrl::SetRequest(const BString& request)
 {
 	fRequest = request;
 	fHasRequest = !fRequest.IsEmpty();
-	fUrlStringValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -385,7 +371,7 @@ BUrl::SetFragment(const BString& fragment)
 {
 	fFragment = fragment;
 	fHasFragment = true;
-	fUrlStringValid = false;
+	_UpdateStrings();
 	return *this;
 }
 
@@ -396,28 +382,6 @@ BUrl::SetFragment(const BString& fragment)
 const BString&
 BUrl::UrlString() const
 {
-	if (!fUrlStringValid) {
-		fUrlString.Truncate(0);
-
-		if (HasProtocol()) {
-			fUrlString << fProtocol << ':';
-		}
-
-		if (HasAuthority()) {
-			fUrlString << "//";
-			fUrlString << Authority();
-		}
-		fUrlString << Path();
-
-		if (HasRequest())
-			fUrlString << '?' << fRequest;
-
-		if (HasFragment())
-			fUrlString << '#' << fFragment;
-
-		fUrlStringValid = true;
-	}
-
 	return fUrlString;
 }
 
@@ -446,15 +410,6 @@ BUrl::Password() const
 const BString&
 BUrl::UserInfo() const
 {
-	if (!fUserInfoValid) {
-		fUserInfo = fUser;
-
-		if (HasPassword())
-			fUserInfo << ':' << fPassword;
-
-		fUserInfoValid = true;
-	}
-
 	return fUserInfo;
 }
 
@@ -476,18 +431,6 @@ BUrl::Port() const
 const BString&
 BUrl::Authority() const
 {
-	if (!fAuthorityValid) {
-		fAuthority.Truncate(0);
-
-		if (HasUserInfo())
-			fAuthority << UserInfo() << '@';
-		fAuthority << Host();
-
-		if (HasPort())
-			fAuthority << ':' << fPort;
-
-		fAuthorityValid = true;
-	}
 	return fAuthority;
 }
 
@@ -633,6 +576,7 @@ BUrl::IDNAToAscii()
 		return B_ERROR;
 
 	fHost = result;
+	_UpdateStrings();
 	return B_OK;
 }
 #endif
@@ -657,6 +601,7 @@ BUrl::IDNAToUnicode()
 		return B_ERROR;
 
 	fHost = result;
+	_UpdateStrings();
 	return B_OK;
 }
 #endif
@@ -785,9 +730,6 @@ BUrl::Instantiate(BMessage* archive)
 bool
 BUrl::operator==(BUrl& other) const
 {
-	UrlString();
-	other.UrlString();
-
 	return fUrlString == other.fUrlString;
 }
 
@@ -805,17 +747,9 @@ BUrl::operator!=(BUrl& other) const
 const BUrl&
 BUrl::operator=(const BUrl& other)
 {
-	fUrlStringValid = other.fUrlStringValid;
-	if (fUrlStringValid)
-		fUrlString = other.fUrlString;
-
-	fAuthorityValid = other.fAuthorityValid;
-	if (fAuthorityValid)
-		fAuthority = other.fAuthority;
-
-	fUserInfoValid = other.fUserInfoValid;
-	if (fUserInfoValid)
-		fUserInfo = other.fUserInfo;
+	fUrlString = other.fUrlString;
+	fAuthority = other.fAuthority;
+	fUserInfo = other.fUserInfo;
 
 	fProtocol = other.fProtocol;
 	fUser = other.fUser;
@@ -885,10 +819,7 @@ BUrl::_ResetFields()
 	fRequest.Truncate(0);
 	fFragment.Truncate(0);
 
-	// Force re-generation of these fields
-	fUrlStringValid = false;
-	fUserInfoValid = false;
-	fAuthorityValid = false;
+	_UpdateStrings();
 }
 
 
@@ -971,8 +902,12 @@ char_offset_until_fn_false(const char* url, int32 len, int32 offset,
  * This function takes a URL in string-form and parses the components of the URL out.
  */
 status_t
-BUrl::_ExplodeUrlString(const BString& url, uint32 flags)
+BUrl::_ExplodeUrlString(const BString& urlString, uint32 flags)
 {
+	// Work on a copy: the argument may be our own UrlString(), which the
+	// modifiers below rebuild.
+	const BString url(urlString);
+
 	_ResetFields();
 
 	// RFC3986, Appendix C; the URL should not contain whitespace or delimiters
@@ -1107,6 +1042,7 @@ BUrl::_ExplodeUrlString(const BString& url, uint32 flags)
 	if (forceHasHost)
 		fHasHost = true;
 
+	_UpdateStrings();
 	return B_OK;
 }
 
@@ -1141,7 +1077,38 @@ BUrl::_SetPathUnsafe(const BString& path)
 {
 	fPath = path;
 	fHasPath = true; // RFC says an empty path is still a path
-	fUrlStringValid = false;
+	_UpdateStrings();
+}
+
+
+/*!	Rebuilds the user info, the authority and the URL string from the fields.
+	Every modifier calls it, so the const accessors only read: a BUrl may be
+	read from several threads at once, like a BString.
+*/
+void
+BUrl::_UpdateStrings()
+{
+	fUserInfo = fUser;
+	if (HasPassword())
+		fUserInfo << ':' << fPassword;
+
+	fAuthority.Truncate(0);
+	if (HasUserInfo())
+		fAuthority << fUserInfo << '@';
+	fAuthority << fHost;
+	if (HasPort())
+		fAuthority << ':' << fPort;
+
+	fUrlString.Truncate(0);
+	if (HasProtocol())
+		fUrlString << fProtocol << ':';
+	if (HasAuthority())
+		fUrlString << "//" << fAuthority;
+	fUrlString << fPath;
+	if (HasRequest())
+		fUrlString << '?' << fRequest;
+	if (HasFragment())
+		fUrlString << '#' << fFragment;
 }
 
 
@@ -1154,9 +1121,11 @@ enum authority_parse_state {
 };
 
 void
-BUrl::SetAuthority(const BString& authority)
+BUrl::SetAuthority(const BString& authorityString)
 {
-	fAuthority = authority;
+	// Work on a copy: the argument may be our own Authority(), which the
+	// modifiers below rebuild.
+	const BString authority(authorityString);
 
 	fUser.Truncate(0);
 	fPassword.Truncate(0);
@@ -1166,7 +1135,7 @@ BUrl::SetAuthority(const BString& authority)
 	fHasUserName = false;
 	fHasPassword = false;
 
-	bool hasUsernamePassword = B_ERROR != fAuthority.FindFirst('@');
+	bool hasUsernamePassword = B_ERROR != authority.FindFirst('@');
 	authority_parse_state state = AUTHORITY_USERNAME;
 	int32 offset = 0;
 	int32 length = authority.Length();
@@ -1275,6 +1244,7 @@ BUrl::SetAuthority(const BString& authority)
 	// TODO however, there is no way to unset the authority once it is set...
 	// We may want to take a const char* parameter and allow NULL.
 	fHasHost = true;
+	_UpdateStrings();
 }
 
 
@@ -1494,9 +1464,7 @@ BUrl::UrlEncode(bool strict)
 	fFragment = _DoUrlEncodeChunk(fFragment, strict, false);
 	fPath = _DoUrlEncodeChunk(fPath, strict, true);
 
-	fUrlStringValid = false;
-	fAuthorityValid = false;
-	fUserInfoValid = false;
+	_UpdateStrings();
 }
 
 
@@ -1509,7 +1477,5 @@ BUrl::UrlDecode(bool strict)
 	fFragment = _DoUrlDecodeChunk(fFragment, strict);
 	fPath = _DoUrlDecodeChunk(fPath, strict);
 
-	fUrlStringValid = false;
-	fAuthorityValid = false;
-	fUserInfoValid = false;
+	_UpdateStrings();
 }
