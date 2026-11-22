@@ -759,7 +759,8 @@ intersect_area(VMArea* area, addr_t& address, addr_t& size, addr_t& offset)
 	The address space must be write locked.
 	The caller must ensure that no part of the given range is wired, nor, for
 	a cut out of the middle, the part of the area above it, which is unmapped
-	as well (size_to_unmap()).
+	as well (size_to_unmap()), by lock_memory_etc()
+	(wait_if_address_range_to_unmap_is_wired()).
 */
 static status_t
 cut_area(VMAddressSpace* addressSpace, VMArea* area, addr_t address,
@@ -1419,17 +1420,18 @@ wait_if_area_is_wired(VMArea* area, LockerType1* locker1, LockerType2* locker2)
 		be \c NULL).
 	\param locker2 An object to be unlocked when before starting to wait (may
 		be \c NULL).
+	\param flags As for VMArea::AddWaiterIfWired().
 	\return \c true, if the function had to wait, \c false otherwise.
 */
 template<typename LockerType1, typename LockerType2>
 static inline bool
 wait_if_area_range_is_wired(VMArea* area, addr_t base, size_t size,
-	LockerType1* locker1, LockerType2* locker2)
+	LockerType1* locker1, LockerType2* locker2, uint32 flags = 0)
 {
 	area->cache->AssertLocked();
 
 	VMAreaUnwiredWaiter waiter;
-	if (!area->AddWaiterIfWired(&waiter, base, size))
+	if (!area->AddWaiterIfWired(&waiter, base, size, flags))
 		return false;
 
 	// unlock everything and wait
@@ -1488,8 +1490,14 @@ size_to_unmap(VMArea* area, addr_t base, size_t size)
 
 
 /*!	Like wait_if_address_range_is_wired(), for a range that is about to be
-	unmapped (vm_unmap_address_range()): what else cut_area() unmaps must not
-	be wired either (a device may be transferring to or from it).
+	unmapped (vm_unmap_address_range()): the part above a cut out of the middle
+	of an area, which cut_area() unmaps as well, must not be wired by
+	lock_memory_etc() either. That memory is looked up by its address again
+	(unlock_memory_etc(), get_memory_map_etc()) while a device may be
+	transferring to or from it. Ranges of vm_wire_page() there need no wait:
+	the page stays wired in its cache and vm_unwire_page() works from the page
+	it recorded, so losing the mapping does not hurt it - and such a range can
+	last indefinitely (a thread waiting on a user mutex shared between teams).
 */
 template<typename LockerType>
 static inline bool
@@ -1499,8 +1507,15 @@ wait_if_address_range_to_unmap_is_wired(VMAddressSpace* addressSpace,
 	VMAddressSpace::AreaRangeIterator it = addressSpace->GetAreaRangeIterator(base, size);
 	while (VMArea* area = it.Next()) {
 		AreaCacheLocker cacheLocker(area);
-		if (wait_if_area_range_is_wired(area, base,
-				size_to_unmap(area, base, size), locker, &cacheLocker)) {
+		if (wait_if_area_range_is_wired(area, base, size, locker,
+				&cacheLocker)) {
+			return true;
+		}
+
+		const size_t unmapSize = size_to_unmap(area, base, size);
+		if (unmapSize > size && wait_if_area_range_is_wired(area, base + size,
+				unmapSize - size, locker, &cacheLocker,
+				VMArea::IGNORE_EXPLICIT_WIRED_RANGES)) {
 			return true;
 		}
 	}
@@ -2583,8 +2598,12 @@ vm_clone_area_etc(team_id team, const char* name, void** address,
 			if (userTeam && (area->protection & B_KERNEL_AREA) != 0)
 				return B_NOT_ALLOWED;
 			AreaCacheLocker areaCacheLocker(area);
-			if (area->IsWired(base, size_to_unmap(area, base, size)))
+			const size_t unmapSize = size_to_unmap(area, base, size);
+			if (area->IsWired(base, size)
+				|| (unmapSize > size && area->IsWired(base + size,
+					unmapSize - size, VMArea::IGNORE_EXPLICIT_WIRED_RANGES))) {
 				return B_BUSY;
+			}
 		}
 	}
 
