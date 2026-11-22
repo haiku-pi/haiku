@@ -60,14 +60,18 @@ VMArea::Init(const char* name, uint32 allocationFlags)
 
 
 /*!	Returns whether any part of the given address range intersects with a wired
-	range of this area.
+	range of this area (\a flags: \c IGNORE_EXPLICIT_WIRED_RANGES, as for
+	AddWaiterIfWired()).
 	The area's top cache must be locked.
 */
 bool
-VMArea::IsWired(addr_t base, size_t size) const
+VMArea::IsWired(addr_t base, size_t size, uint32 flags) const
 {
 	for (VMAreaWiredRangeList::ConstIterator it = fWiredRanges.GetIterator();
 			VMAreaWiredRange* range = it.Next();) {
+		if ((flags & IGNORE_EXPLICIT_WIRED_RANGES) != 0 && !range->implicit)
+			continue;
+
 		if (range->IntersectsWith(base, size))
 			return true;
 	}
@@ -170,6 +174,7 @@ VMArea::AddWaiterIfWired(VMAreaUnwiredWaiter* waiter)
 	\param size The size of the address range to check.
 	\param flags
 		- \c IGNORE_WRITE_WIRED_RANGES: Ignore ranges wired for writing.
+		- \c IGNORE_EXPLICIT_WIRED_RANGES: Ignore ranges of vm_wire_page().
 	\return \c true, if the waiter has been added, \c false otherwise.
 */
 bool
@@ -179,6 +184,8 @@ VMArea::AddWaiterIfWired(VMAreaUnwiredWaiter* waiter, addr_t base, size_t size,
 	for (VMAreaWiredRangeList::ConstIterator it = fWiredRanges.GetIterator();
 			VMAreaWiredRange* range = it.Next();) {
 		if ((flags & IGNORE_WRITE_WIRED_RANGES) != 0 && range->writable)
+			continue;
+		if ((flags & IGNORE_EXPLICIT_WIRED_RANGES) != 0 && !range->implicit)
 			continue;
 
 		if (range->IntersectsWith(base, size)) {

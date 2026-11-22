@@ -99,6 +99,8 @@ public:
 		// AddWaiterIfWired() flags
 		IGNORE_WRITE_WIRED_RANGES	= 0x01,	// ignore existing ranges that
 											// wire for writing
+		IGNORE_EXPLICIT_WIRED_RANGES = 0x02	// ignore ranges of
+											// vm_wire_page() (not implicit)
 	};
 
 public:
@@ -139,7 +141,8 @@ public:
 
 			bool				IsWired() const
 									{ return !fWiredRanges.IsEmpty(); }
-			bool				IsWired(addr_t base, size_t size) const;
+			bool				IsWired(addr_t base, size_t size,
+									uint32 flags = 0) const;
 
 			void				Wire(VMAreaWiredRange* range);
 			void				Unwire(VMAreaWiredRange* range);
