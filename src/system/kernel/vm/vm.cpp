@@ -757,7 +757,9 @@ intersect_area(VMArea* area, addr_t& address, addr_t& size, addr_t& offset)
 	area, it is split in two; in this case the second area is returned via
 	\a _secondArea (the variable is left untouched in the other cases).
 	The address space must be write locked.
-	The caller must ensure that no part of the given range is wired.
+	The caller must ensure that no part of the given range is wired, nor, for
+	a cut out of the middle, the part of the area above it, which is unmapped
+	as well (size_to_unmap()).
 */
 static status_t
 cut_area(VMAddressSpace* addressSpace, VMArea* area, addr_t address,
@@ -1090,7 +1092,8 @@ cut_area(VMAddressSpace* addressSpace, VMArea* area, addr_t address,
 
 /*!	Deletes or cuts all areas in the given address range.
 	The address space must be write-locked.
-	The caller must ensure that no part of the given range is wired.
+	The caller must ensure that nothing this unmaps is wired
+	(wait_if_address_range_to_unmap_is_wired()).
 */
 status_t
 vm_unmap_address_range(VMAddressSpace* addressSpace, addr_t address, addr_t size,
@@ -1468,6 +1471,44 @@ wait_if_address_range_is_wired(VMAddressSpace* addressSpace, addr_t base,
 }
 
 
+/*!	How much of \a area unmapping the range from \a base, \a size bytes,
+	unmaps from \a base on: a cut out of the middle of an area also unmaps the
+	area's part above the cut, which cut_area() moves to a new area that maps
+	its pages again only when they are touched.
+*/
+static inline size_t
+size_to_unmap(VMArea* area, addr_t base, size_t size)
+{
+	const addr_t areaLast = area->Base() + (area->Size() - 1);
+	if (base > area->Base() && base + (size - 1) < areaLast)
+		return areaLast - base + 1;
+
+	return size;
+}
+
+
+/*!	Like wait_if_address_range_is_wired(), for a range that is about to be
+	unmapped (vm_unmap_address_range()): what else cut_area() unmaps must not
+	be wired either (a device may be transferring to or from it).
+*/
+template<typename LockerType>
+static inline bool
+wait_if_address_range_to_unmap_is_wired(VMAddressSpace* addressSpace,
+	addr_t base, size_t size, LockerType* locker)
+{
+	VMAddressSpace::AreaRangeIterator it = addressSpace->GetAreaRangeIterator(base, size);
+	while (VMArea* area = it.Next()) {
+		AreaCacheLocker cacheLocker(area);
+		if (wait_if_area_range_is_wired(area, base,
+				size_to_unmap(area, base, size), locker, &cacheLocker)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
 status_t
 vm_block_address_range(const char* name, void* address, addr_t size)
 {
@@ -1748,7 +1789,7 @@ vm_create_anonymous_area(team_id team, const char *name, addr_t size,
 	} while (virtualAddressRestrictions->address_specification
 			== B_EXACT_ADDRESS
 		&& (flags & CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0
-		&& wait_if_address_range_is_wired(addressSpace,
+		&& wait_if_address_range_to_unmap_is_wired(addressSpace,
 			(addr_t)virtualAddressRestrictions->address, size, &locker));
 
 	// create an anonymous cache
@@ -2162,7 +2203,7 @@ vm_create_null_area(team_id team, const char* name, void** address,
 			return B_BAD_TEAM_ID;
 	} while (addressSpec == B_EXACT_ADDRESS
 		&& (flags & CREATE_AREA_UNMAP_ADDRESS_RANGE) != 0
-		&& wait_if_address_range_is_wired(locker.AddressSpace(),
+		&& wait_if_address_range_to_unmap_is_wired(locker.AddressSpace(),
 			(addr_t)*address, size, &locker));
 
 	// create a null cache
@@ -2358,7 +2399,7 @@ _vm_map_file(team_id team, const char* name, void** _address,
 		if (locker.SetTo(team) != B_OK)
 			return B_BAD_TEAM_ID;
 	} while (unmapAddressRange
-		&& wait_if_address_range_is_wired(locker.AddressSpace(),
+		&& wait_if_address_range_to_unmap_is_wired(locker.AddressSpace(),
 			(addr_t)*_address, size, &locker));
 
 	// TODO: this only works for file systems that use the file cache
@@ -2542,7 +2583,7 @@ vm_clone_area_etc(team_id team, const char* name, void** address,
 			if (userTeam && (area->protection & B_KERNEL_AREA) != 0)
 				return B_NOT_ALLOWED;
 			AreaCacheLocker areaCacheLocker(area);
-			if (area->IsWired(base, size))
+			if (area->IsWired(base, size_to_unmap(area, base, size)))
 				return B_BUSY;
 		}
 	}
@@ -6274,8 +6315,8 @@ _user_unmap_memory(void* _address, size_t size)
 		status_t status = locker.SetTo(team_get_current_team_id());
 		if (status != B_OK)
 			return status;
-	} while (wait_if_address_range_is_wired(locker.AddressSpace(), address,
-			size, &locker));
+	} while (wait_if_address_range_to_unmap_is_wired(locker.AddressSpace(),
+			address, size, &locker));
 
 	// unmap
 	return vm_unmap_address_range(locker.AddressSpace(), address, size, false);
