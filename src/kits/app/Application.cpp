@@ -430,6 +430,18 @@ BApplication::_InitData(const char* signature, bool initGUI, status_t* _error)
 			preRegistered = false;
 		}
 	}
+	port_info portInfo;
+	if (preRegistered && appInfo.port >= 0
+		&& (get_port_info(appInfo.port, &portInfo) != B_OK
+			|| portInfo.team != team)) {
+		// The roster created a looper port for this team when it launched
+		// it, but the program it launched has since exec()ed us (a launcher,
+		// a shell script), and the kernel deleted that port, together with
+		// the messages queued in it. The registration describes that program:
+		// replace it with our own.
+		BRoster::Private().RemoveApp(team);
+		preRegistered = false;
+	}
 	if (preRegistered) {
 		// we are pre-registered => the app info has been filled in
 		// Check whether we need to replace the looper port with a port
